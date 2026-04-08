@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -204,10 +204,7 @@ function calcCharges(trade, chargesConfig) {
 }
 
 const INITIAL_STATE = {
-  clients: [
-    { id: "C001", name: "Rahul Shah", email: "rahul@example.com", phone: "9876543210", password: "rahul123" },
-    { id: "C002", name: "Priya Mehta", email: "priya@example.com", phone: "9123456789", password: "priya123" },
-  ],
+  clients: [],
   trades: [],
   ledger: [],
   tickets: [],
@@ -334,13 +331,13 @@ export default function BackOffice() {
     setDbError(null);
     try {
       const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy] = await Promise.all([
-        sb.select("clients", "?order=created_at.asc"),
-        sb.select("trades", "?order=date.asc,time.asc"),
-        sb.select("ledger", "?order=date.asc"),
-        sb.select("tickets", "?order=date.desc"),
-        sb.select("interest", "?order=year_month.asc"),
-        sb.select("charges_history", "?order=effective_from.asc"),
-        sb.select("bhavcopy", "?order=bhav_date.desc&limit=50000"),
+        sb.select("clients",         "?order=created_at.asc"),
+        sb.select("trades",          "?order=date.asc,time.asc"),
+        sb.select("ledger",          "?order=date.asc"),
+        sb.select("tickets",         "?order=date.desc"),
+        sb.select("interest",        "?order=created_at.asc"),
+        sb.select("charges_history", "?order=created_at.asc"),
+        sb.select("bhavcopy",        `?order=created_at.desc&limit=50000`),
       ]);
 
       setState(s => ({
