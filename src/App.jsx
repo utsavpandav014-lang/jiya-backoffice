@@ -243,7 +243,7 @@ const Icon = ({ name, size = 18 }) => {
 // ─── Supabase Configuration ────────────────────────────────────────────────────
 // Replace these two values with your own from supabase.com → Project Settings → API
 const SUPABASE_URL = "https://jwfucitnaqkuyzizmuve.supabase.co";       // e.g. https://abcxyz.supabase.co
-const SUPABASE_ANON_KEY = "sb_publishable_e35lB-KhLTSH4x0EiuopLw_yf0c-r4e"; // long string starting with eyJ...
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
 
 // Lightweight Supabase REST client (no npm needed)
 const sb = {
