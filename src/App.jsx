@@ -242,8 +242,8 @@ const Icon = ({ name, size = 18 }) => {
 
 // ─── Supabase Configuration ────────────────────────────────────────────────────
 // Replace these two values with your own from supabase.com → Project Settings → API
-const SUPABASE_URL = "https://jwfucitnaqkuyzizmuve.supabase.co";       // e.g. https://abcxyz.supabase.co
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
+const SUPABASE_URL = "YOUR_SUPABASE_URL";       // e.g. https://abcxyz.supabase.co
+const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY"; // long string starting with eyJ...
 
 // Lightweight Supabase REST client (no npm needed)
 const sb = {
@@ -287,13 +287,26 @@ const sb = {
   },
   async delete(table, id) {
     const r = await fetch(`${this.url(table)}?id=eq.${id}`, {
-      method: "DELETE", headers: this.headers
+      method: "DELETE", headers: { ...this.headers, "Prefer": "" }
     });
     if (!r.ok) throw new Error(`DELETE ${table}: ${await r.text()}`);
   },
+  async deleteAll(table) {
+    // Supabase requires a filter for DELETE — use created_at > epoch (matches all rows)
+    const r = await fetch(`${this.url(table)}?created_at=gte.2000-01-01`, {
+      method: "DELETE", headers: { ...this.headers, "Prefer": "" }
+    });
+    if (!r.ok) {
+      // Fallback: try with id filter
+      const r2 = await fetch(`${this.url(table)}?id=gte.0`, {
+        method: "DELETE", headers: { ...this.headers, "Prefer": "" }
+      });
+      if (!r2.ok) throw new Error(`DELETE ALL ${table}: ${await r2.text()}`);
+    }
+  },
   async deleteWhere(table, column, value) {
     const r = await fetch(`${this.url(table)}?${column}=eq.${value}`, {
-      method: "DELETE", headers: this.headers
+      method: "DELETE", headers: { ...this.headers, "Prefer": "" }
     });
     if (!r.ok) throw new Error(`DELETE WHERE ${table}: ${await r.text()}`);
   },
@@ -303,6 +316,385 @@ const sb = {
 const SUPABASE_CONFIGURED = SUPABASE_URL !== "YOUR_SUPABASE_URL" && SUPABASE_ANON_KEY !== "YOUR_SUPABASE_ANON_KEY";
 
 // ─── Main App ──────────────────────────────────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════
+// RMS PAGE COMPONENT
+// ═══════════════════════════════════════════════════════
+const LOT_SIZES    = { NIFTY:75, SENSEX:20, BANKNIFTY:35, BANKEX:15, FINNIFTY:40, MIDCPNIFTY:120 };
+const DEFAULT_IDX  = { NIFTY:24050, SENSEX:77550, BANKNIFTY:52000, BANKEX:52000 };
+const SPAN_PCT     = 0.0187;
+const EXPOSURE_PCT = 0.0702;
+const SCENARIO_STEPS = [-20,-15,-10,-5,5,10,15,20];
+const CLIENT_NAMES_RMS = {
+  DLL11647:"UTSAV", DLL12771:"HARSH", DWH00916:"NILESH",
+  ZZJ14748:"AMBALIYA", ZZJ14749:"NITIN", ZZJ14750:"SANDIP", ZZJ5538:"JAYESHBHAI"
+};
+
+function calcRMSMargin(positions, indexPrices) {
+  let span = 0, exposure = 0, premium = 0;
+  (positions||[]).forEach(p => {
+    const sym = (p.symbol||"").toUpperCase();
+    const lot = LOT_SIZES[sym] || 75;
+    const idx = (indexPrices||{})[sym] || DEFAULT_IDX[sym] || 24050;
+    const qty = parseFloat(p.netQty) || 0;
+    const netP = Math.abs(parseFloat(p.netPrice)||0);
+    const mktP = Math.abs(parseFloat(p.marketPrice)||0);
+    if (qty===0) return;
+    const lots = Math.abs(qty)/lot;
+    if (qty < 0) { const s=SPAN_PCT*idx*lot*lots; span+=s; exposure+=s*EXPOSURE_PCT; }
+    else { premium += (netP||mktP)*Math.abs(qty); }
+  });
+  return { span:Math.round(span), exposure:Math.round(exposure), premium:Math.round(premium), total:Math.round(span+exposure+premium) };
+}
+
+function calcRMSScenario(positions, pct, indexPrices) {
+  let impact = 0;
+  (positions||[]).forEach(p => {
+    const sym = (p.symbol||"").toUpperCase();
+    const idx = (indexPrices||{})[sym] || DEFAULT_IDX[sym] || 24050;
+    const qty = parseFloat(p.netQty)||0;
+    const mktP = parseFloat(p.marketPrice)||0;
+    const strike = parseFloat(p.strikePrice)||idx;
+    const optType = (p.optionType||"").toUpperCase();
+    if (qty===0||mktP<=0) return;
+    const moneyness = optType==="CE"?(idx-strike)/idx:(strike-idx)/idx;
+    let delta = Math.max(0.05, Math.min(0.95, 0.5+moneyness*2));
+    if (optType==="PE") delta=-delta;
+    const priceChg = mktP*(Math.abs(pct)/100)*Math.abs(delta)*(pct>0?1:-1);
+    impact += (optType==="CE"?priceChg:-priceChg)*qty;
+  });
+  return Math.round(impact);
+}
+
+function parseRMSCsv(text) {
+  const lines = text.split(/\r?\n/).filter(l => { const t=l.trim(); return t&&!t.startsWith("(ALL)")&&!t.startsWith("---"); });
+  if (lines.length<2) return {};
+  const header = lines[0].split(",").map(h=>h.trim().toLowerCase());
+  const fi = k => header.findIndex(h=>h.includes(k));
+  const [iU,iSy,iEx,iSt,iOt,iNq,iNp,iMp,iMt] = [fi("user"),fi("symbol"),fi("ser"),fi("strike"),fi("option"),fi("net qty"),fi("net p"),fi("market"),fi("mtm")];
+  const byClient = {};
+  lines.slice(1).forEach(line => {
+    const c = line.split(",").map(x=>x.trim());
+    if (c.length<5) return;
+    const cid = c[iU]||"";
+    if (!cid||cid.includes("ALL")||cid.startsWith("-")) return;
+    if (!byClient[cid]) byClient[cid]=[];
+    byClient[cid].push({ symbol:c[iSy]||"", expiry:iEx>=0?c[iEx]:"", strikePrice:iSt>=0?c[iSt]:"0",
+      optionType:iOt>=0?c[iOt]:"", netQty:iNq>=0?c[iNq]:"0", netPrice:iNp>=0?c[iNp]:"0",
+      marketPrice:iMp>=0?c[iMp]:"0", mtmGL:iMt>=0?c[iMt]:"0" });
+  });
+  return byClient;
+}
+
+function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, C, card, btn, input }) {
+  const [clientData,  setClientData]  = React.useState({});
+  const [lastUpdated, setLastUpdated] = React.useState(null);
+  const [expanded,    setExpanded]    = React.useState({});
+  const [editFund,    setEditFund]    = React.useState(null);
+  const [fundInput,   setFundInput]   = React.useState("");
+  const [editIdx,     setEditIdx]     = React.useState(false);
+  const [idxInput,    setIdxInput]    = React.useState({...DEFAULT_IDX, ...(indexPrices||{})});
+  const [uploadStatus,setUploadStatus]= React.useState(null);
+  const fileRef = React.useRef();
+
+  const prices = { ...DEFAULT_IDX, ...(indexPrices||{}) };
+
+  const saveFunds = (f) => { setFunds(f); try{localStorage.setItem("rms_funds",JSON.stringify(f));}catch(e){} };
+  const saveIdx   = (p) => { setIndexPrices(p); try{localStorage.setItem("rms_idx",JSON.stringify(p));}catch(e){} };
+
+  const onFile = (e) => {
+    const f = e.target.files[0]; if(!f) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const data = parseRMSCsv(ev.target.result);
+      if (!Object.keys(data).length) { setUploadStatus("error"); setTimeout(()=>setUploadStatus(null),3000); return; }
+      setClientData(data); setLastUpdated(new Date()); setUploadStatus("ok");
+      setTimeout(()=>setUploadStatus(null),3000);
+      notify("✅ Positions loaded — " + Object.keys(data).length + " clients");
+    };
+    reader.readAsText(f);
+    e.target.value="";
+  };
+
+  const fmtN = (n) => { const v=Math.abs(n); const s=v>=1e7?(v/1e7).toFixed(2)+"Cr":v>=1e5?(v/1e5).toFixed(2)+"L":v>=1e3?(v/1e3).toFixed(1)+"K":v.toFixed(0); return (n<0?"−":"")+"₹"+s; };
+  const fmtFull = (n) => (n<0?"−":"")+"₹"+Math.abs(Math.round(n)).toLocaleString("en-IN");
+  const pnlClr = (n) => n>0?C.green:n<0?C.red:C.muted;
+
+  const totalMTM    = Object.values(clientData).flat().reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
+  const totalMargin = Object.entries(clientData).reduce((s,[,pos])=>s+calcRMSMargin(pos,prices).total,0);
+  const totalFund   = Object.values(funds||{}).reduce((s,f)=>s+(parseFloat(f)||0),0);
+  const hasData     = Object.keys(clientData).length>0;
+  const btnClr      = uploadStatus==="ok"?C.green:uploadStatus==="error"?C.red:C.accent;
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:24,flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>📡 Risk Management System</h2>
+          <div style={{color:C.muted,fontSize:12,marginTop:4}}>
+            {lastUpdated ? `Last updated: ${lastUpdated.toLocaleTimeString()}` : "Upload ODIN Positions CSV to begin"}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          <button onClick={()=>setEditIdx(true)} style={{...btn(C.card),border:`1px solid ${C.border}`,color:C.text,fontSize:13}}>
+            📈 Index Prices
+          </button>
+          <button onClick={()=>fileRef.current.click()}
+            style={{...btn(btnClr),fontSize:13}}>
+            {uploadStatus==="ok"?"✅ Updated!":uploadStatus==="error"?"❌ Invalid CSV":"⬆️ Upload Positions CSV"}
+          </button>
+          <input ref={fileRef} type="file" accept=".csv" onChange={onFile} style={{display:"none"}}/>
+        </div>
+      </div>
+
+      {/* Summary cards */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:14,marginBottom:24}}>
+        {[
+          {label:"Total MTM P&L",    val:fmtFull(Math.round(totalMTM)), color:pnlClr(totalMTM)},
+          {label:"Total Margin Used", val:fmtN(totalMargin),             color:C.text},
+          {label:"Total Fund",        val:totalFund>0?fmtN(totalFund):"Not set", color:C.text},
+          {label:"Overall Usage",     val:totalFund>0?(totalMargin/totalFund*100).toFixed(1)+"%":"—",
+            color:totalFund>0?(totalMargin/totalFund>0.9?C.red:totalMargin/totalFund>0.7?C.yellow:C.green):C.muted},
+          {label:"Active Clients",    val:Object.keys(clientData).length, color:C.text},
+        ].map(c => (
+          <div key={c.label} style={{...card,padding:"16px 20px"}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>{c.label}</div>
+            <div style={{fontSize:22,fontWeight:800,color:c.color}}>{c.val}</div>
+          </div>
+        ))}
+      </div>
+
+      {!hasData && (
+        <div style={{...card,textAlign:"center",padding:"60px 20px"}}>
+          <div style={{fontSize:48,marginBottom:12}}>📂</div>
+          <div style={{fontSize:16,fontWeight:700,color:C.text,marginBottom:6}}>No data loaded</div>
+          <div style={{color:C.muted,fontSize:13,marginBottom:20}}>Export from ODIN and upload the Positions CSV</div>
+          <button onClick={()=>fileRef.current.click()} style={{...btn(C.accent)}}>⬆️ Upload Positions CSV</button>
+        </div>
+      )}
+
+      {hasData && (
+        <>
+          {/* Client table */}
+          <div style={{...card,padding:0,overflow:"hidden",marginBottom:20}}>
+            <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontWeight:700,fontSize:15,color:C.text}}>👥 Client Portfolio</span>
+              <span style={{color:C.muted,fontSize:12}}>— click ▶ to expand positions</span>
+            </div>
+
+            {/* Table head */}
+            <div style={{display:"grid",gridTemplateColumns:"32px 1fr 1fr 1fr 1fr 1fr 140px",
+              gap:4,padding:"10px 16px",background:C.accent+"08",borderBottom:`1px solid ${C.border}`}}>
+              {["","Client","MTM P&L","SPAN","Exposure","Total Margin","Fund & Usage"].map((h,i)=>(
+                <div key={i} style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",
+                  letterSpacing:0.6,textAlign:i>1?"right":"left"}}>{h}</div>
+              ))}
+            </div>
+
+            {/* Client rows */}
+            {Object.entries(clientData).map(([cid, positions]) => {
+              const totalMTMc = positions.reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
+              const margin    = calcRMSMargin(positions, prices);
+              const fund      = parseFloat((funds||{})[cid])||0;
+              const pctUsed   = fund>0?(margin.total/fund*100):0;
+              const ac        = pctUsed>90?C.red:pctUsed>70?C.yellow:C.green;
+              const isExp     = expanded[cid];
+              const openPos   = positions.filter(p=>parseFloat(p.netQty)!==0).length;
+
+              return (
+                <React.Fragment key={cid}>
+                  <div style={{display:"grid",gridTemplateColumns:"32px 1fr 1fr 1fr 1fr 1fr 140px",
+                    gap:4,padding:"13px 16px",borderBottom:`1px solid ${C.border}`,
+                    cursor:"pointer",transition:"background 0.15s"}}
+                    onClick={()=>setExpanded(e=>({...e,[cid]:!e[cid]}))}>
+                    <div style={{color:C.accent,fontWeight:700,fontSize:16}}>{isExp?"▼":"▶"}</div>
+                    <div>
+                      <div style={{fontWeight:700,color:C.text,fontSize:14}}>{CLIENT_NAMES_RMS[cid]||cid}</div>
+                      <div style={{color:C.muted,fontSize:11,marginTop:2}}>{cid} · {openPos} open</div>
+                    </div>
+                    <div style={{textAlign:"right",fontWeight:800,fontSize:15,color:pnlClr(totalMTMc)}}>
+                      {totalMTMc>=0?"+":""}{fmtFull(totalMTMc)}
+                    </div>
+                    <div style={{textAlign:"right",color:C.text,fontSize:13}}>{fmtN(margin.span)}</div>
+                    <div style={{textAlign:"right",color:C.yellow,fontSize:13}}>{fmtN(margin.exposure)}</div>
+                    <div style={{textAlign:"right",fontWeight:700,color:C.text,fontSize:13}}>{fmtN(margin.total)}</div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,justifyContent:"flex-end"}}>
+                        <div>
+                          <div style={{fontWeight:700,fontSize:14,color:ac}}>{fund>0?pctUsed.toFixed(1)+"%":"—"}</div>
+                          <div style={{color:C.muted,fontSize:10}}>of {fund>0?fmtN(fund):"no fund"}</div>
+                        </div>
+                        <button onClick={e=>{e.stopPropagation();setEditFund(cid);setFundInput((funds||{})[cid]||"");}}
+                          style={{...btn(C.card),padding:"3px 7px",fontSize:11,border:`1px solid ${C.border}`}}>✏️</button>
+                      </div>
+                      <div style={{marginTop:4,height:3,background:C.border,borderRadius:2,overflow:"hidden"}}>
+                        <div style={{height:"100%",width:`${Math.min(pctUsed,100)}%`,background:ac,borderRadius:2,transition:"width 0.5s"}}/>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Expanded */}
+                  {isExp && (
+                    <div style={{background:C.bg,borderBottom:`1px solid ${C.border}`,padding:"8px 24px 16px"}}>
+                      {/* Scenario */}
+                      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:12,padding:"10px 0"}}>
+                        <span style={{fontSize:11,fontWeight:700,color:C.muted,marginRight:4}}>SCENARIO:</span>
+                        {SCENARIO_STEPS.map(s=>{
+                          const v=calcRMSScenario(positions,s,prices);
+                          return (
+                            <div key={s} style={{background:(s>0?C.green:C.red)+"15",border:`1px solid ${(s>0?C.green:C.red)}33`,
+                              borderRadius:6,padding:"3px 10px",textAlign:"center",minWidth:64}}>
+                              <div style={{fontSize:10,color:C.muted}}>{s>0?"+":""}{s}%</div>
+                              <div style={{fontSize:12,fontWeight:700,color:pnlClr(v)}}>{v>=0?"+":""}{fmtN(v).replace("₹","₹")}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {/* Positions */}
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                        <thead>
+                          <tr style={{borderBottom:`1px solid ${C.border}`}}>
+                            {["Symbol","Expiry","Strike","Type","Side","Qty","Avg","LTP","MTM"].map(h=>(
+                              <th key={h} style={{padding:"6px 8px",color:C.muted,fontWeight:600,
+                                textAlign:["Qty","Avg","LTP","MTM"].includes(h)?"right":"left",fontSize:10,textTransform:"uppercase",letterSpacing:0.5}}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {positions.filter(p=>parseFloat(p.netQty)!==0).map((p,i)=>{
+                            const qty=parseFloat(p.netQty)||0;
+                            const mtm=parseFloat(p.mtmGL)||0;
+                            const side=qty>0?"LONG":qty<0?"SHORT":"—";
+                            const sc=qty>0?C.green:C.red;
+                            return (
+                              <tr key={i} style={{borderBottom:`1px solid ${C.border}22`}}>
+                                <td style={{padding:"6px 8px",fontWeight:700,color:C.accent}}>{p.symbol}</td>
+                                <td style={{padding:"6px 8px",color:C.muted}}>{p.expiry}</td>
+                                <td style={{padding:"6px 8px"}}>{parseFloat(p.strikePrice).toLocaleString()}</td>
+                                <td style={{padding:"6px 8px"}}>
+                                  <span style={{background:(p.optionType==="CE"?C.green:C.red)+"22",color:p.optionType==="CE"?C.green:C.red,
+                                    padding:"1px 6px",borderRadius:4,fontWeight:700}}>{p.optionType}</span>
+                                </td>
+                                <td style={{padding:"6px 8px"}}>
+                                  <span style={{color:sc,fontWeight:700}}>{side}</span>
+                                </td>
+                                <td style={{padding:"6px 8px",textAlign:"right",color:C.text}}>{Math.abs(qty).toLocaleString()}</td>
+                                <td style={{padding:"6px 8px",textAlign:"right",color:C.muted}}>{(parseFloat(p.netPrice)||0).toFixed(2)}</td>
+                                <td style={{padding:"6px 8px",textAlign:"right"}}>{(parseFloat(p.marketPrice)||0).toFixed(2)}</td>
+                                <td style={{padding:"6px 8px",textAlign:"right",fontWeight:700,color:pnlClr(mtm)}}>
+                                  {mtm>=0?"+":""}{fmtFull(mtm)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          <tr style={{background:C.accent+"08",fontWeight:700}}>
+                            <td colSpan={8} style={{padding:"7px 8px",color:C.muted,fontSize:11}}>
+                              TOTAL ({positions.length} positions)
+                            </td>
+                            <td style={{padding:"7px 8px",textAlign:"right",fontSize:13,color:pnlClr(totalMTMc)}}>
+                              {totalMTMc>=0?"+":""}{fmtFull(totalMTMc)}
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </div>
+
+          {/* Scenario summary table */}
+          <div style={{...card,padding:0,overflow:"hidden"}}>
+            <div style={{padding:"12px 20px",borderBottom:`1px solid ${C.border}`}}>
+              <span style={{fontWeight:700,fontSize:15,color:C.text}}>📊 Scenario Analysis — All Clients</span>
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",minWidth:800}}>
+                <thead>
+                  <tr style={{borderBottom:`1px solid ${C.border}`,background:C.accent+"06"}}>
+                    <th style={{padding:"10px 16px",color:C.muted,fontSize:11,fontWeight:700,textAlign:"left",textTransform:"uppercase",letterSpacing:0.6}}>Client</th>
+                    {SCENARIO_STEPS.map(s=>(
+                      <th key={s} style={{padding:"10px 12px",fontSize:11,fontWeight:700,textAlign:"right",
+                        color:s>0?C.green:C.red}}>{s>0?"+":""}{s}%</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(clientData).map(([cid,pos])=>(
+                    <tr key={cid} style={{borderBottom:`1px solid ${C.border}22`}}>
+                      <td style={{padding:"10px 16px",fontWeight:600,color:C.text}}>{CLIENT_NAMES_RMS[cid]||cid}</td>
+                      {SCENARIO_STEPS.map(s=>{
+                        const v=calcRMSScenario(pos,s,prices);
+                        return <td key={s} style={{padding:"10px 12px",textAlign:"right",fontWeight:600,
+                          color:pnlClr(v),fontSize:12}}>{v>=0?"+":""}{fmtN(v)}</td>;
+                      })}
+                    </tr>
+                  ))}
+                  <tr style={{borderTop:`2px solid ${C.border}`,background:C.accent+"08",fontWeight:800}}>
+                    <td style={{padding:"12px 16px",color:C.text}}>TOTAL</td>
+                    {SCENARIO_STEPS.map(s=>{
+                      const v=Object.values(clientData).reduce((sum,pos)=>sum+calcRMSScenario(pos,s,prices),0);
+                      return <td key={s} style={{padding:"12px 12px",textAlign:"right",fontWeight:800,
+                        color:pnlClr(v),fontSize:13}}>{v>=0?"+":""}{fmtN(v)}</td>;
+                    })}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Fund edit modal */}
+      {editFund && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",display:"flex",
+          alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={()=>setEditFund(null)}>
+          <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:16,padding:28,
+            width:360,boxShadow:"0 20px 60px rgba(0,0,0,0.15)"}} onClick={e=>e.stopPropagation()}>
+            <div style={{fontWeight:700,fontSize:16,color:C.text,marginBottom:4}}>Set Fund Amount</div>
+            <div style={{color:C.muted,fontSize:13,marginBottom:16}}>{CLIENT_NAMES_RMS[editFund]||editFund}</div>
+            <input type="number" value={fundInput} onChange={e=>setFundInput(e.target.value)}
+              placeholder="Enter fund in ₹ (e.g. 6000000)"
+              style={{...input,width:"100%",marginBottom:16,boxSizing:"border-box",fontSize:15}}
+              onKeyDown={e=>{if(e.key==="Enter"){saveFunds({...funds,[editFund]:fundInput});setEditFund(null);}}}
+              autoFocus/>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setEditFund(null)} style={{...btn(C.card),flex:1,border:`1px solid ${C.border}`}}>Cancel</button>
+              <button onClick={()=>{saveFunds({...funds,[editFund]:fundInput});setEditFund(null);}}
+                style={{...btn(C.green),flex:1}}>Save ✓</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Index prices modal */}
+      {editIdx && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",display:"flex",
+          alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={()=>setEditIdx(false)}>
+          <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:16,padding:28,
+            width:360,boxShadow:"0 20px 60px rgba(0,0,0,0.15)"}} onClick={e=>e.stopPropagation()}>
+            <div style={{fontWeight:700,fontSize:16,color:C.text,marginBottom:16}}>📈 Update Index Prices</div>
+            {["NIFTY","SENSEX","BANKNIFTY","BANKEX"].map(sym=>(
+              <div key={sym} style={{marginBottom:12}}>
+                <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:4,textTransform:"uppercase",letterSpacing:0.5}}>{sym}</div>
+                <input type="number" value={idxInput[sym]||""} onChange={e=>setIdxInput(p=>({...p,[sym]:parseFloat(e.target.value)||0}))}
+                  style={{...input,width:"100%",boxSizing:"border-box"}}/>
+              </div>
+            ))}
+            <div style={{display:"flex",gap:10,marginTop:16}}>
+              <button onClick={()=>setEditIdx(false)} style={{...btn(C.card),flex:1,border:`1px solid ${C.border}`}}>Cancel</button>
+              <button onClick={()=>{saveIdx(idxInput);setEditIdx(false);}} style={{...btn(C.green),flex:1}}>Save ✓</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+// ═══════════════════════════════════════════════════════
+
 export default function BackOffice() {
   const [state, setState] = useState(INITIAL_STATE);
   const [dbLoading, setDbLoading] = useState(SUPABASE_CONFIGURED); // show loading if DB configured
@@ -314,6 +706,11 @@ export default function BackOffice() {
   const [modal, setModal] = useState(null);
   const [positionFilter, setPositionFilter] = useState("open");
   const [notification, setNotification] = useState(null);
+  // RMS state
+  const [rmsPositions,   setRmsPositions]   = useState({});
+  const [rmsFunds,       setRmsFunds]       = useState(() => { try { return JSON.parse(localStorage.getItem("rms_funds")||"{}"); } catch(e){ return {}; } });
+  const [rmsIndexPrices, setRmsIndexPrices] = useState(() => { try { return JSON.parse(localStorage.getItem("rms_idx")||"{}"); } catch(e){ return { NIFTY:24050, SENSEX:77550, BANKNIFTY:52000, BANKEX:52000 }; } });
+  const [rmsLastUpdated, setRmsLastUpdated] = useState(null);
 
   const notify = (msg, type = "success") => {
     setNotification({ msg, type });
@@ -337,22 +734,29 @@ export default function BackOffice() {
         sb.select("tickets",         "?order=date.desc"),
         sb.select("interest",        "?order=created_at.asc"),
         sb.select("charges_history", "?order=created_at.asc"),
-        sb.select("bhavcopy",        `?order=created_at.desc&limit=50000`),
+        sb.select("bhavcopy",        "?order=created_at.desc&limit=50000"),
       ]);
 
+      // If we get here, DB is truly connected and returning data
       setState(s => ({
         ...s,
-        clients:        clients        || [],
-        trades:         trades         || [],
-        ledger:         ledger         || [],
-        tickets:        tickets        || [],
-        interest:       interest       || [],
-        chargesHistory: chargesHistory?.length ? chargesHistory : [{ ...DEFAULT_CHARGES, effectiveFrom: "2024-01-01" }],
-        bhavcopy:       bhavcopy       || [],
+        clients:        Array.isArray(clients)        ? clients        : [],
+        trades:         Array.isArray(trades)         ? trades         : [],
+        ledger:         Array.isArray(ledger)         ? ledger         : [],
+        tickets:        Array.isArray(tickets)        ? tickets        : [],
+        interest:       Array.isArray(interest)       ? interest       : [],
+        chargesHistory: Array.isArray(chargesHistory) && chargesHistory.length
+                          ? chargesHistory
+                          : [{ ...DEFAULT_CHARGES, effectiveFrom: "2024-01-01" }],
+        bhavcopy:       Array.isArray(bhavcopy)       ? bhavcopy       : [],
       }));
+      setSyncStatus("saved");
+      setTimeout(() => setSyncStatus("idle"), 2000);
     } catch (err) {
       console.error("Load error:", err);
       setDbError(err.message);
+      // Show the actual error so user knows what's wrong
+      notify("⚠️ Database load failed: " + err.message + " — Check your Supabase URL and key in App.jsx", "error");
     } finally {
       setDbLoading(false);
     }
@@ -360,16 +764,20 @@ export default function BackOffice() {
 
   // ── Supabase: Generic save with sync indicator ──
   const withSync = async (fn) => {
-    if (!SUPABASE_CONFIGURED) return fn(); // local only if not configured
+    if (!SUPABASE_CONFIGURED) {
+      fn(); // local only
+      return;
+    }
     setSyncStatus("saving");
     try {
-      await fn();
+      const result = await fn();
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
+      return result;
     } catch (err) {
       console.error("Sync error:", err);
       setSyncStatus("error");
-      notify("⚠️ Data saved locally but database sync failed: " + err.message, "error");
+      notify("⚠️ Database sync failed: " + err.message, "error");
       setTimeout(() => setSyncStatus("idle"), 5000);
     }
   };
@@ -912,8 +1320,8 @@ export default function BackOffice() {
 
     withSync(async () => {
       if (uploadMode === "replace") {
-        // Delete all existing trades then insert new ones
-        await fetch(`${sb.url("trades")}`, { method: "DELETE", headers: sb.headers });
+        // Delete all existing trades using deleteAll
+        await sb.deleteAll("trades");
       }
       // Insert in batches of 500 (Supabase limit)
       for (let i = 0; i < newTrades.length; i += 500) {
@@ -1066,6 +1474,7 @@ export default function BackOffice() {
     { id: "charges", label: "Charges", icon: "charges" },
     { id: "bhavcopy", label: "Bhavcopy / MTM", icon: "bhavcopy" },
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
+    { id: "rms", label: "📡 RMS", icon: "dashboard" },
   ];
   const clientPages = [
     { id: "dashboard", label: "Dashboard", icon: "dashboard" },
@@ -2317,6 +2726,11 @@ export default function BackOffice() {
           })}
         </div>
       );
+    }
+
+    // ── RMS Page ──
+    if (page === "rms" && auth.role === "admin") {
+      return <RMSPage state={state} indexPrices={rmsIndexPrices} setIndexPrices={setRmsIndexPrices} funds={rmsFunds} setFunds={setRmsFunds} notify={notify} C={C} card={card} btn={btn} input={input} />;
     }
   };
 
