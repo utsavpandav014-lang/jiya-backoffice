@@ -730,32 +730,25 @@ async function generateTOTP(secret) {
   return code.toString().padStart(6, "0");
 }
 
-// Angel One Login
+// Angel One Login — via Vercel proxy (avoids CORS)
+const ANGEL_PROXY = "/api/angel";
+
 async function angelLogin(creds) {
   const totp = await generateTOTP(creds.totpSecret);
-  const resp = await fetch("https://apiconnect.angelbroking.com/rest/auth/angelbroking/user/v1/loginByPassword", {
+  const resp = await fetch(ANGEL_PROXY, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-      "X-UserType": "USER",
-      "X-SourceID": "WEB",
-      "X-ClientLocalIP": "192.168.1.1",
-      "X-ClientPublicIP": "106.193.147.98",
-      "X-MACAddress": "fe80::216e:6507:4b90:3719",
-      "X-PrivateKey": creds.apiKey,
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      clientcode: creds.clientId,
-      password:   creds.password,
-      totp:       totp,
+      action:  "login",
+      apiKey:  creds.apiKey,
+      payload: { clientId: creds.clientId, password: creds.password, totp },
     })
   });
   const data = await resp.json();
   if (!data.status) throw new Error(data.message || "Login failed");
   return {
-    jwtToken:   data.data.jwtToken,
-    feedToken:  data.data.feedToken,
+    jwtToken:     data.data.jwtToken,
+    feedToken:    data.data.feedToken,
     refreshToken: data.data.refreshToken,
   };
 }
@@ -996,23 +989,17 @@ export default function BackOffice() {
         if (h < 9 || (h === 9 && m < 15) || h > 15 || (h === 15 && m >= 30)) return;
 
         // For now fetch NIFTY and SENSEX index prices as proxy
-        const resp = await fetch("https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/quote/", {
+        const resp = await fetch(ANGEL_PROXY, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-UserType": "USER",
-            "X-SourceID": "WEB",
-            "X-ClientLocalIP": "192.168.1.1",
-            "X-ClientPublicIP": "106.193.147.98",
-            "X-MACAddress": "fe80::216e:6507:4b90:3719",
-            "X-PrivateKey": apiKey,
-            "Authorization": `Bearer ${jwtToken}`,
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            mode: "LTP",
-            exchangeTokens: {
-              "NSE": ["26000", "26009"] // NIFTY and SENSEX index tokens
+            action:  "ltp",
+            apiKey:  apiKey,
+            jwtToken: jwtToken,
+            payload: {
+              exchangeTokens: {
+                "NSE": ["26000", "26009"] // NIFTY and SENSEX index tokens
+              }
             }
           })
         });
