@@ -386,9 +386,9 @@ function parseRMSCsv(text) {
   return byClient;
 }
 
-function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, C, card, btn, input, livePrice = {}, rmsRef, lastUpdated }) {
-  const [clientData,  setClientData]  = useState({});
-  const [lastUpdated, setLastUpdated] = useState(null);
+function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, C, card, btn, input, livePrice = {}, rmsRef, lastUpdated: lastUpdatedProp }) {
+  const [clientData,    setClientData]    = useState({});
+  const [lastUpdated,   setLastUpdated]   = useState(lastUpdatedProp || null);
   const [expanded,    setExpanded]    = useState({});
   const [editFund,    setEditFund]    = useState(null);
   const [fundInput,   setFundInput]   = useState("");
@@ -423,6 +423,7 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
           });
           if (Object.keys(grouped).length > 0) {
             setClientData(grouped);
+            setLastUpdated(new Date(rows[0].uploaded_at));
             if (rmsRef) rmsRef.current = grouped;
           }
         }
@@ -443,6 +444,7 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
       const data = parseRMSCsv(ev.target.result);
       if (!Object.keys(data).length) { setUploadStatus("error"); setTimeout(()=>setUploadStatus(null),3000); return; }
       setClientData(data);
+      setLastUpdated(new Date());
       setUploadStatus("ok");
       setTimeout(()=>setUploadStatus(null),3000);
       if (rmsRef) rmsRef.current = data;
