@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -387,15 +387,15 @@ function parseRMSCsv(text) {
 }
 
 function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, C, card, btn, input, livePrice = {} }) {
-  const [clientData,  setClientData]  = React.useState({});
-  const [lastUpdated, setLastUpdated] = React.useState(null);
-  const [expanded,    setExpanded]    = React.useState({});
-  const [editFund,    setEditFund]    = React.useState(null);
-  const [fundInput,   setFundInput]   = React.useState("");
-  const [editIdx,     setEditIdx]     = React.useState(false);
-  const [idxInput,    setIdxInput]    = React.useState({...DEFAULT_IDX, ...(indexPrices||{})});
-  const [uploadStatus,setUploadStatus]= React.useState(null);
-  const fileRef = React.useRef();
+  const [clientData,  setClientData]  = useState({});
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [expanded,    setExpanded]    = useState({});
+  const [editFund,    setEditFund]    = useState(null);
+  const [fundInput,   setFundInput]   = useState("");
+  const [editIdx,     setEditIdx]     = useState(false);
+  const [idxInput,    setIdxInput]    = useState({...DEFAULT_IDX, ...(indexPrices||{})});
+  const [uploadStatus,setUploadStatus]= useState(null);
+  const fileRef = useRef();
 
   const prices = { ...DEFAULT_IDX, ...(indexPrices||{}) };
 
@@ -503,7 +503,7 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
               const openPos   = positions.filter(p=>parseFloat(p.netQty)!==0).length;
 
               return (
-                <React.Fragment key={cid}>
+                <Fragment key={cid}>
                   <div style={{display:"grid",gridTemplateColumns:"32px 1fr 1fr 1fr 1fr 1fr 140px",
                     gap:4,padding:"13px 16px",borderBottom:`1px solid ${C.border}`,
                     cursor:"pointer",transition:"background 0.15s"}}
@@ -600,7 +600,7 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
                       </table>
                     </div>
                   )}
-                </React.Fragment>
+                </Fragment>
               );
             })}
           </div>
@@ -807,16 +807,16 @@ async function fetchInstrumentToken(symbol, expiry, strike, optType) {
 
 // ── Settings Page Component ────────────────────────────
 function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input }) {
-  const [form, setForm] = React.useState({
+  const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
     password:    angelCreds.password    || "",
     totpSecret:  angelCreds.totpSecret  || "",
     apiKey:      angelCreds.apiKey      || "FtnI1OI3",
     secretKey:   angelCreds.secretKey   || "",
   });
-  const [showPwd,  setShowPwd]  = React.useState(false);
-  const [showTotp, setShowTotp] = React.useState(false);
-  const [testing,  setTesting]  = React.useState(false);
+  const [showPwd,  setShowPwd]  = useState(false);
+  const [showTotp, setShowTotp] = useState(false);
+  const [testing,  setTesting]  = useState(false);
 
   const saveAndConnect = async () => {
     if (!form.clientId || !form.password || !form.totpSecret || !form.apiKey) {
@@ -986,7 +986,7 @@ export default function BackOffice() {
   };
 
   // ── Angel One: Poll LTP for all open positions ──
-  const startLTPPolling = React.useCallback((jwtToken, apiKey) => {
+  const startLTPPolling = useCallback((jwtToken, apiKey) => {
     const poll = async () => {
       try {
         // Get all unique symbols from current RMS positions
@@ -1036,7 +1036,7 @@ export default function BackOffice() {
   }, []);
 
   // ── Angel One: Auto Bhavcopy at 3:35 PM ──
-  const scheduleAutoBhavcopy = React.useCallback((jwtToken, apiKey) => {
+  const scheduleAutoBhavcopy = useCallback((jwtToken, apiKey) => {
     const checkTime = () => {
       const now = new Date();
       if (now.getHours() === 15 && now.getMinutes() === 35 && now.getSeconds() < 10) {
@@ -1055,7 +1055,7 @@ export default function BackOffice() {
   };
 
   // ── Auto-reconnect Angel One on page load if creds saved ──
-  React.useEffect(() => {
+  useEffect(() => {
     if (angelCreds.clientId && angelCreds.password && angelCreds.totpSecret && angelCreds.apiKey) {
       connectAngel(angelCreds);
     }
