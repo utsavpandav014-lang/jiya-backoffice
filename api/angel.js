@@ -45,6 +45,7 @@ export default async function handler(req, res) {
     }
 
     // ── Action: GET LTP (live prices) ─────────────────────
+    // Supports NFO (NSE F&O), BFO (BSE F&O), NSE, BSE
     if (action === 'ltp') {
       const { exchangeTokens } = payload;
 
@@ -88,20 +89,26 @@ export default async function handler(req, res) {
 
     // ── Action: RMS UPLOAD (from Windows tool) ────────────
     if (action === 'rms_upload') {
-      const { positions, timestamp } = payload;
+      const { positions, totalMtm, timestamp, rowCount } = payload;
 
-      // Save to Supabase
-      const supabaseUrl  = process.env.SUPABASE_URL  || 'https://jwfucitnaqkuyzizmuve.supabase.co';
-      const supabaseKey  = process.env.SUPABASE_KEY  || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A';
+      const supabaseUrl = 'https://jwfucitnaqkuyzizmuve.supabase.co';
+      const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A';
+      const headers = {
+        'Content-Type':  'application/json',
+        'apikey':        supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+        'Prefer':        'return=minimal',
+      };
 
-      const response = await fetch(`${supabaseUrl}/rest/v1/rms_positions`, {
+      // Step 1: Delete old records (keep DB clean — only latest needed)
+      await fetch(`${supabaseUrl}/rest/v1/rms_positions?snapshot_type=eq.live`, {
+        method: 'DELETE', headers
+      });
+
+      // Step 2: Insert new snapshot
+      const insertResp = await fetch(`${supabaseUrl}/rest/v1/rms_positions`, {
         method: 'POST',
-        headers: {
-          'Content-Type':  'application/json',
-          'apikey':        supabaseKey,
-          'Authorization': `Bearer ${supabaseKey}`,
-          'Prefer':        'return=minimal',
-        },
+        headers,
         body: JSON.stringify({
           positions_json: JSON.stringify(positions),
           snapshot_type:  'live',
@@ -109,12 +116,17 @@ export default async function handler(req, res) {
         }),
       });
 
-      if (!response.ok) {
-        const err = await response.text();
+      if (!insertResp.ok) {
+        const err = await insertResp.text();
         return res.status(500).json({ error: err });
       }
 
-      return res.status(200).json({ success: true, count: positions.length });
+      return res.status(200).json({
+        success:   true,
+        count:     rowCount || positions.length,
+        clients:   Object.keys(totalMtm || {}).length,
+        timestamp: timestamp,
+      });
     }
 
     return res.status(400).json({ error: 'Unknown action: ' + action });
