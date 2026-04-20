@@ -386,7 +386,7 @@ function parseRMSCsv(text) {
   return byClient;
 }
 
-function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, C, card, btn, input, livePrice = {} }) {
+function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, C, card, btn, input, livePrice = {}, rmsRef, lastUpdated }) {
   const [clientData,  setClientData]  = useState({});
   const [lastUpdated, setLastUpdated] = useState(null);
   const [expanded,    setExpanded]    = useState({});
@@ -402,14 +402,50 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
   const saveFunds = (f) => { setFunds(f); try{localStorage.setItem("rms_funds",JSON.stringify(f));}catch(e){} };
   const saveIdx   = (p) => { setIndexPrices(p); try{localStorage.setItem("rms_idx",JSON.stringify(p));}catch(e){} };
 
+  // ── Auto-load from Supabase every 10 seconds ──
+  useEffect(() => {
+    const loadFromDB = async () => {
+      try {
+        const SUPABASE_URL = "https://jwfucitnaqkuyzizmuve.supabase.co";
+        const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
+        const r = await fetch(
+          `${SUPABASE_URL}/rest/v1/rms_positions?snapshot_type=eq.live&order=uploaded_at.desc&limit=1`,
+          { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
+        );
+        const rows = await r.json();
+        if (rows?.length && rows[0].positions_json) {
+          const positions = JSON.parse(rows[0].positions_json);
+          const grouped   = {};
+          positions.forEach(p => {
+            if (!p.user) return;
+            if (!grouped[p.user]) grouped[p.user] = [];
+            grouped[p.user].push(p);
+          });
+          if (Object.keys(grouped).length > 0) {
+            setClientData(grouped);
+            if (rmsRef) rmsRef.current = grouped;
+          }
+        }
+      } catch(e) {
+        // Silent fail — manual upload still works
+      }
+    };
+
+    loadFromDB(); // Load immediately on mount
+    const interval = setInterval(loadFromDB, 10000); // Refresh every 10 seconds
+    return () => clearInterval(interval);
+  }, []);
+
   const onFile = (e) => {
     const f = e.target.files[0]; if(!f) return;
     const reader = new FileReader();
     reader.onload = ev => {
       const data = parseRMSCsv(ev.target.result);
       if (!Object.keys(data).length) { setUploadStatus("error"); setTimeout(()=>setUploadStatus(null),3000); return; }
-      setClientData(data); setLastUpdated(new Date()); setUploadStatus("ok");
+      setClientData(data);
+      setUploadStatus("ok");
       setTimeout(()=>setUploadStatus(null),3000);
+      if (rmsRef) rmsRef.current = data;
       notify("✅ Positions loaded — " + Object.keys(data).length + " clients");
     };
     reader.readAsText(f);
@@ -420,10 +456,12 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
   const fmtFull = (n) => (n<0?"−":"")+"₹"+Math.abs(Math.round(n)).toLocaleString("en-IN");
   const pnlClr = (n) => n>0?C.green:n<0?C.red:C.muted;
 
-  const totalMTM    = Object.values(clientData).flat().reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
-  const totalMargin = Object.entries(clientData).reduce((s,[,pos])=>s+calcRMSMargin(pos,prices).total,0);
+  // Use live-updated data from Angel One ref if available, else local state
+  const displayData  = (rmsRef && Object.keys(rmsRef.current || {}).length) ? rmsRef.current : clientData;
+  const totalMTM    = Object.values(displayData).flat().reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
+  const totalMargin = Object.entries(displayData).reduce((s,[,pos])=>s+calcRMSMargin(pos,prices).total,0);
   const totalFund   = Object.values(funds||{}).reduce((s,f)=>s+(parseFloat(f)||0),0);
-  const hasData     = Object.keys(clientData).length>0;
+  const hasData     = Object.keys(displayData).length>0;
   const btnClr      = uploadStatus==="ok"?C.green:uploadStatus==="error"?C.red:C.accent;
 
   return (
@@ -433,7 +471,7 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
         <div>
           <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>📡 Risk Management System</h2>
           <div style={{color:C.muted,fontSize:12,marginTop:4}}>
-            {lastUpdated ? `Last updated: ${lastUpdated.toLocaleTimeString()}` : "Upload ODIN Positions CSV to begin"}
+            {(lastUpdated||rmsRef?.current?._lastUpdate) ? `🟢 Live — Last updated: ${(lastUpdated||new Date()).toLocaleTimeString()}` : "Upload ODIN Positions CSV to begin"}
           </div>
         </div>
         <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
@@ -493,7 +531,7 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
             </div>
 
             {/* Client rows */}
-            {Object.entries(clientData).map(([cid, positions]) => {
+            {Object.entries(displayData).map(([cid, positions]) => {
               const totalMTMc = positions.reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
               const margin    = calcRMSMargin(positions, prices);
               const fund      = parseFloat((funds||{})[cid])||0;
@@ -622,7 +660,7 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(clientData).map(([cid,pos])=>(
+                  {Object.entries(displayData).map(([cid,pos])=>(
                     <tr key={cid} style={{borderBottom:`1px solid ${C.border}22`}}>
                       <td style={{padding:"10px 16px",fontWeight:600,color:C.text}}>{CLIENT_NAMES_RMS[cid]||cid}</td>
                       {SCENARIO_STEPS.map(s=>{
@@ -979,46 +1017,76 @@ export default function BackOffice() {
   };
 
   // ── Angel One: Poll LTP for all open positions ──
+  // ── Angel One: Poll LTP for all open positions in RMS ──
+  const rmsPositionsRef = useRef({});
+
   const startLTPPolling = useCallback((jwtToken, apiKey) => {
     const poll = async () => {
       try {
-        // Get all unique symbols from current RMS positions
-        // This runs every 5 seconds during market hours
         const now = new Date();
         const h = now.getHours(), m = now.getMinutes();
-        if (h < 9 || (h === 9 && m < 15) || h > 15 || (h === 15 && m >= 30)) return;
+        const inMarket = (h > 9 || (h === 9 && m >= 14)) && (h < 15 || (h === 15 && m < 31));
+        if (!inMarket) return;
 
-        // For now fetch NIFTY and SENSEX index prices as proxy
+        const positions = rmsPositionsRef.current;
+        if (!Object.keys(positions).length) return;
+
+        const nfoTokens = [], bfoTokens = [];
+        Object.values(positions).flat().forEach(p => {
+          const token = (p.scripCode || "").toString().trim();
+          const sym   = (p.symbol || "").toUpperCase();
+          if (!token || token === "0" || token === "-----------") return;
+          const isNFO = ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"].includes(sym);
+          if (isNFO) { if (!nfoTokens.includes(token)) nfoTokens.push(token); }
+          else       { if (!bfoTokens.includes(token)) bfoTokens.push(token); }
+        });
+
+        if (!nfoTokens.length && !bfoTokens.length) return;
+
+        const exchangeTokens = {};
+        if (nfoTokens.length) exchangeTokens["NFO"] = nfoTokens.slice(0, 50);
+        if (bfoTokens.length) exchangeTokens["BFO"] = bfoTokens.slice(0, 50);
+
         const resp = await fetch(ANGEL_PROXY, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action:  "ltp",
-            apiKey:  apiKey,
-            jwtToken: jwtToken,
-            payload: {
-              exchangeTokens: {
-                "NSE": ["26000", "26009"] // NIFTY and SENSEX index tokens
-              }
-            }
-          })
+          body: JSON.stringify({ action: "ltp", apiKey, jwtToken, payload: { exchangeTokens } })
         });
         const data = await resp.json();
+
         if (data.status && data.data) {
-          const prices = {};
+          const newPrices = {};
           (data.data.fetched || []).forEach(item => {
-            prices[item.tradingSymbol] = item.ltp;
+            newPrices[item.symbolToken] = item.ltp;
           });
-          setAngelLivePrice(prev => ({...prev, ...prices}));
+
+          // Update live prices in positions
+          const updated = {};
+          Object.entries(positions).forEach(([cid, pos]) => {
+            updated[cid] = pos.map(p => {
+              const token = (p.scripCode || "").toString().trim();
+              const ltp   = newPrices[token];
+              if (ltp !== undefined) {
+                const qty    = parseFloat(p.netQty)   || 0;
+                const buyAvg = parseFloat(p.buyAvg)   || parseFloat(p.netPrice) || 0;
+                const newMTM = qty !== 0 ? ((ltp - buyAvg) * qty).toFixed(2) : (parseFloat(p.mtmGL) || 0).toFixed(2);
+                return { ...p, marketPrice: ltp.toString(), mtmGL: newMTM };
+              }
+              return p;
+            });
+          });
+
+          rmsPositionsRef.current = updated;
+          setAngelLivePrice(prev => ({ ...prev, ...newPrices }));
+          setRmsLastUpdated(new Date());
         }
       } catch(e) {
-        console.log("LTP poll error:", e);
+        console.log("LTP poll error:", e.message);
       }
     };
 
-    // Poll every 5 seconds
     const interval = setInterval(poll, 5000);
-    poll(); // immediate first call
+    poll();
     return () => clearInterval(interval);
   }, []);
 
@@ -3119,7 +3187,7 @@ export default function BackOffice() {
 
     // ── RMS Page ──
     if (page === "rms" && auth.role === "admin") {
-      return <RMSPage state={state} indexPrices={rmsIndexPrices} setIndexPrices={setRmsIndexPrices} funds={rmsFunds} setFunds={setRmsFunds} notify={notify} C={C} card={card} btn={btn} input={input} livePrice={angelLivePrice} />;
+      return <RMSPage state={state} indexPrices={rmsIndexPrices} setIndexPrices={setRmsIndexPrices} funds={rmsFunds} setFunds={setRmsFunds} notify={notify} C={C} card={card} btn={btn} input={input} livePrice={angelLivePrice} rmsRef={rmsPositionsRef} lastUpdated={rmsLastUpdated} />;
     }
     if (page === "settings" && auth.role === "admin") {
       return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} />;
