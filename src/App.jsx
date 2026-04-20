@@ -720,7 +720,29 @@ export default function BackOffice() {
   // ── Supabase: Load all data on mount ──
   useEffect(() => {
     if (!SUPABASE_CONFIGURED) return;
-    loadAllData();
+    // Wake up DB first, then load data
+    const init = async () => {
+      try {
+        // Ping to wake up sleeping DB (free tier pauses after inactivity)
+        await fetch(`${SUPABASE_URL}/rest/v1/clients?limit=1`, {
+          headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}` }
+        });
+        await new Promise(r => setTimeout(r, 800)); // wait for wake
+      } catch(e) {}
+      loadAllData();
+    };
+    init();
+
+    // Keep-alive ping every 4 minutes so DB never sleeps during session
+    const keepAlive = setInterval(async () => {
+      try {
+        await fetch(`${SUPABASE_URL}/rest/v1/clients?limit=1`, {
+          headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}` }
+        });
+      } catch(e) {}
+    }, 4 * 60 * 1000);
+
+    return () => clearInterval(keepAlive);
   }, []);
 
   const loadAllData = async () => {
@@ -763,6 +785,23 @@ export default function BackOffice() {
   };
 
   // ── Supabase: Generic save with sync indicator ──
+  // ── Wake up Supabase (free tier sleeps after inactivity) ──
+  const wakeUpDB = async () => {
+    try {
+      // Simple ping — just select 1 row to wake up the DB
+      await fetch(`${SUPABASE_URL}/rest/v1/clients?limit=1`, {
+        headers: {
+          "apikey": SUPABASE_ANON_KEY,
+          "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+        }
+      });
+      // Wait 1 second for DB to fully wake
+      await new Promise(r => setTimeout(r, 1000));
+    } catch(e) {
+      console.log("Wake up ping failed:", e);
+    }
+  };
+
   const withSync = async (fn) => {
     if (!SUPABASE_CONFIGURED) {
       fn(); // local only
@@ -770,15 +809,28 @@ export default function BackOffice() {
     }
     setSyncStatus("saving");
     try {
+      // Wake up DB first before any write operation
+      await wakeUpDB();
       const result = await fn();
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
       return result;
     } catch (err) {
       console.error("Sync error:", err);
-      setSyncStatus("error");
-      notify("⚠️ Database sync failed: " + err.message, "error");
-      setTimeout(() => setSyncStatus("idle"), 5000);
+      // Retry once after 2 seconds (in case DB was sleeping)
+      try {
+        notify("⏳ Retrying database save...");
+        await new Promise(r => setTimeout(r, 2000));
+        const result = await fn();
+        setSyncStatus("saved");
+        setTimeout(() => setSyncStatus("idle"), 2000);
+        notify("✅ Saved successfully!");
+        return result;
+      } catch(err2) {
+        setSyncStatus("error");
+        notify("⚠️ Database sync failed: " + err2.message, "error");
+        setTimeout(() => setSyncStatus("idle"), 5000);
+      }
     }
   };
 
