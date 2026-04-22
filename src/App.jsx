@@ -622,6 +622,13 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
           <button onClick={()=>setEditIdx(true)} style={{...btn(C.card),border:`1px solid ${C.border}`,color:C.text,fontSize:13}}>
             📈 Index Prices
           </button>
+          {/* Manual snapshot button */}
+          <button onClick={()=>{
+            if(Object.keys(clientData).length===0){notify("Upload positions CSV first","error");return;}
+            saveClosingSnapshot(clientData, new Date());
+          }} style={{...btn(C.card),border:`1px solid ${C.yellow}`,color:C.yellow,fontSize:13}}>
+            📸 Save Snapshot
+          </button>
           <button onClick={()=>fileRef.current.click()}
             style={{...btn(btnClr),fontSize:13}}>
             {uploadStatus==="ok"?"✅ Updated!":uploadStatus==="error"?"❌ Invalid CSV":"⬆️ Upload Positions CSV"}
@@ -742,7 +749,10 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
                           <div style={{fontSize:10,color:C.muted,marginTop:2}}>intraday</div>
                         </div>
                       ) : (
-                        <div style={{color:C.muted,fontSize:11}}>—</div>
+                        <div>
+                          <div style={{fontWeight:700,fontSize:13,color:C.muted}}>₹0</div>
+                          <div style={{fontSize:10,color:C.muted,marginTop:2}}>no baseline</div>
+                        </div>
                       )}
                     </div>
                     <div style={{textAlign:"right",fontWeight:800,fontSize:15,color:pnlClr(totalMTMc)}}>
