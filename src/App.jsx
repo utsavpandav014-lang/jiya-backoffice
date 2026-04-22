@@ -386,21 +386,139 @@ function parseRMSCsv(text) {
   return byClient;
 }
 
+
+// ── RMS Intraday Helpers ─────────────────────────────────────────────────────
+
+// Parse expiry string like "21APR2026" or "13APR2026" to Date
+function parseExpiry(expStr) {
+  if (!expStr) return null;
+  const months = {JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,
+                  JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
+  const m = expStr.trim().toUpperCase().match(/^(\d{1,2})([A-Z]{3})(\d{4})$/);
+  if (!m) return null;
+  return new Date(parseInt(m[3]), months[m[2]], parseInt(m[1]));
+}
+
+// Check if expiry is today or earlier (expired)
+function isExpiredToday(expStr, refDate) {
+  const exp = parseExpiry(expStr);
+  if (!exp) return false;
+  const ref = refDate || new Date();
+  const refDay = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());
+  const expDay = new Date(exp.getFullYear(), exp.getMonth(), exp.getDate());
+  return expDay <= refDay; // expired = expiry <= today
+}
+
+// Filter positions: only keep non-expiry scripts
+function filterNonExpiry(positions, refDate) {
+  return (positions || []).filter(p => !isExpiredToday(p.expiry || p.expiry, refDate));
+}
+
+// Calculate MTM for a set of positions (sum of mtmGL)
+function calcMTM(positions) {
+  return positions.reduce((s,p) => s + (parseFloat(p.mtmGL) || 0), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, C, card, btn, input, livePrice = {}, rmsRef, lastUpdated: lastUpdatedProp }) {
   const [clientData,    setClientData]    = useState({});
   const [lastUpdated,   setLastUpdated]   = useState(lastUpdatedProp || null);
-  const [expanded,    setExpanded]    = useState({});
-  const [editFund,    setEditFund]    = useState(null);
-  const [fundInput,   setFundInput]   = useState("");
-  const [editIdx,     setEditIdx]     = useState(false);
-  const [idxInput,    setIdxInput]    = useState({...DEFAULT_IDX, ...(indexPrices||{})});
-  const [uploadStatus,setUploadStatus]= useState(null);
+  const [expanded,      setExpanded]      = useState({});
+  const [editFund,      setEditFund]      = useState(null);
+  const [fundInput,     setFundInput]     = useState("");
+  const [editIdx,       setEditIdx]       = useState(false);
+  const [idxInput,      setIdxInput]      = useState({...DEFAULT_IDX, ...(indexPrices||{})});
+  const [uploadStatus,  setUploadStatus]  = useState(null);
+  const [snapshot,      setSnapshot]      = useState(() => {
+    // Load yesterday's closing snapshot from localStorage
+    try { return JSON.parse(localStorage.getItem("rms_snapshot") || "null"); } catch(e) { return null; }
+  });
+  const [showIntraday,  setShowIntraday]  = useState(true);
   const fileRef = useRef();
+
+  const SUPABASE_URL_RMS = "https://jwfucitnaqkuyzizmuve.supabase.co";
+  const SUPABASE_KEY_RMS = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
 
   const prices = { ...DEFAULT_IDX, ...(indexPrices||{}) };
 
   const saveFunds = (f) => { setFunds(f); try{localStorage.setItem("rms_funds",JSON.stringify(f));}catch(e){} };
   const saveIdx   = (p) => { setIndexPrices(p); try{localStorage.setItem("rms_idx",JSON.stringify(p));}catch(e){} };
+
+  // ── Closing snapshot: save to localStorage + Supabase ──
+  const saveClosingSnapshot = async (data, uploadTime) => {
+    const today = uploadTime || new Date();
+    const todayStr = today.toISOString().slice(0,10);
+
+    // For each client: filter non-expiry, sum MTM
+    const snap = {};
+    Object.entries(data).forEach(([cid, positions]) => {
+      const filtered = filterNonExpiry(positions, today);
+      snap[cid] = {
+        mtm:   calcMTM(filtered),
+        date:  todayStr,
+        count: filtered.length,
+      };
+    });
+
+    const snapRecord = { date: todayStr, clients: snap, savedAt: today.toISOString() };
+
+    // Save to localStorage
+    try { localStorage.setItem("rms_snapshot", JSON.stringify(snapRecord)); } catch(e) {}
+    setSnapshot(snapRecord);
+
+    // Save to Supabase for persistence
+    try {
+      // Delete old snapshot first
+      await fetch(`${SUPABASE_URL_RMS}/rest/v1/rms_positions?snapshot_type=eq.closing`, {
+        method: "DELETE",
+        headers: { "apikey": SUPABASE_KEY_RMS, "Authorization": `Bearer ${SUPABASE_KEY_RMS}`, "Prefer": "" }
+      });
+      // Insert new
+      await fetch(`${SUPABASE_URL_RMS}/rest/v1/rms_positions`, {
+        method: "POST",
+        headers: { "Content-Type":"application/json", "apikey": SUPABASE_KEY_RMS,
+                   "Authorization": `Bearer ${SUPABASE_KEY_RMS}`, "Prefer": "return=minimal" },
+        body: JSON.stringify({
+          positions_json: JSON.stringify(snapRecord),
+          snapshot_type:  "closing",
+          uploaded_at:    today.toISOString(),
+        })
+      });
+      notify("📸 Closing snapshot saved! Tomorrow's intraday will be calculated from this.");
+    } catch(e) {
+      notify("📸 Snapshot saved locally. (DB save failed)", "error");
+    }
+  };
+
+  // ── Load closing snapshot from Supabase on mount ──
+  useEffect(() => {
+    const loadSnapshot = async () => {
+      try {
+        const r = await fetch(
+          `${SUPABASE_URL_RMS}/rest/v1/rms_positions?snapshot_type=eq.closing&order=uploaded_at.desc&limit=1`,
+          { headers: { "apikey": SUPABASE_KEY_RMS, "Authorization": `Bearer ${SUPABASE_KEY_RMS}` } }
+        );
+        const rows = await r.json();
+        if (rows?.length && rows[0].positions_json) {
+          const snap = JSON.parse(rows[0].positions_json);
+          setSnapshot(snap);
+          try { localStorage.setItem("rms_snapshot", JSON.stringify(snap)); } catch(e) {}
+        }
+      } catch(e) {}
+    };
+    loadSnapshot();
+  }, []);
+
+  // ── Calculate intraday P&L for a client ──
+  const getIntradayPnL = (cid, positions, uploadTime) => {
+    if (!snapshot || !snapshot.clients) return null;
+    const today = uploadTime || new Date();
+    const filtered = filterNonExpiry(positions, today);
+    const currentMTM = calcMTM(filtered);
+    const prevSnap = snapshot.clients[cid];
+    if (!prevSnap) return null;
+    return currentMTM - prevSnap.mtm;
+  };
 
   // ── Auto-load from Supabase every 10 seconds ──
   useEffect(() => {
@@ -443,12 +561,20 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
     reader.onload = ev => {
       const data = parseRMSCsv(ev.target.result);
       if (!Object.keys(data).length) { setUploadStatus("error"); setTimeout(()=>setUploadStatus(null),3000); return; }
+      const now = new Date();
       setClientData(data);
-      setLastUpdated(new Date());
+      setLastUpdated(now);
       setUploadStatus("ok");
       setTimeout(()=>setUploadStatus(null),3000);
       if (rmsRef) rmsRef.current = data;
-      notify("✅ Positions loaded — " + Object.keys(data).length + " clients");
+
+      // ── Auto closing snapshot if uploaded after 3:30 PM ──
+      const h = now.getHours(), m = now.getMinutes();
+      if (h > 15 || (h === 15 && m >= 30)) {
+        saveClosingSnapshot(data, now);
+      } else {
+        notify("✅ Positions loaded — " + Object.keys(data).length + " clients");
+      }
     };
     reader.readAsText(f);
     e.target.value="";
@@ -460,11 +586,27 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
 
   // Use live-updated data from Angel One ref if available, else local state
   const displayData  = (rmsRef && Object.keys(rmsRef.current || {}).length) ? rmsRef.current : clientData;
-  const totalMTM    = Object.values(displayData).flat().reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
-  const totalMargin = Object.entries(displayData).reduce((s,[,pos])=>s+calcRMSMargin(pos,prices).total,0);
-  const totalFund   = Object.values(funds||{}).reduce((s,f)=>s+(parseFloat(f)||0),0);
-  const hasData     = Object.keys(displayData).length>0;
-  const btnClr      = uploadStatus==="ok"?C.green:uploadStatus==="error"?C.red:C.accent;
+  const today        = lastUpdated || new Date();
+
+  // Filtered data (non-expiry only) for intraday calculation
+  const filteredData = Object.fromEntries(
+    Object.entries(displayData).map(([cid,pos]) => [cid, filterNonExpiry(pos, today)])
+  );
+
+  const totalMTM     = Object.values(displayData).flat().reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
+  const totalFilteredMTM = Object.values(filteredData).flat().reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
+  const totalMargin  = Object.entries(displayData).reduce((s,[,pos])=>s+calcRMSMargin(pos,prices).total,0);
+  const totalFund    = Object.values(funds||{}).reduce((s,f)=>s+(parseFloat(f)||0),0);
+  const hasData      = Object.keys(displayData).length>0;
+  const btnClr       = uploadStatus==="ok"?C.green:uploadStatus==="error"?C.red:C.accent;
+
+  // Total intraday P&L across all clients
+  const totalIntraday = snapshot ? Object.keys(displayData).reduce((s,cid) => {
+    const v = getIntradayPnL(cid, displayData[cid] || [], today);
+    return s + (v !== null ? v : 0);
+  }, 0) : null;
+
+  const snapshotDate = snapshot?.date || null;
 
   return (
     <div>
@@ -489,14 +631,29 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
       </div>
 
       {/* Summary cards */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:14,marginBottom:24}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:14,marginBottom:20}}>
+        {/* Intraday P&L card - special */}
+        <div style={{...card,padding:"16px 20px",borderLeft:`3px solid ${totalIntraday!=null?(totalIntraday>=0?C.green:C.red):C.muted}`}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:4}}>
+            📊 Today's Intraday P&L
+          </div>
+          {totalIntraday !== null ? (
+            <div style={{fontSize:22,fontWeight:800,color:pnlClr(totalIntraday)}}>
+              {totalIntraday>=0?"+":""}{fmtFull(Math.round(totalIntraday))}
+            </div>
+          ) : (
+            <div style={{fontSize:13,color:C.muted}}>No snapshot yet</div>
+          )}
+          <div style={{fontSize:10,color:C.muted,marginTop:4}}>
+            {snapshotDate ? `Baseline: ${snapshotDate}` : "Upload after 3:30 PM to set baseline"}
+          </div>
+        </div>
+
         {[
           {label:"Total MTM P&L",    val:fmtFull(Math.round(totalMTM)), color:pnlClr(totalMTM)},
           {label:"Total Margin Used", val:fmtN(totalMargin),             color:C.text},
           {label:"Total Fund",        val:totalFund>0?fmtN(totalFund):"Not set", color:C.text},
-          {label:"Overall Usage",     val:totalFund>0?(totalMargin/totalFund*100).toFixed(1)+"%":"—",
-            color:totalFund>0?(totalMargin/totalFund>0.9?C.red:totalMargin/totalFund>0.7?C.yellow:C.green):C.muted},
-          {label:"Active Clients",    val:Object.keys(clientData).length, color:C.text},
+          {label:"Active Clients",    val:Object.keys(displayData).length, color:C.text},
         ].map(c => (
           <div key={c.label} style={{...card,padding:"16px 20px"}}>
             <div style={{color:C.muted,fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>{c.label}</div>
@@ -504,6 +661,26 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
           </div>
         ))}
       </div>
+
+      {/* Snapshot status bar */}
+      {snapshot && (
+        <div style={{...card,padding:"10px 16px",marginBottom:16,display:"flex",
+          alignItems:"center",gap:12,borderLeft:`3px solid ${C.accent}`}}>
+          <span style={{fontSize:16}}>📸</span>
+          <div style={{flex:1}}>
+            <span style={{color:C.text,fontSize:13,fontWeight:600}}>
+              Closing snapshot: {snapshotDate}
+            </span>
+            <span style={{color:C.muted,fontSize:12,marginLeft:12}}>
+              Intraday = Current MTM (non-expiry) − {fmtFull(Object.values(snapshot.clients||{}).reduce((s,v)=>s+(v.mtm||0),0))} baseline
+            </span>
+          </div>
+          <button onClick={()=>{if(window.confirm("Clear snapshot? Intraday P&L will reset.")){setSnapshot(null);localStorage.removeItem("rms_snapshot");notify("Snapshot cleared");}}}
+            style={{...btn(C.card),border:`1px solid ${C.border}`,fontSize:11,color:C.muted}}>
+            🗑 Clear
+          </button>
+        </div>
+      )}
 
       {!hasData && (
         <div style={{...card,textAlign:"center",padding:"60px 20px"}}>
@@ -524,27 +701,29 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
             </div>
 
             {/* Table head */}
-            <div style={{display:"grid",gridTemplateColumns:"32px 1fr 1fr 1fr 1fr 1fr 140px",
+            <div style={{display:"grid",gridTemplateColumns:"32px 1fr 1fr 1fr 1fr 1fr 1fr 140px",
               gap:4,padding:"10px 16px",background:C.accent+"08",borderBottom:`1px solid ${C.border}`}}>
-              {["","Client","MTM P&L","SPAN","Exposure","Total Margin","Fund & Usage"].map((h,i)=>(
-                <div key={i} style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",
+              {["","Client","Intraday P&L","MTM P&L","SPAN","Exposure","Total Margin","Fund & Usage"].map((h,i)=>(
+                <div key={i} style={{color: h==="Intraday P&L" ? C.accent : C.muted,
+                  fontSize:11,fontWeight:700,textTransform:"uppercase",
                   letterSpacing:0.6,textAlign:i>1?"right":"left"}}>{h}</div>
               ))}
             </div>
 
             {/* Client rows */}
             {Object.entries(displayData).map(([cid, positions]) => {
-              const totalMTMc = positions.reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
-              const margin    = calcRMSMargin(positions, prices);
-              const fund      = parseFloat((funds||{})[cid])||0;
-              const pctUsed   = fund>0?(margin.total/fund*100):0;
-              const ac        = pctUsed>90?C.red:pctUsed>70?C.yellow:C.green;
-              const isExp     = expanded[cid];
-              const openPos   = positions.filter(p=>parseFloat(p.netQty)!==0).length;
+              const totalMTMc  = positions.reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
+              const margin     = calcRMSMargin(positions, prices);
+              const fund       = parseFloat((funds||{})[cid])||0;
+              const pctUsed    = fund>0?(margin.total/fund*100):0;
+              const ac         = pctUsed>90?C.red:pctUsed>70?C.yellow:C.green;
+              const isExp      = expanded[cid];
+              const openPos    = positions.filter(p=>parseFloat(p.netQty)!==0).length;
+              const intradayPnL = getIntradayPnL(cid, positions, today);
 
               return (
                 <Fragment key={cid}>
-                  <div style={{display:"grid",gridTemplateColumns:"32px 1fr 1fr 1fr 1fr 1fr 140px",
+                  <div style={{display:"grid",gridTemplateColumns:"32px 1fr 120px 1fr 1fr 1fr 1fr 140px",
                     gap:4,padding:"13px 16px",borderBottom:`1px solid ${C.border}`,
                     cursor:"pointer",transition:"background 0.15s"}}
                     onClick={()=>setExpanded(e=>({...e,[cid]:!e[cid]}))}>
@@ -552,6 +731,19 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
                     <div>
                       <div style={{fontWeight:700,color:C.text,fontSize:14}}>{CLIENT_NAMES_RMS[cid]||cid}</div>
                       <div style={{color:C.muted,fontSize:11,marginTop:2}}>{cid} · {openPos} open</div>
+                    </div>
+                    {/* Intraday P&L column */}
+                    <div style={{textAlign:"right"}}>
+                      {intradayPnL !== null ? (
+                        <div>
+                          <div style={{fontWeight:800,fontSize:14,color:pnlClr(intradayPnL)}}>
+                            {intradayPnL>=0?"+":""}{fmtFull(intradayPnL)}
+                          </div>
+                          <div style={{fontSize:10,color:C.muted,marginTop:2}}>intraday</div>
+                        </div>
+                      ) : (
+                        <div style={{color:C.muted,fontSize:11}}>—</div>
+                      )}
                     </div>
                     <div style={{textAlign:"right",fontWeight:800,fontSize:15,color:pnlClr(totalMTMc)}}>
                       {totalMTMc>=0?"+":""}{fmtFull(totalMTMc)}
