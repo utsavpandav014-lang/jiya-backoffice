@@ -1041,7 +1041,175 @@ async function fetchInstrumentToken(symbol, expiry, strike, optType) {
 }
 
 // ── Settings Page Component ────────────────────────────
-function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input }) {
+
+// ─── Password Manager Component ───────────────────────────────────────────────
+function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, input }) {
+  const [adminPwd,    setAdminPwd]    = useState("");
+  const [clientSel,   setClientSel]   = useState("");
+  const [clientPwd,   setClientPwd]   = useState("");
+  const [showAdminP,  setShowAdminP]  = useState(false);
+  const [showClientP, setShowClientP] = useState(false);
+  const [saving,      setSaving]      = useState(false);
+
+  const clients = state?.clients || [];
+
+  // Change admin password
+  const changeAdminPwd = async () => {
+    if (!adminPwd || adminPwd.length < 3) {
+      notify("Password must be at least 3 characters", "error"); return;
+    }
+    setSaving(true);
+    try {
+      // Admin is stored in clients with id === "JIYA" or role === "admin"
+      const adminClient = clients.find(c => c.id === "JIYA" || c.role === "admin") || { id: "JIYA", name: "Admin", role: "admin" };
+      const updated = { ...adminClient, password: adminPwd };
+      // Save to Supabase
+      await withSync(() => sb.upsert("clients", updated));
+      // Update local state
+      setState(s => ({
+        ...s,
+        clients: s.clients.map(c => c.id === adminClient.id ? updated : c)
+      }));
+      setAdminPwd("");
+      notify("✅ Admin password changed successfully!");
+    } catch(e) {
+      notify("❌ Failed: " + e.message, "error");
+    }
+    setSaving(false);
+  };
+
+  // Change client password
+  const changeClientPwd = async () => {
+    if (!clientSel) { notify("Select a client first", "error"); return; }
+    if (!clientPwd || clientPwd.length < 3) { notify("Password must be at least 3 characters", "error"); return; }
+    setSaving(true);
+    try {
+      const client = clients.find(c => c.id === clientSel);
+      if (!client) { notify("Client not found", "error"); setSaving(false); return; }
+      const updated = { ...client, password: clientPwd };
+      await withSync(() => sb.upsert("clients", updated));
+      setState(s => ({
+        ...s,
+        clients: s.clients.map(c => c.id === clientSel ? updated : c)
+      }));
+      setClientPwd("");
+      setClientSel("");
+      notify(`✅ Password changed for ${client.name}!`);
+    } catch(e) {
+      notify("❌ Failed: " + e.message, "error");
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div style={{marginTop:20}}>
+      {/* Admin Password */}
+      <div style={{...card, padding:24, marginBottom:16}}>
+        <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:4}}>🔐 Change Admin Password</div>
+        <div style={{color:C.muted,fontSize:12,marginBottom:16}}>Change the JIYA admin login password</div>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          <div style={{position:"relative",flex:1}}>
+            <input
+              type={showAdminP ? "text" : "password"}
+              value={adminPwd}
+              onChange={e => setAdminPwd(e.target.value)}
+              placeholder="Enter new admin password"
+              style={{...input, width:"100%", boxSizing:"border-box", paddingRight:40}}
+              onKeyDown={e => e.key==="Enter" && changeAdminPwd()}
+            />
+            <span
+              onClick={() => setShowAdminP(v=>!v)}
+              style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
+                cursor:"pointer",fontSize:16,color:C.muted}}>
+              {showAdminP ? "🙈" : "👁️"}
+            </span>
+          </div>
+          <button
+            onClick={changeAdminPwd}
+            disabled={saving || !adminPwd}
+            style={{...btn(C.accent), opacity: saving||!adminPwd ? 0.5 : 1, whiteSpace:"nowrap"}}>
+            {saving ? "Saving..." : "Save Password"}
+          </button>
+        </div>
+      </div>
+
+      {/* Client Password */}
+      <div style={{...card, padding:24}}>
+        <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:4}}>👤 Change Client Password</div>
+        <div style={{color:C.muted,fontSize:12,marginBottom:16}}>Change password for any client — no old password needed</div>
+
+        {/* Client selector */}
+        <div style={{marginBottom:12}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>
+            Select Client
+          </div>
+          <select
+            value={clientSel}
+            onChange={e => setClientSel(e.target.value)}
+            style={{...input, width:"100%", cursor:"pointer"}}>
+            <option value="">-- Select a client --</option>
+            {clients.filter(c => c.id !== "JIYA" && c.role !== "admin").map(c => (
+              <option key={c.id} value={c.id}>{c.name} ({c.id})</option>
+            ))}
+          </select>
+        </div>
+
+        {/* New password */}
+        <div style={{marginBottom:16}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>
+            New Password
+          </div>
+          <div style={{position:"relative"}}>
+            <input
+              type={showClientP ? "text" : "password"}
+              value={clientPwd}
+              onChange={e => setClientPwd(e.target.value)}
+              placeholder="Enter new password for client"
+              style={{...input, width:"100%", boxSizing:"border-box", paddingRight:40}}
+              onKeyDown={e => e.key==="Enter" && changeClientPwd()}
+              disabled={!clientSel}
+            />
+            <span
+              onClick={() => setShowClientP(v=>!v)}
+              style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
+                cursor:"pointer",fontSize:16,color:C.muted}}>
+              {showClientP ? "🙈" : "👁️"}
+            </span>
+          </div>
+        </div>
+
+        <button
+          onClick={changeClientPwd}
+          disabled={saving || !clientSel || !clientPwd}
+          style={{...btn(C.green), opacity: saving||!clientSel||!clientPwd ? 0.5 : 1}}>
+          {saving ? "Saving..." : "✅ Change Client Password"}
+        </button>
+
+        {/* Quick reference */}
+        {clients.filter(c => c.id !== "JIYA" && c.role !== "admin").length > 0 && (
+          <div style={{marginTop:16,padding:12,background:C.accent+"08",borderRadius:8,
+            border:`1px solid ${C.border}`}}>
+            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:8,textTransform:"uppercase"}}>
+              Current Passwords (quick reference)
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+              {clients.filter(c => c.id !== "JIYA" && c.role !== "admin").map(c => (
+                <div key={c.id} style={{fontSize:11,color:C.muted}}>
+                  <span style={{fontWeight:600,color:C.text}}>{c.name?.split(" ")[0]}</span>
+                  {" · "}
+                  <span style={{fontFamily:"monospace"}}>{c.password || "—"}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+// ──────────────────────────────────────────────────────────────────────────────
+
+function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
     password:    angelCreds.password    || "",
@@ -1136,6 +1304,9 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
         </div>
       </div>
 
+      {/* ── Password Management ── */}
+      <PasswordManager state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} />
+
       {/* What gets automated */}
       {angelStatus === "connected" && (
         <div style={{...card,padding:20,marginTop:16}}>
@@ -1167,10 +1338,29 @@ export default function BackOffice() {
   const [dbError, setDbError] = useState(null);
   const [syncStatus, setSyncStatus] = useState("idle"); // "idle"|"saving"|"saved"|"error"
   const [auth, setAuth] = useState(null); // {role:'admin'|'client', clientId?}
+
+  // ── Session auto-logout after 8 hours ──
+  useEffect(() => {
+    if (!auth) return;
+    const loginTime = parseInt(sessionStorage.getItem("jiya_login_time") || "0");
+    if (!loginTime) return;
+    const remaining = (8 * 60 * 60 * 1000) - (Date.now() - loginTime);
+    if (remaining <= 0) { setAuth(null); return; }
+    const t = setTimeout(() => {
+      setAuth(null);
+      sessionStorage.removeItem("jiya_login_time");
+      notify("⏰ Session expired after 8 hours. Please login again.", "error");
+    }, remaining);
+    return () => clearTimeout(t);
+  }, [auth]);
   const [loginForm, setLoginForm] = useState({ user: "", pass: "", error: "" });
   const [page, setPage] = useState("dashboard");
   const [modal, setModal] = useState(null);
-  const [positionFilter, setPositionFilter] = useState("open");
+  const [positionFilter,    setPositionFilter]    = useState("open");
+  const [selectedContract,  setSelectedContract]  = useState(null); // for trade history modal
+  const [ledgerSearch,   setLedgerSearch]   = useState("");
+  const [tradeSearch,    setTradeSearch]    = useState("");
+  const [posSearch,      setPosSearch]      = useState("");
   const [notification, setNotification] = useState(null);
   // RMS state
   const [rmsPositions,   setRmsPositions]   = useState({});
@@ -2367,7 +2557,7 @@ export default function BackOffice() {
                   <td style={{ padding: "12px", color: C.muted, fontFamily: "monospace" }}>{c.password}</td>
                   <td style={{ padding: "12px" }}><span style={badge(C.purple)}>{clientOpenPos(c.id).length}</span></td>
                   <td style={{ padding: "12px" }}>
-                    <button style={{ ...btn(C.red), padding: "5px 10px" }} onClick={() => setState((s) => ({ ...s, clients: s.clients.filter((x) => x.id !== c.id) }))}><Icon name="delete" size={14} /></button>
+                    <button style={{ ...btn(C.red), padding: "5px 10px" }} onClick={() => { if(!window.confirm(`Delete client ${c.name} (${c.id})?\nThis cannot be undone.`)) return; withSync(() => sb.delete("clients", c.id)); setState((s) => ({ ...s, clients: s.clients.filter((x) => x.id !== c.id) })); }}}><Icon name="delete" size={14} /></button>
                   </td>
                 </tr>
               ))}
@@ -2402,6 +2592,11 @@ export default function BackOffice() {
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20, flexWrap:"wrap", gap:12 }}>
             <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
               <h2 style={{ color:C.text, margin:0 }}>Ledger</h2>
+              {/* Search box */}
+              <input value={ledgerSearch} onChange={e=>setLedgerSearch(e.target.value)}
+                placeholder="🔍 Search..."
+                style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",
+                  color:C.text,fontSize:13,outline:"none",width:200}}/>
               {/* Client filter dropdown - admin only */}
               {isAdmin && (
                 <select value={ledgerClientFilter} onChange={e => setLedgerClientFilter(e.target.value)}
@@ -2438,7 +2633,12 @@ export default function BackOffice() {
 
           {/* Per-client ledger tables */}
           {filteredClients.map(client => {
-            const rows = ledgerRows(client.id, ledgerTabFilter);
+            const allRows = ledgerRows(client.id, ledgerTabFilter);
+            const rows = ledgerSearch ? allRows.filter(r =>
+              (r.narration||"").toLowerCase().includes(ledgerSearch.toLowerCase()) ||
+              String(r.amount||"").includes(ledgerSearch) ||
+              (r.ledgerType||"").toLowerCase().includes(ledgerSearch.toLowerCase())
+            ) : allRows;
             const lastBal = rows.slice(-1)[0]?.balance || 0;
             const totalCredit = rows.reduce((a,l) => a+(l.credit||0), 0);
             const totalDebit  = rows.reduce((a,l) => a+(l.debit||0), 0);
@@ -2549,6 +2749,11 @@ export default function BackOffice() {
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16, flexWrap:"wrap", gap:12 }}>
             <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
               <h2 style={{ color:C.text, margin:0 }}>Trades & Positions</h2>
+              {/* Trades search */}
+              <input value={tradeSearch} onChange={e=>setTradeSearch(e.target.value)}
+                placeholder="🔍 Search contract, symbol..."
+                style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,
+                  padding:"7px 12px",color:C.text,fontSize:13,outline:"none",width:220}}/>
               {isAdmin && (
                 <select value={tradesClientFilter} onChange={e => setTradesClientFilter(e.target.value)}
                   style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
@@ -3394,11 +3599,76 @@ export default function BackOffice() {
       return <RMSPage state={state} indexPrices={rmsIndexPrices} setIndexPrices={setRmsIndexPrices} funds={rmsFunds} setFunds={setRmsFunds} notify={notify} C={C} card={card} btn={btn} input={input} livePrice={angelLivePrice} rmsRef={rmsPositionsRef} lastUpdated={rmsLastUpdated} />;
     }
     if (page === "settings" && auth.role === "admin") {
-      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} />;
+      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} />;
     }
   };
 
   // ── Modal ──
+  // ── Trade History Modal ──
+  const renderTradeHistoryModal = () => {
+    if (!selectedContract) return null;
+    const { contract, clientId } = selectedContract;
+    const trades = state.trades.filter(t =>
+      t.clientId === clientId && t.contract === contract
+    ).sort((a,b) => new Date(a.date+' '+a.time) - new Date(b.date+' '+b.time));
+
+    const totalQty = trades.reduce((s,t) => t.side==="BUY" ? s+t.qty : s-t.qty, 0);
+    const overlay  = { position:"fixed", inset:0, background:"rgba(15,23,42,0.5)",
+      display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000 };
+
+    return (
+      <div style={overlay} onClick={()=>setSelectedContract(null)}>
+        <div style={{background:C.card,borderRadius:16,padding:28,width:"min(700px,95vw)",
+          maxHeight:"80vh",overflow:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}}
+          onClick={e=>e.stopPropagation()}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
+            <div>
+              <div style={{fontSize:16,fontWeight:800,color:C.text}}>{contract}</div>
+              <div style={{color:C.muted,fontSize:12,marginTop:2}}>
+                {trades.length} trades · Net qty: {totalQty > 0 ? "+" : ""}{totalQty}
+              </div>
+            </div>
+            <button onClick={()=>setSelectedContract(null)}
+              style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:C.muted}}>✕</button>
+          </div>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead>
+              <tr style={{background:C.bg}}>
+                {["Date","Time","Side","Qty","Price","Value"].map(h=>(
+                  <th key={h} style={{padding:"8px 12px",color:C.muted,fontSize:11,fontWeight:600,
+                    textAlign:h==="Date"||h==="Time"||h==="Side"?"left":"right",textTransform:"uppercase",letterSpacing:0.5}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {trades.map((t,i)=>(
+                <tr key={i} style={{borderBottom:`1px solid ${C.border}`}}>
+                  <td style={{padding:"9px 12px",color:C.muted}}>{t.date}</td>
+                  <td style={{padding:"9px 12px",color:C.muted}}>{t.time}</td>
+                  <td style={{padding:"9px 12px"}}>
+                    <span style={{background:(t.side==="BUY"?C.green:C.red)+"18",
+                      color:t.side==="BUY"?C.green:C.red,
+                      padding:"2px 8px",borderRadius:4,fontWeight:700,fontSize:12}}>
+                      {t.side}
+                    </span>
+                  </td>
+                  <td style={{padding:"9px 12px",textAlign:"right",fontWeight:600}}>{t.qty.toLocaleString()}</td>
+                  <td style={{padding:"9px 12px",textAlign:"right"}}>₹{t.price.toFixed(2)}</td>
+                  <td style={{padding:"9px 12px",textAlign:"right",color:C.muted}}>
+                    ₹{(t.qty*t.price).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {trades.length === 0 && (
+            <div style={{textAlign:"center",padding:40,color:C.muted}}>No trades found for this contract</div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderModal = () => {
     if (!modal) return null;
     const overlay = { position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 };
@@ -3892,8 +4162,25 @@ export default function BackOffice() {
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: C.bg, fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif", color: C.text }}>
+      <style>{`
+        * { box-sizing: border-box; }
+        @media (max-width: 768px) {
+          .jiya-sidebar { width: 60px !important; min-width: 60px !important; }
+          .jiya-sidebar .label { display: none; }
+          .jiya-sidebar .brand-text { display: none; }
+          .jiya-main { padding: 12px !important; }
+        }
+        @media (max-width: 480px) {
+          .jiya-sidebar { display: none !important; }
+        }
+        table { width: 100%; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+      `}</style>
       {/* Sidebar */}
-      <div style={{ width: 230, background: C.sidebar, borderRight: `1px solid ${C.border}`, display: "flex", flexDirection: "column", flexShrink: 0, boxShadow: "2px 0 8px rgba(0,0,0,0.04)" }}>
+      <div style={{ width: "clamp(0px, 230px, 230px)", minWidth:230, background: C.sidebar, borderRight: `1px solid ${C.border}`, display: "flex", flexDirection: "column", flexShrink: 0, boxShadow: "2px 0 8px rgba(0,0,0,0.04)" }}>
         <div style={{ padding: "22px 20px", borderBottom: `1px solid ${C.border}` }}>
           <div style={{ fontSize: 18, fontWeight: 800, color: C.accent, letterSpacing: "-0.5px" }}>📊 JIYA</div>
           <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>Back Office Portal</div>
@@ -3934,12 +4221,13 @@ export default function BackOffice() {
       </div>
 
       {/* Main */}
-      <div style={{ flex: 1, padding: "28px 36px", overflowY: "auto", background: C.bg }}>
+      <div style={{ flex: 1, padding: "clamp(12px, 3vw, 28px) clamp(12px, 4vw, 36px)", overflowY: "auto", background: C.bg, minWidth:0 }}>
         {renderPage()}
       </div>
 
       {/* Modals */}
       {renderModal()}
+      {renderTradeHistoryModal()}
 
       {/* Notification */}
       {notification && (
