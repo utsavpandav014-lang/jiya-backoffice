@@ -2557,7 +2557,7 @@ export default function BackOffice() {
                   <td style={{ padding: "12px", color: C.muted, fontFamily: "monospace" }}>{c.password}</td>
                   <td style={{ padding: "12px" }}><span style={badge(C.purple)}>{clientOpenPos(c.id).length}</span></td>
                   <td style={{ padding: "12px" }}>
-                    <button style={{ ...btn(C.red), padding: "5px 10px" }} onClick={() => { if(!window.confirm(`Delete client ${c.name} (${c.id})?\nThis cannot be undone.`)) return; withSync(() => sb.delete("clients", c.id)); setState((s) => ({ ...s, clients: s.clients.filter((x) => x.id !== c.id) })); }}}><Icon name="delete" size={14} /></button>
+                    <button style={{ ...btn(C.red), padding: "5px 10px" }} onClick={() => { if(!window.confirm("Delete client " + c.name + "? This cannot be undone.")) return; withSync(() => sb.delete("clients", c.id)); setState((s) => ({ ...s, clients: s.clients.filter((x) => x.id !== c.id) })); }}><Icon name="delete" size={14} /></button>
                   </td>
                 </tr>
               ))}
