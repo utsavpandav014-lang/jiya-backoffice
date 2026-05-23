@@ -210,7 +210,8 @@ const INITIAL_STATE = {
   tickets: [],
   bhavcopy: [],
   chargesHistory: [{ ...DEFAULT_CHARGES, effectiveFrom: "2024-01-01" }],
-  interest: [], // [{id, clientId, yearMonth, amount, note}]
+  interest: [],
+  lockedMonths: [], // ["2026-04", "2026-05", ...] — months that are locked
 };
 
 // ─── Icons ─────────────────────────────────────────────────────────────────────
@@ -1548,17 +1549,38 @@ export default function BackOffice() {
     return () => clearInterval(keepAlive);
   }, []);
 
-  // ── Reload when user comes back to tab (prevents stale data) ──
+  // ── Reload when user comes back to tab ──
   useEffect(() => {
     const handleVisibility = () => {
       if (document.visibilityState === "visible" && SUPABASE_CONFIGURED) {
-        // User switched back to this tab — reload fresh data
         loadAllData();
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);
   }, []);
+
+  // ── Auto-lock previous month on 1st of every month ──
+  useEffect(() => {
+    if (!SUPABASE_CONFIGURED) return;
+    const today = new Date();
+    if (today.getDate() !== 1) return; // only run on 1st
+    const prevMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    const prevMonthStr = prevMonth.toISOString().slice(0, 7); // "2026-04"
+    // Check if already locked
+    if (state.lockedMonths?.includes(prevMonthStr)) return;
+    // Lock it
+    const lockMonth = async () => {
+      try {
+        await sb.upsert("locked_months", { month: prevMonthStr, locked_at: new Date().toISOString() });
+        setState(s => ({ ...s, lockedMonths: [...(s.lockedMonths||[]), prevMonthStr] }));
+        notify(`Month ${prevMonthStr} has been locked automatically.`);
+      } catch(e) {
+        console.error("Lock month error:", e);
+      }
+    };
+    lockMonth();
+  }, [state.lockedMonths]);
 
   const loadAllData = async () => {
     setDbLoading(true);
@@ -1578,7 +1600,7 @@ export default function BackOffice() {
         return all;
       };
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy] = await Promise.all([
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         fetchAll("trades",          "?order=date.asc,time.asc"),
         fetchAll("ledger",          "?order=date.asc"),
@@ -1586,6 +1608,7 @@ export default function BackOffice() {
         fetchAll("interest",        "?order=created_at.asc"),
         fetchAll("charges_history", "?order=created_at.asc"),
         fetchAll("bhavcopy",        "?order=created_at.desc"),
+        sb.select("locked_months",  "?order=month.asc").catch(() => []),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -1600,6 +1623,7 @@ export default function BackOffice() {
                           ? chargesHistory
                           : [{ ...DEFAULT_CHARGES, effectiveFrom: "2024-01-01" }],
         bhavcopy:       Array.isArray(bhavcopy)       ? bhavcopy       : [],
+        lockedMonths:   Array.isArray(lockedMonthsRaw) ? lockedMonthsRaw.map(r => r.month) : [],
       }));
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
@@ -2199,22 +2223,35 @@ export default function BackOffice() {
 
     setState((s) => ({
       ...s,
-      trades: uploadMode === "replace" ? newTrades : [...s.trades, ...newTrades],
+      trades: uploadMode === "replace"
+        ? [
+            // Keep locked month trades + add new current month trades
+            ...s.trades.filter(t => {
+              const m = (t.date || "").slice(0, 7);
+              return (s.lockedMonths || []).includes(m);
+            }),
+            ...newTrades
+          ]
+        : [...s.trades, ...newTrades],
     }));
 
     withSync(async () => {
       if (uploadMode === "replace") {
-        // Delete ALL trades in batches (handles any number of rows)
-        let deleted = 0;
+        // Delete ONLY current month trades — locked months are NEVER touched
+        const currentMonth = new Date().toISOString().slice(0, 7); // "2026-05"
+        const lockedMonths = state.lockedMonths || [];
+        // Delete current month trades in batches
         while (true) {
-          const existing = await sb.select("trades", "?limit=1000&select=id");
+          // Only fetch trades from current (unlocked) month
+          const existing = await sb.select("trades",
+            `?date=gte.${currentMonth}-01&date=lt.${currentMonth}-32&limit=1000&select=id`
+          );
           if (!Array.isArray(existing) || existing.length === 0) break;
           const ids = existing.map(r => r.id).join(",");
           await fetch(`${sb.url("trades")}?id=in.(${ids})`, {
             method: "DELETE",
             headers: { ...sb.headers, "Prefer": "" }
           });
-          deleted += existing.length;
           if (existing.length < 1000) break;
         }
       }
@@ -4044,8 +4081,8 @@ export default function BackOffice() {
             <div style={{ color: C.accent, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>STEP 2 — Import Mode</div>
             <div style={{ display: "flex", gap: 8 }}>
               {[
-                { val: "append", label: "➕ Append", desc: "Add to existing trades (use for Day 2, Day 3 files)" },
-                { val: "replace", label: "🔄 Replace", desc: "Wipe all trades and start fresh (use for Day 1 file)" },
+                { val: "append", label: "➕ Append", desc: "Add to existing trades (use for daily uploads within same month)" },
+                { val: "replace", label: "🔄 Replace", desc: "Replace current month trades only (previous months are safe)" },
               ].map(m => (
                 <div key={m.val} onClick={() => setUploadMode(m.val)}
                   style={{ flex: 1, padding: "10px 14px", borderRadius: 8, cursor: "pointer",
