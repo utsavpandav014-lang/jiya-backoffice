@@ -1634,7 +1634,8 @@ export default function BackOffice() {
 
   // ── Charges State ──
   const [pnlClientFilter, setPnlClientFilter] = useState("all");
-  const [pnlDateMode, setPnlDateMode] = useState("all"); // "all" | "month" | "range"
+  const [pnlDateMode, setPnlDateMode] = useState("month"); // "all" | "month" | "range"
+  const [chartClientFilter, setChartClientFilter] = useState("all"); // for 6-month chart
   const [pnlMonth, setPnlMonth] = useState(new Date().toISOString().slice(0,7));
   const [pnlDateFrom, setPnlDateFrom] = useState("");
   const [pnlDateTo, setPnlDateTo] = useState("");
@@ -2322,7 +2323,6 @@ export default function BackOffice() {
     { id: "trades", label: "Trades & Positions", icon: "trades" },
     { id: "pnl", label: "Profit & Loss", icon: "pnl" },
     { id: "charges", label: "Charges", icon: "charges" },
-    { id: "bhavcopy", label: "Bhavcopy / MTM", icon: "bhavcopy" },
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
     { id: "rms", label: "📡 RMS", icon: "dashboard" },
     { id: "settings", label: "⚙️ Settings", icon: "dashboard" },
@@ -2414,16 +2414,69 @@ export default function BackOffice() {
             </div>
             {/* Personal stats */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:16, marginBottom:24 }}>
-              {[
-                { label:"Realized P&L", val:`₹${myData.realizedPnl.toLocaleString()}`, color: myData.realizedPnl >= 0 ? C.green : C.red },
-                { label:"MTM P&L (Today)", val: myData.mtmPnl !== 0 ? `₹${myData.mtmPnl.toLocaleString()}` : "Upload Bhavcopy", color: myData.mtmPnl >= 0 ? C.purple : C.red },
-                { label:"Open Positions", val: myData.openCount, color: C.accent },
-              ].map(s => (
-                <div key={s.label} style={{ ...card, textAlign:"center", borderTop:`3px solid ${s.color}` }}>
-                  <div style={{ color:C.muted, fontSize:11, marginBottom:8, textTransform:"uppercase", letterSpacing:1 }}>{s.label}</div>
-                  <div style={{ color:s.color, fontSize:22, fontWeight:700 }}>{s.val}</div>
-                </div>
-              ))}
+              {(() => {
+                // Win Rate calculations for this client
+                const myTrades = state.trades.filter(t => t.clientId === cid);
+                const now = new Date();
+                const currentMonthStr = now.toISOString().slice(0,7);
+
+                // Monthly win rate — last 12 months
+                const monthMap = {};
+                myTrades.forEach(t => {
+                  const m = (t.date||"").slice(0,7);
+                  if (!m) return;
+                  if (!monthMap[m]) monthMap[m] = { buy:0, sell:0, buyVal:0, sellVal:0 };
+                  const val = (t.price||0) * (t.qty||0);
+                  if (t.side==="BUY")  { monthMap[m].buyVal  += val; }
+                  if (t.side==="SELL") { monthMap[m].sellVal += val; }
+                });
+                const last12 = Object.entries(monthMap)
+                  .sort((a,b)=>a[0]>b[0]?-1:1).slice(0,12);
+                const profitableMonths = last12.filter(([,v]) => (v.sellVal - v.buyVal) > 0).length;
+                const monthWinRate = last12.length > 0 ? Math.round(profitableMonths / last12.length * 100) : 0;
+
+                // Daily win rate — current month only
+                const todayStr = now.toISOString().slice(0,10);
+                const dayMap = {};
+                myTrades.filter(t => (t.date||"").slice(0,7) === currentMonthStr).forEach(t => {
+                  const d = t.date||"";
+                  if (!d) return;
+                  if (!dayMap[d]) dayMap[d] = { buyVal:0, sellVal:0 };
+                  const val = (t.price||0) * (t.qty||0);
+                  if (t.side==="BUY")  dayMap[d].buyVal  += val;
+                  if (t.side==="SELL") dayMap[d].sellVal += val;
+                });
+                const tradingDays = Object.values(dayMap).filter(d => d.buyVal>0 || d.sellVal>0);
+                const profitDays  = tradingDays.filter(d => (d.sellVal - d.buyVal) > 0).length;
+                const dayWinRate  = tradingDays.length > 0 ? Math.round(profitDays / tradingDays.length * 100) : 0;
+                const wrColor     = monthWinRate >= 60 ? C.green : monthWinRate >= 40 ? C.yellow : C.red;
+
+                return (
+                  <>
+                    <div style={{ ...card, textAlign:"center", borderTop:`3px solid ${myData.realizedPnl>=0?C.green:C.red}` }}>
+                      <div style={{ color:C.muted, fontSize:11, marginBottom:8, textTransform:"uppercase", letterSpacing:1 }}>Realized P&L</div>
+                      <div style={{ color:myData.realizedPnl>=0?C.green:C.red, fontSize:22, fontWeight:700 }}>₹{myData.realizedPnl.toLocaleString()}</div>
+                    </div>
+                    {/* Win Rate Card */}
+                    <div style={{ ...card, textAlign:"center", borderTop:`3px solid ${wrColor}` }}>
+                      <div style={{ color:C.muted, fontSize:11, marginBottom:4, textTransform:"uppercase", letterSpacing:1 }}>Win Rate (12 months)</div>
+                      <div style={{ color:wrColor, fontSize:32, fontWeight:800, lineHeight:1 }}>{monthWinRate}%</div>
+                      <div style={{ color:C.muted, fontSize:11, marginTop:6 }}>
+                        {profitableMonths}/{last12.length} months profitable
+                      </div>
+                      <div style={{ marginTop:8, paddingTop:8, borderTop:`1px solid ${C.border}` }}>
+                        <div style={{ color:C.muted, fontSize:10, textTransform:"uppercase", letterSpacing:1 }}>This Month — Daily</div>
+                        <div style={{ color:wrColor, fontSize:18, fontWeight:700, marginTop:2 }}>{dayWinRate}%</div>
+                        <div style={{ color:C.muted, fontSize:10 }}>{profitDays}/{tradingDays.length} days</div>
+                      </div>
+                    </div>
+                    <div style={{ ...card, textAlign:"center", borderTop:`3px solid ${C.accent}` }}>
+                      <div style={{ color:C.muted, fontSize:11, marginBottom:8, textTransform:"uppercase", letterSpacing:1 }}>Open Positions</div>
+                      <div style={{ color:C.accent, fontSize:22, fontWeight:700 }}>{myData.openCount}</div>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
         );
@@ -2441,19 +2494,184 @@ export default function BackOffice() {
           </div>
 
           {/* Summary row */}
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:14, marginBottom:28 }}>
-            {[
-              { label:"Total Clients", val: state.clients.length, color:C.accent },
-              { label:"Realized P&L (All)", val:`₹${totalRealized.toLocaleString()}`, color: totalRealized>=0?C.green:C.red },
-              { label:"MTM P&L (Today)", val: totalMtm!==0?`₹${totalMtm.toLocaleString()}`:"—", color:C.purple },
-              { label:"Open Positions", val: openPositions.length, color:C.yellow },
-            ].map(s => (
-              <div key={s.label} style={{ ...card, borderTop:`3px solid ${s.color}` }}>
-                <div style={{ color:C.muted, fontSize:11, marginBottom:6, textTransform:"uppercase", letterSpacing:1 }}>{s.label}</div>
-                <div style={{ color:s.color, fontSize:24, fontWeight:700 }}>{s.val}</div>
+          {(() => {
+            // Admin Win Rate calculation across all clients
+            const allTrades = state.trades;
+            const now = new Date();
+            const currentMonthStr = now.toISOString().slice(0,7);
+
+            // Monthly win rate — last 12 months (all clients combined)
+            const monthMap = {};
+            allTrades.forEach(t => {
+              const m = (t.date||"").slice(0,7);
+              if (!m) return;
+              if (!monthMap[m]) monthMap[m] = { buyVal:0, sellVal:0 };
+              const val = (t.price||0) * (t.qty||0);
+              if (t.side==="BUY")  monthMap[m].buyVal  += val;
+              if (t.side==="SELL") monthMap[m].sellVal += val;
+            });
+            const last12 = Object.entries(monthMap).sort((a,b)=>a[0]>b[0]?-1:1).slice(0,12);
+            const profMonths = last12.filter(([,v])=>(v.sellVal-v.buyVal)>0).length;
+            const mwr = last12.length > 0 ? Math.round(profMonths/last12.length*100) : 0;
+
+            // Daily win rate — current month
+            const dayMap = {};
+            allTrades.filter(t=>(t.date||"").slice(0,7)===currentMonthStr).forEach(t => {
+              const d = t.date||""; if(!d) return;
+              if (!dayMap[d]) dayMap[d] = { buyVal:0, sellVal:0 };
+              const val = (t.price||0)*(t.qty||0);
+              if (t.side==="BUY")  dayMap[d].buyVal  += val;
+              if (t.side==="SELL") dayMap[d].sellVal += val;
+            });
+            const tDays = Object.values(dayMap).filter(d=>d.buyVal>0||d.sellVal>0);
+            const pDays = tDays.filter(d=>(d.sellVal-d.buyVal)>0).length;
+            const dwr = tDays.length > 0 ? Math.round(pDays/tDays.length*100) : 0;
+            const wrC = mwr>=60?C.green:mwr>=40?C.yellow:C.red;
+
+            return (
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:14, marginBottom:28 }}>
+                <div onClick={()=>setPage("clients")} style={{ ...card, borderTop:`3px solid ${C.accent}`, cursor:"pointer" }}
+                  onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";}}
+                  onMouseLeave={e=>{e.currentTarget.style.transform="none";}}>
+                  <div style={{ color:C.muted, fontSize:11, marginBottom:6, textTransform:"uppercase", letterSpacing:1 }}>Total Clients</div>
+                  <div style={{ color:C.accent, fontSize:24, fontWeight:700 }}>{state.clients.length}</div>
+                </div>
+                <div onClick={()=>setPage("pnl")} style={{ ...card, borderTop:`3px solid ${totalRealized>=0?C.green:C.red}`, cursor:"pointer" }}
+                  onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";}}
+                  onMouseLeave={e=>{e.currentTarget.style.transform="none";}}>
+                  <div style={{ color:C.muted, fontSize:11, marginBottom:6, textTransform:"uppercase", letterSpacing:1 }}>Realized P&L (All)</div>
+                  <div style={{ color:totalRealized>=0?C.green:C.red, fontSize:24, fontWeight:700 }}>₹{totalRealized.toLocaleString()}</div>
+                </div>
+                {/* Win Rate Card */}
+                <div style={{ ...card, borderTop:`3px solid ${wrC}` }}>
+                  <div style={{ color:C.muted, fontSize:11, marginBottom:4, textTransform:"uppercase", letterSpacing:1 }}>Win Rate (12 Months)</div>
+                  <div style={{ color:wrC, fontSize:28, fontWeight:800, lineHeight:1 }}>{mwr}%</div>
+                  <div style={{ color:C.muted, fontSize:10, marginTop:4 }}>{profMonths}/{last12.length} months · Today: <b style={{color:wrC}}>{dwr}%</b> ({pDays}/{tDays.length} days)</div>
+                </div>
+                <div onClick={()=>setPage("trades")} style={{ ...card, borderTop:`3px solid ${C.yellow}`, cursor:"pointer" }}
+                  onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";}}
+                  onMouseLeave={e=>{e.currentTarget.style.transform="none";}}>
+                  <div style={{ color:C.muted, fontSize:11, marginBottom:6, textTransform:"uppercase", letterSpacing:1 }}>Open Positions</div>
+                  <div style={{ color:C.yellow, fontSize:24, fontWeight:700 }}>{openPositions.length}</div>
+                </div>
               </div>
-            ))}
-          </div>
+            );
+          })()}
+
+          {/* 6-Month P&L Line Chart */}
+          {(() => {
+            const now   = new Date();
+            const months = [];
+            for (let i = 5; i >= 0; i--) {
+              const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+              months.push(d.toISOString().slice(0,7));
+            }
+
+            const clientsToShow = chartClientFilter === "all"
+              ? state.clients.filter(c => c.id !== "JIYA" && c.role !== "admin")
+              : state.clients.filter(c => c.id === chartClientFilter);
+
+            const COLORS = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4"];
+
+            const clientData = clientsToShow.map((cl, ci) => {
+              const pts = months.map(m => {
+                const mTrades = state.trades.filter(t => t.clientId===cl.id && (t.date||"").slice(0,7)===m);
+                let buyVal=0, sellVal=0;
+                mTrades.forEach(t => {
+                  const v = (t.price||0)*(t.qty||0);
+                  if (t.side==="BUY")  buyVal  += v;
+                  if (t.side==="SELL") sellVal += v;
+                });
+                return sellVal - buyVal;
+              });
+              return { name: (cl.name||cl.id).split(" ")[0], pts, color: COLORS[ci % COLORS.length] };
+            });
+
+            const allVals = clientData.flatMap(c => c.pts).filter(v => v !== 0);
+            if (allVals.length === 0) return null;
+
+            const maxV = Math.max(...allVals.map(Math.abs), 1);
+            const H = 160, W_PAD = 48, gap = 100 / Math.max(months.length-1, 1);
+
+            const toY = v => H/2 - (v/maxV) * (H/2 - 16);
+            const getPath = pts => pts.map((v,i) =>
+              `${i===0?"M":"L"}${W_PAD + i*gap*(100/100)}%,${toY(v)}`
+            ).join(" ");
+
+            const monthLabels = months.map(m => {
+              const [y,mo] = m.split("-");
+              return new Date(+y, +mo-1).toLocaleString("default",{month:"short"});
+            });
+
+            return (
+              <div style={{ ...card, marginBottom:28 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+                  <div>
+                    <h3 style={{ color:C.text, margin:0, fontSize:16 }}>6-Month P&L Trend</h3>
+                    <div style={{ color:C.muted, fontSize:12, marginTop:3 }}>Net P&L (Sell Value − Buy Value) per month</div>
+                  </div>
+                  <select value={chartClientFilter} onChange={e=>setChartClientFilter(e.target.value)}
+                    style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:8,
+                      padding:"6px 12px", color:C.text, fontSize:12, cursor:"pointer" }}>
+                    <option value="all">All Clients</option>
+                    {state.clients.filter(c=>c.id!=="JIYA"&&c.role!=="admin").map(c=>(
+                      <option key={c.id} value={c.id}>{c.name||c.id}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* SVG Line Chart */}
+                <div style={{ position:"relative", overflowX:"auto" }}>
+                  <svg width="100%" height={H+32} viewBox={`0 0 600 ${H+32}`} preserveAspectRatio="none"
+                    style={{ display:"block" }}>
+                    {/* Zero line */}
+                    <line x1="0" y1={H/2} x2="600" y2={H/2}
+                      stroke={C.border} strokeWidth="1" strokeDasharray="4,4"/>
+                    {/* Grid lines */}
+                    {[0.25,0.5,0.75].map(r=>(
+                      <g key={r}>
+                        <line x1="0" y1={H/2 - r*H/2} x2="600" y2={H/2 - r*H/2}
+                          stroke={C.border} strokeWidth="0.5" strokeOpacity="0.5"/>
+                        <line x1="0" y1={H/2 + r*H/2} x2="600" y2={H/2 + r*H/2}
+                          stroke={C.border} strokeWidth="0.5" strokeOpacity="0.5"/>
+                      </g>
+                    ))}
+                    {/* Client lines */}
+                    {clientData.map((cl) => {
+                      const pts = cl.pts.map((v,i) => ({ x: i*(600/(months.length-1)), y: toY(v) }));
+                      const path = pts.map((p,i) => `${i===0?"M":"L"}${p.x},${p.y}`).join(" ");
+                      return (
+                        <g key={cl.name}>
+                          <path d={path} fill="none" stroke={cl.color} strokeWidth="2.5" strokeLinejoin="round"/>
+                          {pts.map((p,i)=>(
+                            <g key={i}>
+                              <circle cx={p.x} cy={p.y} r="4" fill={cl.color}/>
+                              <title>{cl.name}: ₹{cl.pts[i].toLocaleString("en-IN")}</title>
+                            </g>
+                          ))}
+                        </g>
+                      );
+                    })}
+                    {/* Month labels */}
+                    {monthLabels.map((m,i)=>(
+                      <text key={m} x={i*(600/(months.length-1))} y={H+20}
+                        textAnchor="middle" fontSize="11" fill={C.muted}>{m}</text>
+                    ))}
+                  </svg>
+                </div>
+
+                {/* Legend */}
+                <div style={{ display:"flex", gap:16, flexWrap:"wrap", marginTop:8 }}>
+                  {clientData.map(cl=>(
+                    <div key={cl.name} style={{ display:"flex", alignItems:"center", gap:6, fontSize:12 }}>
+                      <div style={{ width:16, height:3, borderRadius:2, background:cl.color }}/>
+                      <span style={{ color:C.muted }}>{cl.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* P&L Bar Chart */}
           <div style={{ ...card }}>
@@ -2965,7 +3183,28 @@ export default function BackOffice() {
           {/* Header */}
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20, flexWrap:"wrap", gap:12 }}>
             <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
-              <h2 style={{ color:C.text, margin:0 }}>Profit & Loss</h2>
+              <div style={{ display:"flex", alignItems:"baseline", gap:16, flexWrap:"wrap" }}>
+          <h2 style={{ color:C.text, margin:0 }}>Profit & Loss</h2>
+          {(() => {
+            const allTimePnL = (() => {
+              const allT = isAdmin ? state.trades : state.trades.filter(t=>t.clientId===cid);
+              let buyVal=0, sellVal=0;
+              allT.forEach(t => {
+                const v=(t.price||0)*(t.qty||0);
+                if(t.side==="BUY")  buyVal +=v;
+                if(t.side==="SELL") sellVal+=v;
+              });
+              return sellVal - buyVal;
+            })();
+            return (
+              <span style={{ fontSize:12, color:C.muted, fontWeight:400 }}>
+                All Time: <span style={{ color:allTimePnL>=0?C.green:C.red, fontWeight:600 }}>
+                  ₹{allTimePnL.toLocaleString("en-IN",{maximumFractionDigits:0})}
+                </span>
+              </span>
+            );
+          })()}
+        </div>
               {isAdmin && (
                 <select value={pnlClientFilter} onChange={e => setPnlClientFilter(e.target.value)}
                   style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
@@ -3373,86 +3612,6 @@ export default function BackOffice() {
       );
     }
 
-    if (page === "bhavcopy") {
-      const { openPositions } = applyFIFO(state.trades);
-      const bhavLoaded = state.bhavcopy.length > 0;
-      const bhavLoadedDate = state.bhavcopy[0]?.bhavDate || "";
-
-      // MTM summary across all clients
-      let totalMtm = 0;
-      const mtmRows = openPositions.map(p => {
-        const close = getBhavClose(p.contract);
-        const mtm = close !== null
-          ? (p.side === "SELL" ? (p.avgPrice - close) : (close - p.avgPrice)) * p.netQty
-          : null;
-        if (mtm !== null) totalMtm += mtm;
-        return { ...p, close, mtm, expiring: isExpiring(p.contract) };
-      });
-
-      return (
-        <div>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24 }}>
-            <div>
-              <h2 style={{ color:C.text, margin:0 }}>Bhavcopy & MTM P&L</h2>
-              <div style={{ color:C.muted, fontSize:12, marginTop:4 }}>Upload NSE F&O Bhavcopy to update closing prices and auto square-off expiring contracts</div>
-            </div>
-            <button style={btn(C.purple)} onClick={() => setModal("uploadBhav")}><Icon name="upload" size={16}/> Upload Bhavcopy</button>
-          </div>
-
-          {/* Status bar */}
-          {bhavLoaded ? (
-            <div style={{ ...card, marginBottom:20, borderLeft:`3px solid ${C.green}`, display:"flex", gap:32, flexWrap:"wrap" }}>
-              <div><div style={{color:C.muted,fontSize:11,marginBottom:4}}>BHAVCOPY DATE</div><div style={{color:C.green,fontWeight:700}}>{bhavLoadedDate}</div></div>
-              <div><div style={{color:C.muted,fontSize:11,marginBottom:4}}>CONTRACTS LOADED</div><div style={{color:C.text,fontWeight:700}}>{state.bhavcopy.length.toLocaleString()}</div></div>
-              <div><div style={{color:C.muted,fontSize:11,marginBottom:4}}>OPEN POSITIONS MATCHED</div><div style={{color:C.accent,fontWeight:700}}>{mtmRows.filter(r=>r.close!==null).length} / {mtmRows.length}</div></div>
-              <div><div style={{color:C.muted,fontSize:11,marginBottom:4}}>TOTAL MTM P&L</div><div style={{color:totalMtm>=0?C.green:C.red,fontWeight:700,fontSize:18}}>₹{totalMtm.toFixed(2)}</div></div>
-              <div><div style={{color:C.muted,fontSize:11,marginBottom:4}}>EXPIRING TODAY</div><div style={{color:C.red,fontWeight:700}}>{mtmRows.filter(r=>r.expiring).length} positions</div></div>
-            </div>
-          ) : (
-            <div style={{ ...card, marginBottom:20, textAlign:"center", padding:40, borderStyle:"dashed" }}>
-              <div style={{fontSize:32,marginBottom:12}}>📊</div>
-              <div style={{color:C.muted}}>No Bhavcopy uploaded yet.</div>
-              <div style={{color:C.muted,fontSize:12,marginTop:4}}>Upload NSE F&O Bhavcopy to see MTM P&L and auto square-off expiring contracts.</div>
-            </div>
-          )}
-
-          {/* MTM P&L Table */}
-          {bhavLoaded && mtmRows.length > 0 && (
-            <div style={{ ...card }}>
-              <h3 style={{ color:C.text, margin:"0 0 16px", fontSize:15 }}>Open Position MTM P&L — {bhavLoadedDate}</h3>
-              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
-                <thead>
-                  <tr>{["Client","Contract","Qty","Side","Avg Price","Close Price","MTM P&L","Status"].map(h=>(
-                    <th key={h} style={{textAlign:"left",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>
-                  ))}</tr>
-                </thead>
-                <tbody>
-                  {mtmRows.map((p,i) => (
-                    <tr key={i} style={{borderBottom:`1px solid ${C.border}22`, background: p.expiring ? C.red+"0a" : "transparent"}}>
-                      <td style={{padding:"10px 12px",color:C.accent,fontSize:12}}>{state.clients.find(c=>c.id===p.clientId)?.name || p.clientId}</td>
-                      <td style={{padding:"10px 12px",color:C.text,fontSize:12}}>{p.contract}</td>
-                      <td style={{padding:"10px 12px",color:C.text,fontWeight:700}}>{p.netQty}</td>
-                      <td style={{padding:"10px 12px"}}><span style={badge(p.side==="SELL"?C.red:C.green)}>{p.side}</span></td>
-                      <td style={{padding:"10px 12px",color:C.text}}>₹{p.avgPrice}</td>
-                      <td style={{padding:"10px 12px",color:p.close?C.purple:C.muted}}>{p.close ? `₹${p.close}` : "—"}</td>
-                      <td style={{padding:"10px 12px",color:p.mtm===null?C.muted:p.mtm>=0?C.green:C.red,fontWeight:700}}>
-                        {p.mtm===null ? "—" : `₹${p.mtm.toFixed(2)}`}
-                      </td>
-                      <td style={{padding:"10px 12px"}}>
-                        {p.expiring
-                          ? <span style={badge(C.red)}>⚠️ Expiring — will auto square-off</span>
-                          : p.close ? <span style={badge(C.green)}>MTM Updated</span>
-                          : <span style={badge(C.muted)}>Not in Bhavcopy</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      );
-    }
 
     if (page === "tickets") {
       const isAdmin = auth.role === "admin";
@@ -4181,9 +4340,22 @@ export default function BackOffice() {
       `}</style>
       {/* Sidebar */}
       <div style={{ width: "clamp(0px, 230px, 230px)", minWidth:230, background: C.sidebar, borderRight: `1px solid ${C.border}`, display: "flex", flexDirection: "column", flexShrink: 0, boxShadow: "2px 0 8px rgba(0,0,0,0.04)" }}>
-        <div style={{ padding: "22px 20px", borderBottom: `1px solid ${C.border}` }}>
+        <div style={{ padding: "20px 20px 16px", borderBottom: `1px solid ${C.border}` }}>
           <div style={{ fontSize: 18, fontWeight: 800, color: C.accent, letterSpacing: "-0.5px" }}>📊 JIYA</div>
-          <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>Back Office Portal</div>
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Back Office Portal</div>
+          {auth?.role === "client" && currentClient?.name && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>Logged in as</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.text, letterSpacing: "-0.3px" }}>{currentClient.name}</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 1, fontFamily: "monospace" }}>{currentClient.id}</div>
+            </div>
+          )}
+          {auth?.role === "admin" && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>Administrator</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.text, letterSpacing: "-0.3px" }}>JIYA</div>
+            </div>
+          )}
         </div>
         <div style={{ flex: 1, padding: "10px 8px" }}>
           {pages.map((p) => (
@@ -4200,8 +4372,8 @@ export default function BackOffice() {
           ))}
         </div>
         <div style={{ padding: "14px 16px", borderTop: `1px solid ${C.border}` }}>
-          {/* Sync status */}
-          {SUPABASE_CONFIGURED && (
+          {/* Sync status — admin only */}
+          {auth?.role === "admin" && SUPABASE_CONFIGURED && (
             <div style={{ marginBottom:10, fontSize:11, display:"flex", alignItems:"center", gap:6,
               color: syncStatus==="saved"?C.green : syncStatus==="error"?C.red : syncStatus==="saving"?"#6366f1" : C.muted }}>
               <div style={{ width:6, height:6, borderRadius:"50%", background:"currentColor",
@@ -4210,12 +4382,11 @@ export default function BackOffice() {
               {syncStatus==="saving" ? "Saving..." : syncStatus==="saved" ? "✓ Saved to database" : syncStatus==="error" ? "⚠ Sync failed" : "Database connected"}
             </div>
           )}
-          {!SUPABASE_CONFIGURED && (
+          {auth?.role === "admin" && !SUPABASE_CONFIGURED && (
             <div style={{ marginBottom:10, fontSize:11, color:C.yellow, display:"flex", alignItems:"center", gap:6 }}>
               ⚠️ Local mode — data not saved
             </div>
           )}
-          <div style={{ color: C.muted, fontSize: 12, marginBottom: 6 }}>{auth.role === "admin" ? "Admin: JIYA" : currentClient?.name}</div>
           <button onClick={logout} style={{ ...btn(C.red), padding: "7px 14px", fontSize: 12 }}><Icon name="logout" size={14} /> Logout</button>
         </div>
       </div>
