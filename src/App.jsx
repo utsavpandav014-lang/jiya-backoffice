@@ -256,7 +256,12 @@ const sb = {
   url: (table) => `${SUPABASE_URL}/rest/v1/${table}`,
 
   async select(table, query = "") {
-    const r = await fetch(`${this.url(table)}${query}`, { headers: this.headers });
+    const headers = {
+      ...this.headers,
+      "Range-Unit": "items",
+      "Prefer": "count=none",  // don't count, just return rows
+    };
+    const r = await fetch(`${this.url(table)}${query}`, { headers });
     if (!r.ok) throw new Error(`SELECT ${table}: ${await r.text()}`);
     return r.json();
   },
@@ -1538,23 +1543,49 @@ export default function BackOffice() {
           headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}` }
         });
       } catch(e) {}
-    }, 4 * 60 * 1000);
+    }, 2 * 60 * 1000); // ping every 2 min to prevent sleep
 
     return () => clearInterval(keepAlive);
+  }, []);
+
+  // ── Reload when user comes back to tab (prevents stale data) ──
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && SUPABASE_CONFIGURED) {
+        // User switched back to this tab — reload fresh data
+        loadAllData();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
   }, []);
 
   const loadAllData = async () => {
     setDbLoading(true);
     setDbError(null);
     try {
+      // ── Paginated fetch — loads ALL rows regardless of count ──
+      const fetchAll = async (table, query = "") => {
+        const PAGE = 1000;
+        let all = [], offset = 0;
+        while (true) {
+          const rows = await sb.select(table, `${query}&limit=${PAGE}&offset=${offset}`);
+          if (!Array.isArray(rows) || rows.length === 0) break;
+          all = all.concat(rows);
+          if (rows.length < PAGE) break; // last page
+          offset += PAGE;
+        }
+        return all;
+      };
+
       const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy] = await Promise.all([
-        sb.select("clients",         "?order=created_at.asc"),
-        sb.select("trades",          "?order=date.asc,time.asc"),
-        sb.select("ledger",          "?order=date.asc"),
-        sb.select("tickets",         "?order=date.desc"),
-        sb.select("interest",        "?order=created_at.asc"),
-        sb.select("charges_history", "?order=created_at.asc"),
-        sb.select("bhavcopy",        "?order=created_at.desc&limit=50000"),
+        fetchAll("clients",         "?order=created_at.asc"),
+        fetchAll("trades",          "?order=date.asc,time.asc"),
+        fetchAll("ledger",          "?order=date.asc"),
+        fetchAll("tickets",         "?order=date.desc"),
+        fetchAll("interest",        "?order=created_at.asc"),
+        fetchAll("charges_history", "?order=created_at.asc"),
+        fetchAll("bhavcopy",        "?order=created_at.desc"),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -1575,8 +1606,10 @@ export default function BackOffice() {
     } catch (err) {
       console.error("Load error:", err);
       setDbError(err.message);
-      // Show the actual error so user knows what's wrong
-      notify("⚠️ Database load failed: " + err.message + " — Check your Supabase URL and key in App.jsx", "error");
+      // IMPORTANT: Do NOT reset state on error — keep existing data visible
+      // Only show error notification, don't wipe trades/ledger/clients
+      notify("⚠️ Database connection issue: " + err.message, "error");
+      setSyncStatus("error");
     } finally {
       setDbLoading(false);
     }
@@ -2171,10 +2204,21 @@ export default function BackOffice() {
 
     withSync(async () => {
       if (uploadMode === "replace") {
-        // Delete all existing trades using deleteAll
-        await sb.deleteAll("trades");
+        // Delete ALL trades in batches (handles any number of rows)
+        let deleted = 0;
+        while (true) {
+          const existing = await sb.select("trades", "?limit=1000&select=id");
+          if (!Array.isArray(existing) || existing.length === 0) break;
+          const ids = existing.map(r => r.id).join(",");
+          await fetch(`${sb.url("trades")}?id=in.(${ids})`, {
+            method: "DELETE",
+            headers: { ...sb.headers, "Prefer": "" }
+          });
+          deleted += existing.length;
+          if (existing.length < 1000) break;
+        }
       }
-      // Insert in batches of 500 (Supabase limit)
+      // Insert in batches of 500
       for (let i = 0; i < newTrades.length; i += 500) {
         await sb.upsert("trades", newTrades.slice(i, i + 500));
       }
