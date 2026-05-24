@@ -2000,6 +2000,10 @@ export default function BackOffice() {
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadPreview, setUploadPreview] = useState(null);
   const [uploadMode, setUploadMode] = useState("replace");
+  const [uploadHistory, setUploadHistory] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("jiya_upload_history") || "[]"); }
+    catch(e) { return []; }
+  });
   const [uploadTradeDate, setUploadTradeDate] = useState(new Date().toISOString().slice(0,10));
 
   // Normalize expiry date to standard format: DDMMMYYYY (e.g. 02APR2026)
@@ -2214,6 +2218,44 @@ export default function BackOffice() {
     reader.readAsText(file);
   };
 
+  // ── Undo last upload by batchId ──
+  const undoUpload = async (entry) => {
+    if (!window.confirm(
+      "Undo this upload?\n" +
+      entry.tradeCount + " trades from " + entry.filename + "\n" +
+      "This will remove those trades permanently."
+    )) return;
+
+    const { batchId, mode, month } = entry;
+
+    // Remove from local state
+    setState(s => ({ ...s, trades: s.trades.filter(t => t.batchId !== batchId) }));
+
+    // Remove from Supabase
+    withSync(async () => {
+      // Delete in batches by batchId
+      while (true) {
+        const existing = await sb.select("trades", `?batchId=eq.${batchId}&limit=1000&select=id`);
+        if (!Array.isArray(existing) || existing.length === 0) break;
+        const ids = existing.map(r => r.id).join(",");
+        await fetch(`${sb.url("trades")}?id=in.(${ids})`, {
+          method: "DELETE",
+          headers: { ...sb.headers, "Prefer": "" }
+        });
+        if (existing.length < 1000) break;
+      }
+    });
+
+    // Remove from history
+    setUploadHistory(prev => {
+      const updated = prev.filter(h => h.batchId !== batchId);
+      try { localStorage.setItem("jiya_upload_history", JSON.stringify(updated)); } catch(e) {}
+      return updated;
+    });
+
+    notify("✅ Upload undone — " + entry.tradeCount + " trades removed");
+  };
+
   const confirmUpload = () => {
     if (!uploadPreview || !uploadPreview.rows.length) return notify("No valid trades to import", "error");
     const batchId = Date.now();
@@ -2266,6 +2308,22 @@ export default function BackOffice() {
     setModal(null);
     const warn = unknownClients.length ? ` ⚠️ Unknown client IDs: ${unknownClients.join(", ")}` : "";
     notify(`${newTrades.length} trades imported for ${clientsInFile.length} clients.${warn}`);
+
+    // ── Save to upload history (keep last 5) ──
+    const histEntry = {
+      batchId,
+      timestamp:  new Date().toISOString(),
+      mode:       uploadMode,
+      tradeCount: newTrades.length,
+      clients:    clientsInFile.length,
+      filename:   uploadFile?.name || "unknown",
+      month:      new Date().toISOString().slice(0,7),
+    };
+    setUploadHistory(prev => {
+      const updated = [histEntry, ...prev].slice(0, 5); // keep last 5
+      try { localStorage.setItem("jiya_upload_history", JSON.stringify(updated)); } catch(e) {}
+      return updated;
+    });
   };
 
   // ── Support Tickets ──
@@ -3061,7 +3119,19 @@ export default function BackOffice() {
                 </select>
               )}
             </div>
-            {isAdmin && <button style={btn(C.purple)} onClick={() => setModal("uploadTrades")}><Icon name="upload" size={16}/> Upload Master File</button>}
+            {isAdmin && (
+              <div style={{display:"flex", gap:8}}>
+                <button style={btn(C.purple)} onClick={() => setModal("uploadTrades")}>
+                  <Icon name="upload" size={16}/> Upload Master File
+                </button>
+                {uploadHistory.length > 0 && (
+                  <button style={{...btn(C.card), border:`1px solid ${C.border}`, color:C.text, fontSize:13}}
+                    onClick={() => setModal("uploadHistory")}>
+                    🕐 History ({uploadHistory.length})
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Position filter tabs */}
@@ -3911,6 +3981,90 @@ export default function BackOffice() {
 
   const renderModal = () => {
     if (!modal) return null;
+
+    // ── Upload History Modal ──
+    if (modal === "uploadHistory") {
+      const overlay = { position:"fixed", inset:0, background:"rgba(15,23,42,0.5)",
+        display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000 };
+      return (
+        <div style={overlay} onClick={() => setModal(null)}>
+          <div style={{background:C.card, borderRadius:16, padding:28, width:"min(560px,95vw)",
+            boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}} onClick={e=>e.stopPropagation()}>
+
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20}}>
+              <div>
+                <div style={{fontSize:16, fontWeight:800, color:C.text}}>🕐 Upload History</div>
+                <div style={{color:C.muted, fontSize:12, marginTop:2}}>Last {uploadHistory.length} uploads — click Undo to reverse</div>
+              </div>
+              <button onClick={()=>setModal(null)}
+                style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:C.muted}}>✕</button>
+            </div>
+
+            {uploadHistory.length === 0 ? (
+              <div style={{textAlign:"center", padding:40, color:C.muted}}>No upload history yet</div>
+            ) : (
+              <div style={{display:"flex", flexDirection:"column", gap:10}}>
+                {uploadHistory.map((entry, i) => {
+                  const ts = new Date(entry.timestamp);
+                  const timeStr = ts.toLocaleDateString("en-IN") + " " + ts.toLocaleTimeString("en-IN", {hour:"2-digit", minute:"2-digit"});
+                  const modeColor = entry.mode === "replace" ? C.red : C.green;
+                  const isLocked = (state.lockedMonths||[]).includes(entry.month);
+                  return (
+                    <div key={entry.batchId} style={{
+                      display:"flex", alignItems:"center", justifyContent:"space-between",
+                      padding:"12px 16px", borderRadius:10,
+                      background: i===0 ? C.accent+"08" : C.bg,
+                      border:`1px solid ${i===0 ? C.accent+"30" : C.border}`
+                    }}>
+                      <div style={{flex:1}}>
+                        <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:4}}>
+                          <span style={{fontSize:12, fontWeight:700, color:C.text}}>
+                            {entry.filename}
+                          </span>
+                          <span style={{fontSize:10, padding:"1px 7px", borderRadius:4,
+                            background:modeColor+"18", color:modeColor, fontWeight:700,
+                            textTransform:"uppercase"}}>
+                            {entry.mode}
+                          </span>
+                          {i === 0 && (
+                            <span style={{fontSize:10, padding:"1px 7px", borderRadius:4,
+                              background:C.accent+"18", color:C.accent, fontWeight:700}}>
+                              Latest
+                            </span>
+                          )}
+                        </div>
+                        <div style={{color:C.muted, fontSize:11}}>
+                          {entry.tradeCount} trades · {entry.clients} clients · {timeStr}
+                        </div>
+                        {isLocked && (
+                          <div style={{color:C.yellow, fontSize:10, marginTop:2}}>
+                            Month {entry.month} is locked — undo not available
+                          </div>
+                        )}
+                      </div>
+                      {!isLocked ? (
+                        <button
+                          onClick={() => { setModal(null); undoUpload(entry); }}
+                          style={{...btn(C.red), fontSize:12, padding:"6px 14px", marginLeft:12, whiteSpace:"nowrap"}}>
+                          ↩ Undo
+                        </button>
+                      ) : (
+                        <div style={{color:C.muted, fontSize:11, marginLeft:12}}>🔒 Locked</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div style={{marginTop:16, padding:12, background:C.yellow+"10",
+              borderRadius:8, border:`1px solid ${C.yellow}22`, fontSize:12, color:C.muted}}>
+              ⚠️ Undo removes those specific trades permanently. Only current month uploads can be undone.
+            </div>
+          </div>
+        </div>
+      );
+    }
     const overlay = { position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 };
     const box = { background: "#fff", border: `1px solid ${C.border}`, borderRadius: 16, padding: 32, width: 480, maxWidth: "90vw", boxShadow: "0 20px 60px rgba(0,0,0,0.15)" };
     const field = (label, key, obj, setObj, type = "text", opts = null) => (
