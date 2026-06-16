@@ -1659,7 +1659,40 @@ export default function BackOffice() {
   const [ledgerSearch,   setLedgerSearch]   = useState("");
   const [tradeSearch,    setTradeSearch]    = useState("");
   const [posSearch,      setPosSearch]      = useState("");
-  const [notification, setNotification] = useState(null);
+  const [notification,  setNotification]  = useState(null);
+  const [bells,         setBells]         = useState(() => {
+    try { return JSON.parse(localStorage.getItem("jiya_bells") || "[]"); } catch(e) { return []; }
+  });
+  const [bellOpen,      setBellOpen]      = useState(false);
+
+  const addBell = (msg, type="info", page=null) => {
+    const entry = {
+      id:   Date.now() + Math.random(),
+      msg,  type, page,
+      time: new Date().toISOString(),
+      read: false,
+    };
+    setBells(prev => {
+      const updated = [entry, ...prev].slice(0, 50); // keep last 50
+      try { localStorage.setItem("jiya_bells", JSON.stringify(updated)); } catch(e) {}
+      return updated;
+    });
+  };
+
+  const markAllRead = () => {
+    setBells(prev => {
+      const updated = prev.map(b => ({ ...b, read: true }));
+      try { localStorage.setItem("jiya_bells", JSON.stringify(updated)); } catch(e) {}
+      return updated;
+    });
+  };
+
+  const clearBells = () => {
+    setBells([]);
+    try { localStorage.removeItem("jiya_bells"); } catch(e) {}
+  };
+
+  const unreadCount = bells.filter(b => !b.read).length;
   // RMS state
   const [rmsPositions,   setRmsPositions]   = useState({});
   const [rmsFunds,       setRmsFunds]       = useState(() => { try { return JSON.parse(localStorage.getItem("rms_funds")||"{}"); } catch(e){ return {}; } });
@@ -2084,6 +2117,7 @@ export default function BackOffice() {
 
   // Monthly interest for a client
   const getMonthlyInterest = (clientId, yearMonth) => {
+    // Supports both regular (2026-05) and software (2026-05_SW) keys
     return (state.interest || [])
       .filter(i => i.clientId === clientId && i.yearMonth === yearMonth)
       .reduce((sum, i) => sum + (+i.amount || 0), 0);
@@ -2091,7 +2125,7 @@ export default function BackOffice() {
 
   // Save interest entry
   const saveInterest = () => {
-    const { clientId, yearMonth, amount, note } = addInterestForm;
+    const { clientId, yearMonth, amount, note, entryType } = addInterestForm;
     if (!clientId || !yearMonth || !amount) return notify("Fill all required fields", "error");
     const entry = { id: "INT" + Date.now(), clientId, yearMonth, amount: +amount, note };
     setState(s => ({ ...s, interest: [...(s.interest||[]), entry] }));
@@ -2387,12 +2421,22 @@ export default function BackOffice() {
 
   const addLedger = () => {
     if (!newLedger.clientId || !newLedger.date || !newLedger.description) return notify("Fill required fields", "error");
-    const entry = { id: "L" + Date.now(), ...newLedger, credit: +newLedger.credit || 0, debit: +newLedger.debit || 0, ledgerType: newLedger.ledgerType || "all" };
+    const entry = {
+      id: "L" + Date.now(),
+      ...newLedger,
+      credit:      +newLedger.credit || 0,
+      debit:       +newLedger.debit  || 0,
+      ledgerType:  newLedger.ledgerType || "all",
+      // Audit fields
+      createdBy:   auth?.role === "superadmin" ? "JIYA" : (state.admins||[]).find(a=>a.id===auth?.adminId)?.name || "Admin",
+      createdAt:   new Date().toISOString(),
+    };
     setState((s) => ({ ...s, ledger: [...s.ledger, entry] }));
     withSync(() => sb.upsert("ledger", entry));
     setNewLedger({ clientId: "", date: "", description: "", credit: "", debit: "", ledgerType: "all" });
     setModal(null);
     notify("Ledger entry added");
+    addBell(`New ledger entry added for ${newLedger.clientId}`, "ledger", "ledger");
   };
 
   const saveLedgerEdit = () => {
@@ -2723,6 +2767,7 @@ export default function BackOffice() {
     setModal(null);
     const warn = unknownClients.length ? ` ⚠️ Unknown client IDs: ${unknownClients.join(", ")}` : "";
     notify(`${newTrades.length} trades imported for ${clientsInFile.length} clients.${warn}`);
+    addBell(`${newTrades.length} trades uploaded (${clientsInFile.length} clients)`, "trade", "trades");
 
     // ── Save to upload history (keep last 5) ──
     const histEntry = {
@@ -3481,7 +3526,7 @@ export default function BackOffice() {
                   <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
                     <thead>
                       <tr>
-                        {["Date","Type","Description","Credit","Debit","Balance", isAdmin?"Actions":""].filter(Boolean).map(h => (
+                        {["Date","Type","Description","Credit","Debit","Balance","Added By", isAdmin?"Actions":""].filter(Boolean).map(h => (
                           <th key={h} style={{ textAlign:"left", padding:"8px 12px", color:C.muted, borderBottom:`1px solid ${C.border}`, fontSize:12 }}>{h}</th>
                         ))}
                       </tr>
@@ -3923,7 +3968,7 @@ export default function BackOffice() {
                     <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
                       <thead>
                         <tr>
-                          {["Month","Realized P&L","Expenses (Auto)","Interest / Brokerage","Net P&L", isAdmin?"":""].filter(Boolean).map(h=>(
+                          {["Month","Realized P&L","Expenses (Auto)","Interest / Brokerage","Software Charges","Net P&L", isAdmin?"":""].filter(Boolean).map(h=>(
                             <th key={h} style={{ textAlign:"left", padding:"8px 12px", color:C.muted, borderBottom:`1px solid ${C.border}`, fontSize:12 }}>{h}</th>
                           ))}
                         </tr>
@@ -3935,9 +3980,10 @@ export default function BackOffice() {
                             .flatMap(c => c.trades)
                             .filter(t => (t.date||"").startsWith(m))
                             .reduce((a,t) => a + t.pnl, 0);
-                          const monthExpenses = getMonthlyCharges(client.id, m);
-                          const monthInterest = getMonthlyInterest(client.id, m);
-                          const monthNet      = monthRealized - monthExpenses - monthInterest;
+                          const monthExpenses  = getMonthlyCharges(client.id, m);
+                          const monthInterest  = getMonthlyInterest(client.id, m);
+                          const monthSoftware  = getMonthlyInterest(client.id, m + "_SW"); // software charges stored with _SW suffix
+                          const monthNet       = monthRealized - monthExpenses - monthInterest - monthSoftware;
 
                           // Interest entries for this month (for delete)
                           const monthInterestEntries = (state.interest||[]).filter(i => i.clientId===client.id && i.yearMonth===m);
@@ -5046,7 +5092,75 @@ export default function BackOffice() {
       <div style={{ width: "clamp(0px, 230px, 230px)", minWidth:230, background: C.sidebar, borderRight: `1px solid ${C.border}`, display: "flex", flexDirection: "column", flexShrink: 0, boxShadow: "2px 0 8px rgba(0,0,0,0.04)" }}>
         <div style={{ padding: "20px 20px 16px", borderBottom: `1px solid ${C.border}` }}>
           <div style={{ fontSize: 18, fontWeight: 800, color: C.accent, letterSpacing: "-0.5px" }}>📊 JIYA</div>
-          <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Back Office Portal</div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:2 }}>
+            <div style={{ fontSize: 11, color: C.muted }}>Back Office Portal</div>
+            {/* Bell icon */}
+            <div style={{ position:"relative" }}>
+              <button onClick={()=>{ setBellOpen(v=>!v); if(!bellOpen) markAllRead(); }}
+                style={{ background:"none", border:"none", cursor:"pointer", padding:"2px 4px",
+                  color: unreadCount>0 ? C.accent : C.muted, fontSize:16, position:"relative" }}>
+                🔔
+                {unreadCount > 0 && (
+                  <span style={{ position:"absolute", top:-4, right:-4, background:C.red,
+                    color:"#fff", fontSize:9, fontWeight:800, borderRadius:"50%",
+                    width:16, height:16, display:"flex", alignItems:"center", justifyContent:"center",
+                    lineHeight:1 }}>
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                )}
+              </button>
+              {/* Bell dropdown */}
+              {bellOpen && (
+                <div style={{ position:"fixed", top:60, left:210, zIndex:999,
+                  background:C.card, border:`1px solid ${C.border}`, borderRadius:12,
+                  boxShadow:"0 8px 32px rgba(0,0,0,0.15)", width:320, maxHeight:400, overflow:"hidden",
+                  display:"flex", flexDirection:"column" }}>
+                  <div style={{ padding:"12px 16px", borderBottom:`1px solid ${C.border}`,
+                    display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <span style={{ fontWeight:700, color:C.text, fontSize:14 }}>🔔 Notifications</span>
+                    <button onClick={clearBells}
+                      style={{ background:"none", border:"none", cursor:"pointer", color:C.muted, fontSize:11 }}>
+                      Clear all
+                    </button>
+                  </div>
+                  <div style={{ overflowY:"auto", flex:1 }}>
+                    {bells.length === 0 ? (
+                      <div style={{ padding:32, textAlign:"center", color:C.muted, fontSize:13 }}>
+                        No notifications yet
+                      </div>
+                    ) : bells.map(b => {
+                      const icons = { ledger:"💰", ticket:"🎫", trade:"📊", info:"ℹ️", success:"✅", error:"❌" };
+                      const timeAgo = (() => {
+                        const diff = Date.now() - new Date(b.time).getTime();
+                        const m = Math.floor(diff/60000);
+                        if (m < 1) return "just now";
+                        if (m < 60) return m+"m ago";
+                        const h = Math.floor(m/60);
+                        if (h < 24) return h+"h ago";
+                        return Math.floor(h/24)+"d ago";
+                      })();
+                      return (
+                        <div key={b.id}
+                          onClick={()=>{ if(b.page) setPage(b.page); setBellOpen(false); }}
+                          style={{ padding:"10px 16px", borderBottom:`1px solid ${C.border}22`,
+                            cursor: b.page ? "pointer" : "default",
+                            background: b.read ? "transparent" : C.accent+"08",
+                            display:"flex", gap:10, alignItems:"flex-start" }}>
+                          <span style={{ fontSize:16, flexShrink:0 }}>{icons[b.type]||"🔔"}</span>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:12, color:C.text, lineHeight:1.4 }}>{b.msg}</div>
+                            <div style={{ fontSize:10, color:C.muted, marginTop:3 }}>{timeAgo}</div>
+                          </div>
+                          {!b.read && <div style={{ width:6, height:6, borderRadius:"50%",
+                            background:C.accent, flexShrink:0, marginTop:4 }}/>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
           {auth?.role === "client" && currentClient?.name && (
             <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
               <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>Logged in as</div>
