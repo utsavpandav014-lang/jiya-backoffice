@@ -211,7 +211,29 @@ const INITIAL_STATE = {
   bhavcopy: [],
   chargesHistory: [{ ...DEFAULT_CHARGES, effectiveFrom: "2024-01-01" }],
   interest: [],
-  lockedMonths: [], // ["2026-04", "2026-05", ...] — months that are locked
+  lockedMonths: [],
+  admins: [],    // sub-admins created by JIYA
+  tokens: [],    // activation tokens
+};
+
+// ── Plan feature access ──────────────────────────────
+const PLAN_FEATURES = {
+  basic:   ["dashboard","clients","trades","pnl","ledger","tickets","settings"],
+  pro:     ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","rms"],
+  perfect: ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","rms","audit","export"],
+  superadmin: ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","rms","audit","export","admins","tokens"],
+};
+
+const hasFeature = (plan, feature) => {
+  const features = PLAN_FEATURES[plan || "basic"] || PLAN_FEATURES.basic;
+  return features.includes(feature);
+};
+
+// ── Token generator ──────────────────────────────────
+const generateToken = (plan) => {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const rand = (n) => Array.from({length:n}, () => chars[Math.floor(Math.random()*chars.length)]).join("");
+  return "JIYA-" + plan.toUpperCase().slice(0,4) + "-" + rand(4) + "-" + rand(4);
 };
 
 // ─── Icons ─────────────────────────────────────────────────────────────────────
@@ -1048,6 +1070,276 @@ async function fetchInstrumentToken(symbol, expiry, strike, optType) {
 
 // ── Settings Page Component ────────────────────────────
 
+
+// ═══════════════════════════════════════════════════════
+// MANAGE ADMINS PAGE — Super Admin only
+// ═══════════════════════════════════════════════════════
+function ManageAdminsPage({ state, setState, sb, withSync, notify, C, card, btn, input }) {
+  const [form, setForm] = useState({ username:"", password:"", name:"", plan:"basic", tokenExpiry:"" });
+  const [showPwd, setShowPwd] = useState(false);
+
+  const admins = state.admins || [];
+
+  const defaultExpiry = () => {
+    const d = new Date();
+    d.setDate(d.getDate() + 30);
+    return d.toISOString().slice(0,10);
+  };
+
+  const createAdmin = async () => {
+    if (!form.username || !form.password || !form.name) {
+      notify("Fill all fields", "error"); return;
+    }
+    if (admins.find(a => a.username === form.username)) {
+      notify("Username already exists", "error"); return;
+    }
+    const token = generateToken(form.plan);
+    const newAdmin = {
+      id: "ADM_" + Date.now(),
+      username: form.username,
+      password: form.password,
+      name: form.name,
+      plan: form.plan,
+      token,
+      tokenExpiry: form.tokenExpiry || defaultExpiry(),
+      createdAt: new Date().toISOString(),
+      createdBy: "JIYA",
+    };
+    withSync(() => sb.upsert("admins", newAdmin));
+    setState(s => ({ ...s, admins: [...(s.admins||[]), newAdmin] }));
+    setForm({ username:"", password:"", name:"", plan:"basic", tokenExpiry:"" });
+    notify("✅ Admin " + form.name + " created! Token: " + token);
+  };
+
+  const deleteAdmin = (id) => {
+    if (!window.confirm("Delete this admin? Their clients will remain.")) return;
+    withSync(() => sb.delete("admins", id));
+    setState(s => ({ ...s, admins: (s.admins||[]).filter(a => a.id !== id) }));
+    notify("Admin deleted");
+  };
+
+  const renewToken = (admin) => {
+    const d = new Date();
+    d.setDate(d.getDate() + 30);
+    const newExpiry = d.toISOString().slice(0,10);
+    const newToken  = generateToken(admin.plan);
+    const updated   = { ...admin, token: newToken, tokenExpiry: newExpiry };
+    withSync(() => sb.upsert("admins", updated));
+    setState(s => ({ ...s, admins: (s.admins||[]).map(a => a.id===admin.id ? updated : a) }));
+    notify("✅ Token renewed until " + newExpiry);
+  };
+
+  const planColor = p => p==="perfect"?C.accent:p==="pro"?C.green:C.yellow;
+  const daysLeft  = expiry => Math.ceil((new Date(expiry) - new Date()) / (1000*60*60*24));
+
+  return (
+    <div>
+      <h2 style={{margin:"0 0 4px",color:C.text,fontSize:22,fontWeight:800}}>👥 Manage Admins</h2>
+      <div style={{color:C.muted,fontSize:13,marginBottom:24}}>Create and manage sub-admin accounts</div>
+
+      {/* Create Admin Form */}
+      <div style={{...card,padding:24,marginBottom:24}}>
+        <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:16}}>➕ Create New Admin</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+          {[
+            {key:"name",      label:"Full Name",   placeholder:"e.g. Nitin Shah",    type:"text"},
+            {key:"username",  label:"Username",    placeholder:"e.g. NITIN",         type:"text"},
+          ].map(f => (
+            <div key={f.key}>
+              <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>{f.label}</div>
+              <input type={f.type} value={form[f.key]} onChange={e=>setForm(v=>({...v,[f.key]:e.target.value}))}
+                placeholder={f.placeholder} style={{...input,width:"100%",boxSizing:"border-box"}}/>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:16}}>
+          <div>
+            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>Password</div>
+            <div style={{position:"relative"}}>
+              <input type={showPwd?"text":"password"} value={form.password}
+                onChange={e=>setForm(v=>({...v,password:e.target.value}))}
+                placeholder="Strong password" style={{...input,width:"100%",boxSizing:"border-box",paddingRight:36}}/>
+              <span onClick={()=>setShowPwd(v=>!v)}
+                style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",cursor:"pointer",fontSize:14,color:C.muted}}>
+                {showPwd?"🙈":"👁️"}
+              </span>
+            </div>
+          </div>
+          <div>
+            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>Plan</div>
+            <select value={form.plan} onChange={e=>setForm(v=>({...v,plan:e.target.value}))}
+              style={{...input,width:"100%",cursor:"pointer"}}>
+              <option value="basic">Basic — ₹2,000/mo</option>
+              <option value="pro">Pro — ₹3,500/mo</option>
+              <option value="perfect">Perfect — ₹5,000/mo</option>
+            </select>
+          </div>
+          <div>
+            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>Token Expiry</div>
+            <input type="date" value={form.tokenExpiry||defaultExpiry()}
+              onChange={e=>setForm(v=>({...v,tokenExpiry:e.target.value}))}
+              style={{...input,width:"100%",boxSizing:"border-box"}}/>
+          </div>
+        </div>
+        <button onClick={createAdmin} style={{...btn(C.accent),padding:"10px 24px",fontWeight:700}}>
+          ➕ Create Admin
+        </button>
+      </div>
+
+      {/* Admins List */}
+      {admins.length === 0 ? (
+        <div style={{...card,textAlign:"center",padding:48,color:C.muted}}>
+          <div style={{fontSize:36,marginBottom:12}}>👥</div>
+          <div style={{fontWeight:600,marginBottom:4}}>No admins created yet</div>
+          <div style={{fontSize:13}}>Create your first admin above</div>
+        </div>
+      ) : (
+        <div style={{...card,padding:0,overflow:"hidden"}}>
+          <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,fontWeight:700,color:C.text}}>
+            {admins.length} Admin{admins.length!==1?"s":""}
+          </div>
+          {admins.map(a => {
+            const dl = daysLeft(a.tokenExpiry);
+            const expired = dl <= 0;
+            const warning = dl > 0 && dl <= 7;
+            return (
+              <div key={a.id} style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,
+                display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+                <div style={{flex:1,minWidth:200}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                    <span style={{fontWeight:700,color:C.text,fontSize:14}}>{a.name}</span>
+                    <span style={{fontSize:11,padding:"1px 8px",borderRadius:4,fontWeight:700,
+                      background:planColor(a.plan)+"20",color:planColor(a.plan),textTransform:"uppercase"}}>
+                      {a.plan}
+                    </span>
+                    {expired && <span style={{fontSize:11,padding:"1px 8px",borderRadius:4,
+                      background:C.red+"20",color:C.red,fontWeight:700}}>EXPIRED</span>}
+                    {warning && <span style={{fontSize:11,padding:"1px 8px",borderRadius:4,
+                      background:C.yellow+"20",color:C.yellow,fontWeight:700}}>{dl}d left</span>}
+                  </div>
+                  <div style={{color:C.muted,fontSize:12}}>
+                    @{a.username} · Expires: {new Date(a.tokenExpiry).toLocaleDateString("en-IN")}
+                  </div>
+                  <div style={{color:C.muted,fontSize:11,fontFamily:"monospace",marginTop:4,
+                    background:C.bg,padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
+                    {a.token}
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>renewToken(a)}
+                    style={{...btn(C.green),fontSize:12,padding:"6px 14px"}}>
+                    🔄 Renew 30d
+                  </button>
+                  <button onClick={()=>deleteAdmin(a.id)}
+                    style={{...btn(C.card),border:`1px solid ${C.border}`,color:C.red,fontSize:12,padding:"6px 14px"}}>
+                    🗑 Delete
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// MANAGE TOKENS PAGE — Super Admin only
+// ═══════════════════════════════════════════════════════
+function ManageTokensPage({ state, setState, sb, withSync, notify, C, card, btn, input }) {
+  const [plan,   setPlan]   = useState("basic");
+  const [days,   setDays]   = useState(30);
+  const [generated, setGenerated] = useState(null);
+  const admins = state.admins || [];
+
+  const genToken = () => {
+    const token = generateToken(plan);
+    const expiry = new Date();
+    expiry.setDate(expiry.getDate() + parseInt(days));
+    setGenerated({ token, plan, expiry: expiry.toISOString().slice(0,10) });
+  };
+
+  const planColor = p => p==="perfect"?C.accent:p==="pro"?C.green:C.yellow;
+
+  return (
+    <div>
+      <h2 style={{margin:"0 0 4px",color:C.text,fontSize:22,fontWeight:800}}>🔑 Token Management</h2>
+      <div style={{color:C.muted,fontSize:13,marginBottom:24}}>Generate and manage activation tokens</div>
+
+      {/* Generator */}
+      <div style={{...card,padding:24,marginBottom:24}}>
+        <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:16}}>⚡ Quick Token Generator</div>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}}>
+          <div>
+            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase"}}>Plan</div>
+            <select value={plan} onChange={e=>setPlan(e.target.value)}
+              style={{...input,minWidth:180,cursor:"pointer"}}>
+              <option value="basic">Basic</option>
+              <option value="pro">Pro</option>
+              <option value="perfect">Perfect</option>
+              <option value="trial">Free Trial (7 days)</option>
+            </select>
+          </div>
+          <div>
+            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase"}}>Duration (days)</div>
+            <input type="number" value={days} onChange={e=>setDays(e.target.value)}
+              style={{...input,width:100}} min={1} max={365}/>
+          </div>
+          <button onClick={genToken} style={{...btn(C.accent),padding:"10px 20px",fontWeight:700}}>
+            🔑 Generate Token
+          </button>
+        </div>
+
+        {generated && (
+          <div style={{marginTop:16,padding:16,background:C.accent+"10",borderRadius:10,
+            border:`1px solid ${C.accent}30`}}>
+            <div style={{color:C.muted,fontSize:11,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>Generated Token</div>
+            <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+              <div style={{fontSize:20,fontWeight:800,fontFamily:"monospace",color:C.accent,
+                letterSpacing:2}}>{generated.token}</div>
+              <button onClick={()=>{navigator.clipboard.writeText(generated.token);notify("Token copied!");}}
+                style={{...btn(C.card),border:`1px solid ${C.border}`,fontSize:12}}>
+                📋 Copy
+              </button>
+            </div>
+            <div style={{marginTop:8,display:"flex",gap:16,fontSize:12,color:C.muted}}>
+              <span>Plan: <b style={{color:planColor(generated.plan)}}>{generated.plan.toUpperCase()}</b></span>
+              <span>Expires: <b style={{color:C.text}}>{new Date(generated.expiry).toLocaleDateString("en-IN")}</b></span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Plan Features Reference */}
+      <div style={{...card,padding:20}}>
+        <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:16}}>📋 Plan Features</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+          {[
+            { plan:"basic",   price:"₹2,000/mo", features:["Dashboard","Clients","Trades","P&L","Ledger","Tickets"] },
+            { plan:"pro",     price:"₹3,500/mo", features:["Everything in Basic","Charges","RMS Live"] },
+            { plan:"perfect", price:"₹5,000/mo", features:["Everything in Pro","Audit Log","PDF Export"] },
+          ].map(p => (
+            <div key={p.plan} style={{padding:16,borderRadius:10,border:`2px solid ${planColor(p.plan)}30`,
+              background:planColor(p.plan)+"08"}}>
+              <div style={{fontWeight:800,color:planColor(p.plan),textTransform:"uppercase",fontSize:13,marginBottom:4}}>
+                {p.plan}
+              </div>
+              <div style={{color:C.muted,fontSize:12,marginBottom:10}}>{p.price}</div>
+              {p.features.map(f=>(
+                <div key={f} style={{fontSize:12,color:C.text,marginBottom:4}}>
+                  ✅ {f}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+// ═══════════════════════════════════════════════════════
+
 // ─── Password Manager Component ───────────────────────────────────────────────
 function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, input }) {
   const [adminPwd,    setAdminPwd]    = useState("");
@@ -1343,7 +1635,7 @@ export default function BackOffice() {
   const [dbLoading, setDbLoading] = useState(SUPABASE_CONFIGURED); // show loading if DB configured
   const [dbError, setDbError] = useState(null);
   const [syncStatus, setSyncStatus] = useState("idle"); // "idle"|"saving"|"saved"|"error"
-  const [auth, setAuth] = useState(null); // {role:'admin'|'client', clientId?}
+  const [auth, setAuth] = useState(null); // {role:'superadmin'|'admin'|'client', clientId?, adminId?, plan?}
 
   // ── Session auto-logout after 8 hours ──
   useEffect(() => {
@@ -1382,6 +1674,8 @@ export default function BackOffice() {
   const [angelToken,     setAngelToken]     = useState(null);
   const [angelFeedToken, setAngelFeedToken] = useState(null);
   const [angelLivePrice, setAngelLivePrice] = useState({}); // { "NIFTY_23000_CE_13APR2026": 45.50, ... }
+  const [angelLiveMTM,   setAngelLiveMTM]   = useState({}); // { "NIFTY 23000 CE 13APR2026": { ltp, token, exchange } }
+  const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
 
   // ── Angel One: Connect & start live prices ──
@@ -1417,8 +1711,55 @@ export default function BackOffice() {
   };
 
   // ── Angel One: Poll LTP for all open positions ──
-  // ── Angel One: Poll LTP for all open positions in RMS ──
-  const rmsPositionsRef = useRef({});
+  // ── Angel One: Poll LTP for open positions ──────────────────
+  const rmsPositionsRef     = useRef({});
+  const contractTokenMapRef = useRef({}); // { "NIFTY 23000 CE 13APR2026": { token:"54990", exchange:"NFO" } }
+
+  // Parse contract name to Angel One search query
+  const contractToSearch = (contract) => {
+    // Contract format: "NIFTY 23000 CE 13APR2026" or "NIFTY FUT 25APR2026"
+    const parts = contract.trim().split(/\s+/);
+    const sym   = parts[0] || "";
+    const isFut = contract.includes("FUT");
+    const isBSE = ["SENSEX","BANKEX"].includes(sym.toUpperCase());
+    return {
+      symbol:   sym,
+      contract,
+      exchange: isBSE ? "BFO" : "NFO",
+      query:    contract,
+    };
+  };
+
+  // Fetch token for a single contract from Angel One
+  const fetchContractToken = async (jwtToken, apiKey, contractInfo) => {
+    try {
+      const resp = await fetch(ANGEL_PROXY, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "ltp",
+          apiKey, jwtToken,
+          payload: { exchangeTokens: { [contractInfo.exchange]: [] } } // ping to check connection
+        })
+      });
+      // We'll use search_token action instead
+      const r = await fetch(ANGEL_PROXY, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "search_token",
+          apiKey, jwtToken,
+          payload: contractInfo
+        })
+      });
+      const data = await r.json();
+      if (data.status && data.data?.length) {
+        const best = data.data[0];
+        return { token: best.symboltoken, exchange: contractInfo.exchange, ltp: best.ltp };
+      }
+    } catch(e) {}
+    return null;
+  };
 
   const startLTPPolling = useCallback((jwtToken, apiKey) => {
     const poll = async () => {
@@ -1426,23 +1767,39 @@ export default function BackOffice() {
         const now = new Date();
         const h = now.getHours(), m = now.getMinutes();
         const inMarket = (h > 9 || (h === 9 && m >= 14)) && (h < 15 || (h === 15 && m < 31));
-        if (!inMarket) return;
+        // Allow after hours for testing too - just fetch latest available price
+        
+        // Get all unique open position contracts
+        const { openPositions: allOpen } = applyFIFO(state.trades);
+        if (!allOpen.length) return;
 
-        const positions = rmsPositionsRef.current;
-        if (!Object.keys(positions).length) return;
+        // Build token map for contracts we don't have yet
+        const unknownContracts = allOpen.filter(p => !contractTokenMapRef.current[p.contract]);
+        
+        // Fetch tokens for unknown contracts (batch, max 5 at once to avoid rate limit)
+        for (let i = 0; i < Math.min(unknownContracts.length, 5); i++) {
+          const pos = unknownContracts[i];
+          const info = contractToSearch(pos.contract);
+          const result = await fetchContractToken(jwtToken, apiKey, info);
+          if (result) {
+            contractTokenMapRef.current[pos.contract] = result;
+          }
+        }
 
-        const nfoTokens = [], bfoTokens = [];
-        Object.values(positions).flat().forEach(p => {
-          const token = (p.scripCode || "").toString().trim();
-          const sym   = (p.symbol || "").toUpperCase();
-          if (!token || token === "0" || token === "-----------") return;
-          const isNFO = ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"].includes(sym);
-          if (isNFO) { if (!nfoTokens.includes(token)) nfoTokens.push(token); }
-          else       { if (!bfoTokens.includes(token)) bfoTokens.push(token); }
+        // Build exchange tokens from known map
+        const nfoTokens = [], bfoTokens = [], tokenToContract = {};
+        allOpen.forEach(p => {
+          const mapped = contractTokenMapRef.current[p.contract];
+          if (!mapped?.token) return;
+          const tok = mapped.token;
+          if (mapped.exchange === "NFO") { if (!nfoTokens.includes(tok)) nfoTokens.push(tok); }
+          else                           { if (!bfoTokens.includes(tok)) bfoTokens.push(tok); }
+          tokenToContract[tok] = p.contract;
         });
 
         if (!nfoTokens.length && !bfoTokens.length) return;
 
+        // Fetch LTPs
         const exchangeTokens = {};
         if (nfoTokens.length) exchangeTokens["NFO"] = nfoTokens.slice(0, 50);
         if (bfoTokens.length) exchangeTokens["BFO"] = bfoTokens.slice(0, 50);
@@ -1455,40 +1812,47 @@ export default function BackOffice() {
         const data = await resp.json();
 
         if (data.status && data.data) {
-          const newPrices = {};
+          const newMTM = { ...angelLiveMTM };
           (data.data.fetched || []).forEach(item => {
-            newPrices[item.symbolToken] = item.ltp;
+            const contract = tokenToContract[item.symbolToken];
+            if (contract) {
+              newMTM[contract] = { ltp: item.ltp, token: item.symbolToken };
+            }
           });
+          setAngelLiveMTM(newMTM);
+          setAngelMTMStatus("live");
 
-          // Update live prices in positions
-          const updated = {};
-          Object.entries(positions).forEach(([cid, pos]) => {
-            updated[cid] = pos.map(p => {
-              const token = (p.scripCode || "").toString().trim();
-              const ltp   = newPrices[token];
-              if (ltp !== undefined) {
-                const qty    = parseFloat(p.netQty)   || 0;
-                const buyAvg = parseFloat(p.buyAvg)   || parseFloat(p.netPrice) || 0;
-                const newMTM = qty !== 0 ? ((ltp - buyAvg) * qty).toFixed(2) : (parseFloat(p.mtmGL) || 0).toFixed(2);
-                return { ...p, marketPrice: ltp.toString(), mtmGL: newMTM };
-              }
-              return p;
+          // Also update RMS positions if active
+          const rmsPos = rmsPositionsRef.current;
+          if (Object.keys(rmsPos).length) {
+            const updated = {};
+            Object.entries(rmsPos).forEach(([cid, positions]) => {
+              updated[cid] = positions.map(p => {
+                const tok = (p.scripCode || "").toString().trim();
+                const ltp = (data.data.fetched||[]).find(x=>x.symbolToken===tok)?.ltp;
+                if (ltp !== undefined) {
+                  const qty    = parseFloat(p.netQty)  || 0;
+                  const buyAvg = parseFloat(p.buyAvg)  || parseFloat(p.netPrice) || 0;
+                  const newMTMval = qty !== 0 ? ((ltp - buyAvg) * qty).toFixed(2) : (parseFloat(p.mtmGL)||0).toFixed(2);
+                  return { ...p, marketPrice: ltp.toString(), mtmGL: newMTMval };
+                }
+                return p;
+              });
             });
-          });
-
-          rmsPositionsRef.current = updated;
-          setAngelLivePrice(prev => ({ ...prev, ...newPrices }));
-          setRmsLastUpdated(new Date());
+            rmsPositionsRef.current = updated;
+            setRmsLastUpdated(new Date());
+          }
         }
       } catch(e) {
         console.log("LTP poll error:", e.message);
+        setAngelMTMStatus("error");
       }
     };
 
-    const interval = setInterval(poll, 5000);
+    const interval = setInterval(poll, 5000); // every 5 seconds
     poll();
     return () => clearInterval(interval);
-  }, []);
+  }, [state.trades, angelLiveMTM]);
 
   // ── Angel One: Auto Bhavcopy at 3:35 PM ──
   const scheduleAutoBhavcopy = useCallback((jwtToken, apiKey) => {
@@ -1600,7 +1964,7 @@ export default function BackOffice() {
         return all;
       };
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw] = await Promise.all([
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         fetchAll("trades",          "?order=date.asc,time.asc"),
         fetchAll("ledger",          "?order=date.asc"),
@@ -1609,6 +1973,7 @@ export default function BackOffice() {
         fetchAll("charges_history", "?order=created_at.asc"),
         fetchAll("bhavcopy",        "?order=created_at.desc"),
         sb.select("locked_months",  "?order=month.asc").catch(() => []),
+        sb.select("admins",         "?order=created_at.asc").catch(() => []),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -1624,6 +1989,7 @@ export default function BackOffice() {
                           : [{ ...DEFAULT_CHARGES, effectiveFrom: "2024-01-01" }],
         bhavcopy:       Array.isArray(bhavcopy)       ? bhavcopy       : [],
         lockedMonths:   Array.isArray(lockedMonthsRaw) ? lockedMonthsRaw.map(r => r.month) : [],
+        admins:         Array.isArray(admins) ? admins : [],
       }));
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
@@ -1797,7 +2163,14 @@ export default function BackOffice() {
   }
 
   // Get closing price for a contract from bhavcopy
-  const getBhavClose = (contract) => bhavLookup[contract]?.closePrice || null;
+  // getBhavClose: checks Angel One live MTM first, then bhavcopy
+  const getBhavClose = (contract) => {
+    // Priority 1: Angel One live price (most accurate)
+    if (angelLiveMTM[contract]?.ltp) return angelLiveMTM[contract].ltp;
+    // Priority 2: Manual bhavcopy upload
+    if (bhavLookup[contract]?.closePrice) return bhavLookup[contract].closePrice;
+    return null;
+  };
   const getBhavSettl = (contract) => bhavLookup[contract]?.settlPrice || null;
   const getBhavExpiry = (contract) => bhavLookup[contract]?.expiryRaw || null;
 
@@ -1902,19 +2275,41 @@ export default function BackOffice() {
     const passInput = loginForm.pass;
 
     // Constant-time comparison to prevent timing attacks
-    const adminMatch = userInput === "JIYA" && passInput === "Jiya@3044";
-    const client = !adminMatch
+    const isSuperAdmin = userInput === "JIYA" && passInput === "Jiya@3044";
+
+    // Check sub-admin login
+    const subAdmin = !isSuperAdmin
+      ? (state.admins||[]).find(a => a.username === userInput && a.password === passInput)
+      : null;
+
+    // Check client login — only from correct admin scope
+    const client = !isSuperAdmin && !subAdmin
       ? state.clients.find(c => c.id === userInput && c.password === passInput)
       : null;
 
-    if (adminMatch) {
+    if (isSuperAdmin) {
       setLoginAttempts(0);
-      setAuth({ role: "admin" });
+      setAuth({ role: "superadmin", plan: "superadmin" });
+      sessionStorage.setItem("jiya_login_time", Date.now().toString());
+      setPage("dashboard");
+      setLoginForm({ user: "", pass: "", error: "" });
+    } else if (subAdmin) {
+      // Validate token expiry
+      const expiry = new Date(subAdmin.tokenExpiry);
+      if (expiry < new Date()) {
+        setLoginAttempts(prev => prev + 1);
+        setLoginForm(f => ({ ...f, error: "Your access token has expired. Contact JIYA to renew." }));
+        return;
+      }
+      setLoginAttempts(0);
+      setAuth({ role: "admin", adminId: subAdmin.id, plan: subAdmin.plan || "basic" });
+      sessionStorage.setItem("jiya_login_time", Date.now().toString());
       setPage("dashboard");
       setLoginForm({ user: "", pass: "", error: "" });
     } else if (client) {
       setLoginAttempts(0);
-      setAuth({ role: "client", clientId: client.id });
+      setAuth({ role: "client", clientId: client.id, adminId: client.adminId });
+      sessionStorage.setItem("jiya_login_time", Date.now().toString());
       setPage("dashboard");
       setLoginForm({ user: "", pass: "", error: "" });
     } else {
@@ -1941,7 +2336,27 @@ export default function BackOffice() {
   const clientOpenPos = (cid) => openPositions.filter((p) => p.clientId === cid);
   const clientClosedPos = (cid) => closedPositions.filter((p) => p.clientId === cid);
 
-  const visibleClients = auth?.role === "admin" ? state.clients : state.clients.filter((c) => c.id === auth?.clientId);
+  // ── Data isolation by adminId ──────────────────────
+  const visibleClients = (() => {
+    if (auth?.role === "superadmin") return state.clients; // JIYA sees all
+    if ((auth?.role === "admin" || auth?.role === "superadmin")) {
+      // Sub-admin sees only clients with matching adminId
+      return state.clients.filter(c => c.adminId === auth.adminId);
+    }
+    // Client sees only themselves
+    return state.clients.filter(c => c.id === auth?.clientId);
+  })();
+
+  const visibleTrades = (() => {
+    if (auth?.role === "superadmin") return state.trades;
+    if ((auth?.role === "admin" || auth?.role === "superadmin")) {
+      // Get client IDs belonging to this admin
+      const myClientIds = state.clients.filter(c => c.adminId === auth.adminId).map(c => c.id);
+      return state.trades.filter(t => myClientIds.includes(t.clientId));
+    }
+    return state.trades.filter(t => t.clientId === auth?.clientId);
+  })();
+
   const currentClient = auth?.role === "client" ? state.clients.find((c) => c.id === auth.clientId) : null;
 
   const ledgerWithBalance = (cid) => {
@@ -2461,10 +2876,15 @@ export default function BackOffice() {
     { id: "ledger", label: "Ledger", icon: "ledger" },
     { id: "trades", label: "Trades & Positions", icon: "trades" },
     { id: "pnl", label: "Profit & Loss", icon: "pnl" },
-    { id: "charges", label: "Charges", icon: "charges" },
+    ...(hasFeature(auth?.plan, "charges") ? [{ id: "charges", label: "Charges", icon: "charges" }] : []),
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
-    { id: "rms", label: "📡 RMS", icon: "dashboard" },
+    ...(hasFeature(auth?.plan, "rms") ? [{ id: "rms", label: "📡 RMS", icon: "dashboard" }] : []),
     { id: "settings", label: "⚙️ Settings", icon: "dashboard" },
+    // Super admin only
+    ...(auth?.role === "superadmin" ? [
+      { id: "manage_admins", label: "👥 Manage Admins", icon: "clients" },
+      { id: "manage_tokens", label: "🔑 Tokens", icon: "dashboard" },
+    ] : []),
   ];
   const clientPages = [
     { id: "dashboard", label: "Dashboard", icon: "dashboard" },
@@ -2473,7 +2893,7 @@ export default function BackOffice() {
     { id: "pnl", label: "My P&L", icon: "pnl" },
     { id: "tickets", label: "Support", icon: "ticket" },
   ];
-  const pages = auth.role === "admin" ? adminPages : clientPages;
+  const pages = (auth.role === "admin" || auth.role === "superadmin") ? adminPages : clientPages;
 
   // ── Dashboard Data ──
   const QUOTES = [
@@ -2515,10 +2935,10 @@ export default function BackOffice() {
     const cid = auth.role === "client" ? auth.clientId : null;
 
     if (page === "dashboard") {
-      // Build per-client P&L data for chart
-      const clientPnlData = state.clients.map(client => {
+      // ── Calculations (DO NOT TOUCH) ──────────────────────────
+      const clientPnlData = visibleClients.map(client => {
         const closed = clientClosedPos(client.id);
-        const open = clientOpenPos(client.id);
+        const open   = clientOpenPos(client.id);
         const realizedPnl = closed.reduce((a, c) => a + c.totalPnl, 0);
         const mtmPnl = open.reduce((p, pos) => {
           const close = getBhavClose(pos.contract);
@@ -2529,373 +2949,401 @@ export default function BackOffice() {
           id: client.id,
           name: client.name,
           realizedPnl: +realizedPnl.toFixed(2),
-          mtmPnl: +mtmPnl.toFixed(2),
-          totalPnl: +(realizedPnl + mtmPnl).toFixed(2),
-          openCount: open.length,
+          mtmPnl:      +mtmPnl.toFixed(2),
+          totalPnl:    +(realizedPnl + mtmPnl).toFixed(2),
+          openCount:   open.length,
         };
       }).filter(c => c.realizedPnl !== 0 || c.mtmPnl !== 0 || c.openCount > 0);
 
-      const maxAbs = Math.max(...clientPnlData.map(c => Math.abs(c.totalPnl)), 1);
       const totalRealized = clientPnlData.reduce((a, c) => a + c.realizedPnl, 0);
-      const totalMtm = clientPnlData.reduce((a, c) => a + c.mtmPnl, 0);
+      const totalMtm      = clientPnlData.reduce((a, c) => a + c.mtmPnl, 0);
+      const maxAbs        = Math.max(...clientPnlData.map(c => Math.abs(c.totalPnl)), 1);
+      const now           = new Date();
+      const currentMonthStr = now.toISOString().slice(0, 7);
+      const greeting      = now.getHours() < 12 ? "Good morning" : now.getHours() < 17 ? "Good afternoon" : "Good evening";
+      const fmtCcy        = (n) => (n < 0 ? "−" : "+") + "₹" + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+      const fmtAbs        = (n) => "₹" + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
 
-      // Client view — simpler personal dashboard
-      if (auth.role === "client") {
-        const myData = clientPnlData.find(c => c.id === cid) || { realizedPnl:0, mtmPnl:0, totalPnl:0, openCount:0 };
+      // ── This Month P&L ───────────────────────────────────────
+      const allTrades = visibleTrades || state.trades;
+      const monthMap  = {};
+      allTrades.forEach(t => {
+        const m = (t.date || "").slice(0, 7);
+        if (!m) return;
+        if (!monthMap[m]) monthMap[m] = { buyVal: 0, sellVal: 0 };
+        const v = (t.price || 0) * (t.qty || 0);
+        if (t.side === "BUY")  monthMap[m].buyVal  += v;
+        if (t.side === "SELL") monthMap[m].sellVal += v;
+      });
+      const thisMonthData   = monthMap[currentMonthStr] || { buyVal: 0, sellVal: 0 };
+      const thisMonthPnl    = thisMonthData.sellVal - thisMonthData.buyVal;
+
+      // ── Win Rate (12 months) ─────────────────────────────────
+      const last12     = Object.entries(monthMap).sort((a, b) => a[0] > b[0] ? -1 : 1).slice(0, 12);
+      const profMonths = last12.filter(([, v]) => (v.sellVal - v.buyVal) > 0).length;
+      const winRate    = last12.length > 0 ? Math.round(profMonths / last12.length * 100) : 0;
+      const wrColor    = winRate >= 60 ? C.green : winRate >= 40 ? C.yellow : C.red;
+
+      // ── 6-month chart data ───────────────────────────────────
+      const months6 = [];
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        months6.push(d.toISOString().slice(0, 7));
+      }
+      const CHART_COLORS = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4"];
+
+      // ── CLIENT DASHBOARD ─────────────────────────────────────
+      if (auth?.role === "client") {
+        const myData   = clientPnlData.find(c => c.id === cid) || { realizedPnl: 0, mtmPnl: 0, openCount: 0 };
+        const myTrades = allTrades.filter(t => t.clientId === cid);
+        const myMonthPnl = (monthMap[currentMonthStr] && (() => {
+          const m = { buyVal: 0, sellVal: 0 };
+          myTrades.filter(t => (t.date||"").slice(0,7) === currentMonthStr).forEach(t => {
+            const v = (t.price||0)*(t.qty||0);
+            if (t.side==="BUY") m.buyVal+=v; else m.sellVal+=v;
+          });
+          return m.sellVal - m.buyVal;
+        })()) || 0;
+
+        // Daily win rate this month
+        const dayMap2 = {};
+        myTrades.filter(t=>(t.date||"").slice(0,7)===currentMonthStr).forEach(t=>{
+          const d=t.date||""; if(!d) return;
+          if(!dayMap2[d]) dayMap2[d]={buyVal:0,sellVal:0};
+          const v=(t.price||0)*(t.qty||0);
+          if(t.side==="BUY") dayMap2[d].buyVal+=v; else dayMap2[d].sellVal+=v;
+        });
+        const tDays   = Object.values(dayMap2).filter(d=>d.buyVal>0||d.sellVal>0);
+        const pDays   = tDays.filter(d=>(d.sellVal-d.buyVal)>0).length;
+        const dayWR   = tDays.length>0 ? Math.round(pDays/tDays.length*100) : 0;
+        const myWrC   = winRate>=60?C.green:winRate>=40?C.yellow:C.red;
+
         return (
-          <div>
-            {/* Quote */}
-            <div style={{ marginBottom:24, background:"linear-gradient(135deg, #1e3a5f, #1e3a8a)", borderRadius:16, padding:"24px 28px", position:"relative", overflow:"hidden", boxShadow:"0 4px 20px rgba(30,58,138,0.2)" }}>
-              <div style={{ position:"absolute", top:-10, right:16, fontSize:80, opacity:0.06, color:"#fff", fontFamily:"Georgia" }}>"</div>
-              <div style={{ color:"#93c5fd", fontSize:11, fontWeight:700, letterSpacing:2, marginBottom:10, textTransform:"uppercase" }}>Quote of the Day</div>
-              <div style={{ color:"#ffffff", fontSize:16, fontStyle:"italic", lineHeight:1.7, marginBottom:10 }}>"{todayQuote.text}"</div>
-              <div style={{ color:"#93c5fd", fontSize:13 }}>— {todayQuote.author}</div>
+          <div style={{maxWidth:960,margin:"0 auto"}}>
+            {/* Greeting header */}
+            <div style={{marginBottom:24,padding:"24px 28px",
+              background:`linear-gradient(135deg, ${C.accent}18 0%, ${C.accent}05 100%)`,
+              borderRadius:16,border:`1px solid ${C.accent}20`,
+              display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+              <div>
+                <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:6}}>
+                  {greeting}
+                </div>
+                <div style={{fontSize:22,fontWeight:800,color:C.text,marginBottom:2}}>
+                  {currentClient?.name || "Client"}
+                </div>
+                <div style={{fontSize:12,color:C.muted}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:11,color:C.muted,marginBottom:4}}>This Month P&L</div>
+                <div style={{fontSize:28,fontWeight:800,color:myMonthPnl>=0?C.green:C.red}}>
+                  {myMonthPnl>=0?"+":""}₹{Math.abs(myMonthPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                </div>
+              </div>
             </div>
-            {/* Personal stats */}
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:16, marginBottom:24 }}>
-              {(() => {
-                // Win Rate calculations for this client
-                const myTrades = state.trades.filter(t => t.clientId === cid);
-                const now = new Date();
-                const currentMonthStr = now.toISOString().slice(0,7);
 
-                // Monthly win rate — last 12 months
-                const monthMap = {};
-                myTrades.forEach(t => {
-                  const m = (t.date||"").slice(0,7);
-                  if (!m) return;
-                  if (!monthMap[m]) monthMap[m] = { buy:0, sell:0, buyVal:0, sellVal:0 };
-                  const val = (t.price||0) * (t.qty||0);
-                  if (t.side==="BUY")  { monthMap[m].buyVal  += val; }
-                  if (t.side==="SELL") { monthMap[m].sellVal += val; }
-                });
-                const last12 = Object.entries(monthMap)
-                  .sort((a,b)=>a[0]>b[0]?-1:1).slice(0,12);
-                const profitableMonths = last12.filter(([,v]) => (v.sellVal - v.buyVal) > 0).length;
-                const monthWinRate = last12.length > 0 ? Math.round(profitableMonths / last12.length * 100) : 0;
+            {/* 3 stat cards */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:24}}>
+              {/* Realized P&L */}
+              <div style={{...card,padding:"20px 22px"}}>
+                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>All-Time Realized</div>
+                <div style={{fontSize:26,fontWeight:800,color:myData.realizedPnl>=0?C.green:C.red,lineHeight:1}}>
+                  {myData.realizedPnl>=0?"+":""}₹{Math.abs(myData.realizedPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                </div>
+                <div style={{fontSize:11,color:C.muted,marginTop:6}}>Booked profits/losses</div>
+              </div>
 
-                // Daily win rate — current month only
-                const todayStr = now.toISOString().slice(0,10);
-                const dayMap = {};
-                myTrades.filter(t => (t.date||"").slice(0,7) === currentMonthStr).forEach(t => {
-                  const d = t.date||"";
-                  if (!d) return;
-                  if (!dayMap[d]) dayMap[d] = { buyVal:0, sellVal:0 };
-                  const val = (t.price||0) * (t.qty||0);
-                  if (t.side==="BUY")  dayMap[d].buyVal  += val;
-                  if (t.side==="SELL") dayMap[d].sellVal += val;
-                });
-                const tradingDays = Object.values(dayMap).filter(d => d.buyVal>0 || d.sellVal>0);
-                const profitDays  = tradingDays.filter(d => (d.sellVal - d.buyVal) > 0).length;
-                const dayWinRate  = tradingDays.length > 0 ? Math.round(profitDays / tradingDays.length * 100) : 0;
-                const wrColor     = monthWinRate >= 60 ? C.green : monthWinRate >= 40 ? C.yellow : C.red;
+              {/* Win Rate */}
+              <div style={{...card,padding:"20px 22px",borderTop:`3px solid ${myWrC}`}}>
+                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Win Rate</div>
+                <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                  <div style={{fontSize:36,fontWeight:900,color:myWrC,lineHeight:1}}>{winRate}%</div>
+                  <div style={{fontSize:12,color:C.muted}}>12 months</div>
+                </div>
+                <div style={{marginTop:8,height:4,background:C.border,borderRadius:2,overflow:"hidden"}}>
+                  <div style={{height:"100%",width:winRate+"%",background:myWrC,borderRadius:2,transition:"width 1s"}}/>
+                </div>
+                <div style={{fontSize:11,color:C.muted,marginTop:6}}>
+                  This month: <b style={{color:myWrC}}>{dayWR}%</b> daily ({pDays}/{tDays.length} days)
+                </div>
+              </div>
 
-                return (
-                  <>
-                    <div style={{ ...card, textAlign:"center", borderTop:`3px solid ${myData.realizedPnl>=0?C.green:C.red}` }}>
-                      <div style={{ color:C.muted, fontSize:11, marginBottom:8, textTransform:"uppercase", letterSpacing:1 }}>Realized P&L</div>
-                      <div style={{ color:myData.realizedPnl>=0?C.green:C.red, fontSize:22, fontWeight:700 }}>₹{myData.realizedPnl.toLocaleString()}</div>
-                    </div>
-                    {/* Win Rate Card */}
-                    <div style={{ ...card, textAlign:"center", borderTop:`3px solid ${wrColor}` }}>
-                      <div style={{ color:C.muted, fontSize:11, marginBottom:4, textTransform:"uppercase", letterSpacing:1 }}>Win Rate (12 months)</div>
-                      <div style={{ color:wrColor, fontSize:32, fontWeight:800, lineHeight:1 }}>{monthWinRate}%</div>
-                      <div style={{ color:C.muted, fontSize:11, marginTop:6 }}>
-                        {profitableMonths}/{last12.length} months profitable
-                      </div>
-                      <div style={{ marginTop:8, paddingTop:8, borderTop:`1px solid ${C.border}` }}>
-                        <div style={{ color:C.muted, fontSize:10, textTransform:"uppercase", letterSpacing:1 }}>This Month — Daily</div>
-                        <div style={{ color:wrColor, fontSize:18, fontWeight:700, marginTop:2 }}>{dayWinRate}%</div>
-                        <div style={{ color:C.muted, fontSize:10 }}>{profitDays}/{tradingDays.length} days</div>
-                      </div>
-                    </div>
-                    <div style={{ ...card, textAlign:"center", borderTop:`3px solid ${C.accent}` }}>
-                      <div style={{ color:C.muted, fontSize:11, marginBottom:8, textTransform:"uppercase", letterSpacing:1 }}>Open Positions</div>
-                      <div style={{ color:C.accent, fontSize:22, fontWeight:700 }}>{myData.openCount}</div>
-                    </div>
-                  </>
-                );
-              })()}
+              {/* Open Positions */}
+              <div style={{...card,padding:"20px 22px",cursor:"pointer"}}
+                onClick={()=>setPage("trades")}
+                onMouseEnter={e=>{e.currentTarget.style.boxShadow="0 4px 20px rgba(0,0,0,0.1)";e.currentTarget.style.transform="translateY(-2px)";}}
+                onMouseLeave={e=>{e.currentTarget.style.boxShadow="";e.currentTarget.style.transform="";}}>
+                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>Open Positions</div>
+                <div style={{fontSize:36,fontWeight:800,color:C.accent,lineHeight:1}}>{myData.openCount}</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:6}}>Active contracts →</div>
+              </div>
+            </div>
+
+            {/* Quote */}
+            <div style={{padding:"20px 24px",background:`linear-gradient(135deg,#1e3a5f,#1e3a8a)`,
+              borderRadius:14,boxShadow:"0 4px 20px rgba(30,58,138,0.2)"}}>
+              <div style={{color:"#93c5fd",fontSize:10,fontWeight:700,letterSpacing:2,marginBottom:8,textTransform:"uppercase"}}>Market Insight</div>
+              <div style={{color:"#ffffff",fontSize:15,fontStyle:"italic",lineHeight:1.7,marginBottom:8}}>"{todayQuote.text}"</div>
+              <div style={{color:"#93c5fd",fontSize:12}}>— {todayQuote.author}</div>
             </div>
           </div>
         );
       }
 
-      // Admin view — full chart
+      // ── ADMIN / SUPERADMIN DASHBOARD ─────────────────────────
+      const adminName = auth?.role === "superadmin" ? "JIYA" : (state.admins||[]).find(a=>a.id===auth?.adminId)?.name || "Admin";
+
       return (
         <div>
-          {/* Quote Banner */}
-          <div style={{ marginBottom:28, background:"linear-gradient(135deg, #1e3a5f, #1e3a8a)", borderRadius:16, padding:"28px 32px", position:"relative", overflow:"hidden", boxShadow:"0 4px 24px rgba(30,58,138,0.2)" }}>
-            <div style={{ position:"absolute", top:-20, right:24, fontSize:120, opacity:0.06, color:"#fff", fontFamily:"Georgia", lineHeight:1 }}>"</div>
-            <div style={{ color:"#93c5fd", fontSize:11, fontWeight:700, letterSpacing:2, marginBottom:12, textTransform:"uppercase" }}>📈 Market Quote — {new Date().toDateString()}</div>
-            <div style={{ color:"#ffffff", fontSize:18, fontStyle:"italic", lineHeight:1.75, marginBottom:12, maxWidth:"80%", fontWeight:400 }}>"{todayQuote.text}"</div>
-            <div style={{ color:"#93c5fd", fontSize:13, fontWeight:500 }}>— {todayQuote.author}</div>
+          {/* Greeting bar */}
+          <div style={{marginBottom:24,display:"flex",justifyContent:"space-between",
+            alignItems:"center",flexWrap:"wrap",gap:12}}>
+            <div>
+              <div style={{fontSize:12,color:C.muted,marginBottom:4}}>
+                {greeting}, <span style={{color:C.accent,fontWeight:700}}>{adminName}</span>
+              </div>
+              <div style={{fontSize:22,fontWeight:800,color:C.text,letterSpacing:"-0.5px"}}>
+                Portfolio Overview
+              </div>
+              <div style={{fontSize:12,color:C.muted,marginTop:2}}>
+                {new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setPage("trades")}
+                style={{...btn(C.accent),fontSize:13,padding:"8px 16px"}}>
+                ⬆️ Upload Trades
+              </button>
+              <button onClick={()=>setPage("rms")}
+                style={{...btn(C.card),border:`1px solid ${C.border}`,color:C.text,fontSize:13,padding:"8px 16px"}}>
+                📡 Open RMS
+              </button>
+            </div>
           </div>
 
-          {/* Summary row */}
-          {(() => {
-            // Admin Win Rate calculation across all clients
-            const allTrades = state.trades;
-            const now = new Date();
-            const currentMonthStr = now.toISOString().slice(0,7);
-
-            // Monthly win rate — last 12 months (all clients combined)
-            const monthMap = {};
-            allTrades.forEach(t => {
-              const m = (t.date||"").slice(0,7);
-              if (!m) return;
-              if (!monthMap[m]) monthMap[m] = { buyVal:0, sellVal:0 };
-              const val = (t.price||0) * (t.qty||0);
-              if (t.side==="BUY")  monthMap[m].buyVal  += val;
-              if (t.side==="SELL") monthMap[m].sellVal += val;
-            });
-            const last12 = Object.entries(monthMap).sort((a,b)=>a[0]>b[0]?-1:1).slice(0,12);
-            const profMonths = last12.filter(([,v])=>(v.sellVal-v.buyVal)>0).length;
-            const mwr = last12.length > 0 ? Math.round(profMonths/last12.length*100) : 0;
-
-            // Daily win rate — current month
-            const dayMap = {};
-            allTrades.filter(t=>(t.date||"").slice(0,7)===currentMonthStr).forEach(t => {
-              const d = t.date||""; if(!d) return;
-              if (!dayMap[d]) dayMap[d] = { buyVal:0, sellVal:0 };
-              const val = (t.price||0)*(t.qty||0);
-              if (t.side==="BUY")  dayMap[d].buyVal  += val;
-              if (t.side==="SELL") dayMap[d].sellVal += val;
-            });
-            const tDays = Object.values(dayMap).filter(d=>d.buyVal>0||d.sellVal>0);
-            const pDays = tDays.filter(d=>(d.sellVal-d.buyVal)>0).length;
-            const dwr = tDays.length > 0 ? Math.round(pDays/tDays.length*100) : 0;
-            const wrC = mwr>=60?C.green:mwr>=40?C.yellow:C.red;
-
-            return (
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:14, marginBottom:28 }}>
-                <div onClick={()=>setPage("clients")} style={{ ...card, borderTop:`3px solid ${C.accent}`, cursor:"pointer" }}
-                  onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";}}
-                  onMouseLeave={e=>{e.currentTarget.style.transform="none";}}>
-                  <div style={{ color:C.muted, fontSize:11, marginBottom:6, textTransform:"uppercase", letterSpacing:1 }}>Total Clients</div>
-                  <div style={{ color:C.accent, fontSize:24, fontWeight:700 }}>{state.clients.length}</div>
-                </div>
-                <div onClick={()=>setPage("pnl")} style={{ ...card, borderTop:`3px solid ${totalRealized>=0?C.green:C.red}`, cursor:"pointer" }}
-                  onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";}}
-                  onMouseLeave={e=>{e.currentTarget.style.transform="none";}}>
-                  <div style={{ color:C.muted, fontSize:11, marginBottom:6, textTransform:"uppercase", letterSpacing:1 }}>Realized P&L (All)</div>
-                  <div style={{ color:totalRealized>=0?C.green:C.red, fontSize:24, fontWeight:700 }}>₹{totalRealized.toLocaleString()}</div>
-                </div>
-                {/* Win Rate Card */}
-                <div style={{ ...card, borderTop:`3px solid ${wrC}` }}>
-                  <div style={{ color:C.muted, fontSize:11, marginBottom:4, textTransform:"uppercase", letterSpacing:1 }}>Win Rate (12 Months)</div>
-                  <div style={{ color:wrC, fontSize:28, fontWeight:800, lineHeight:1 }}>{mwr}%</div>
-                  <div style={{ color:C.muted, fontSize:10, marginTop:4 }}>{profMonths}/{last12.length} months · Today: <b style={{color:wrC}}>{dwr}%</b> ({pDays}/{tDays.length} days)</div>
-                </div>
-                <div onClick={()=>setPage("trades")} style={{ ...card, borderTop:`3px solid ${C.yellow}`, cursor:"pointer" }}
-                  onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";}}
-                  onMouseLeave={e=>{e.currentTarget.style.transform="none";}}>
-                  <div style={{ color:C.muted, fontSize:11, marginBottom:6, textTransform:"uppercase", letterSpacing:1 }}>Open Positions</div>
-                  <div style={{ color:C.yellow, fontSize:24, fontWeight:700 }}>{openPositions.length}</div>
-                </div>
+          {/* 4 KPI Cards */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:24}}>
+            {/* This Month P&L */}
+            <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${thisMonthPnl>=0?C.green:C.red}`,cursor:"pointer"}}
+              onClick={()=>setPage("pnl")}
+              onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 6px 24px rgba(0,0,0,0.1)";}}
+              onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="";}}>
+              <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>This Month P&L</div>
+              <div style={{fontSize:24,fontWeight:800,color:thisMonthPnl>=0?C.green:C.red,lineHeight:1,marginBottom:6}}>
+                {thisMonthPnl>=0?"+":""}₹{Math.abs(thisMonthPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
               </div>
-            );
-          })()}
+              <div style={{fontSize:11,color:C.muted}}>{currentMonthStr} · All clients</div>
+            </div>
 
-          {/* 6-Month P&L Line Chart */}
-          {(() => {
-            const now   = new Date();
-            const months = [];
-            for (let i = 5; i >= 0; i--) {
-              const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-              months.push(d.toISOString().slice(0,7));
-            }
+            {/* Total Clients */}
+            <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${C.accent}`,cursor:"pointer"}}
+              onClick={()=>setPage("clients")}
+              onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 6px 24px rgba(0,0,0,0.1)";}}
+              onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="";}}>
+              <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>Active Clients</div>
+              <div style={{fontSize:36,fontWeight:800,color:C.accent,lineHeight:1,marginBottom:6}}>{visibleClients.length}</div>
+              <div style={{fontSize:11,color:C.muted}}>Tap to manage →</div>
+            </div>
 
-            const clientsToShow = chartClientFilter === "all"
-              ? state.clients.filter(c => c.id !== "JIYA" && c.role !== "admin")
-              : state.clients.filter(c => c.id === chartClientFilter);
-
-            const COLORS = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4"];
-
-            const clientData = clientsToShow.map((cl, ci) => {
-              const pts = months.map(m => {
-                const mTrades = state.trades.filter(t => t.clientId===cl.id && (t.date||"").slice(0,7)===m);
-                let buyVal=0, sellVal=0;
-                mTrades.forEach(t => {
-                  const v = (t.price||0)*(t.qty||0);
-                  if (t.side==="BUY")  buyVal  += v;
-                  if (t.side==="SELL") sellVal += v;
-                });
-                return sellVal - buyVal;
-              });
-              return { name: (cl.name||cl.id).split(" ")[0], pts, color: COLORS[ci % COLORS.length] };
-            });
-
-            const allVals = clientData.flatMap(c => c.pts).filter(v => v !== 0);
-            if (allVals.length === 0) return null;
-
-            const maxV = Math.max(...allVals.map(Math.abs), 1);
-            const H = 160, W_PAD = 48, gap = 100 / Math.max(months.length-1, 1);
-
-            const toY = v => H/2 - (v/maxV) * (H/2 - 16);
-            const getPath = pts => pts.map((v,i) =>
-              `${i===0?"M":"L"}${W_PAD + i*gap*(100/100)}%,${toY(v)}`
-            ).join(" ");
-
-            const monthLabels = months.map(m => {
-              const [y,mo] = m.split("-");
-              return new Date(+y, +mo-1).toLocaleString("default",{month:"short"});
-            });
-
-            return (
-              <div style={{ ...card, marginBottom:28 }}>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
-                  <div>
-                    <h3 style={{ color:C.text, margin:0, fontSize:16 }}>6-Month P&L Trend</h3>
-                    <div style={{ color:C.muted, fontSize:12, marginTop:3 }}>Net P&L (Sell Value − Buy Value) per month</div>
-                  </div>
-                  <select value={chartClientFilter} onChange={e=>setChartClientFilter(e.target.value)}
-                    style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:8,
-                      padding:"6px 12px", color:C.text, fontSize:12, cursor:"pointer" }}>
-                    <option value="all">All Clients</option>
-                    {state.clients.filter(c=>c.id!=="JIYA"&&c.role!=="admin").map(c=>(
-                      <option key={c.id} value={c.id}>{c.name||c.id}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* SVG Line Chart */}
-                <div style={{ position:"relative", overflowX:"auto" }}>
-                  <svg width="100%" height={H+32} viewBox={`0 0 600 ${H+32}`} preserveAspectRatio="none"
-                    style={{ display:"block" }}>
-                    {/* Zero line */}
-                    <line x1="0" y1={H/2} x2="600" y2={H/2}
-                      stroke={C.border} strokeWidth="1" strokeDasharray="4,4"/>
-                    {/* Grid lines */}
-                    {[0.25,0.5,0.75].map(r=>(
-                      <g key={r}>
-                        <line x1="0" y1={H/2 - r*H/2} x2="600" y2={H/2 - r*H/2}
-                          stroke={C.border} strokeWidth="0.5" strokeOpacity="0.5"/>
-                        <line x1="0" y1={H/2 + r*H/2} x2="600" y2={H/2 + r*H/2}
-                          stroke={C.border} strokeWidth="0.5" strokeOpacity="0.5"/>
-                      </g>
-                    ))}
-                    {/* Client lines */}
-                    {clientData.map((cl) => {
-                      const pts = cl.pts.map((v,i) => ({ x: i*(600/(months.length-1)), y: toY(v) }));
-                      const path = pts.map((p,i) => `${i===0?"M":"L"}${p.x},${p.y}`).join(" ");
-                      return (
-                        <g key={cl.name}>
-                          <path d={path} fill="none" stroke={cl.color} strokeWidth="2.5" strokeLinejoin="round"/>
-                          {pts.map((p,i)=>(
-                            <g key={i}>
-                              <circle cx={p.x} cy={p.y} r="4" fill={cl.color}/>
-                              <title>{cl.name}: ₹{cl.pts[i].toLocaleString("en-IN")}</title>
-                            </g>
-                          ))}
-                        </g>
-                      );
-                    })}
-                    {/* Month labels */}
-                    {monthLabels.map((m,i)=>(
-                      <text key={m} x={i*(600/(months.length-1))} y={H+20}
-                        textAnchor="middle" fontSize="11" fill={C.muted}>{m}</text>
-                    ))}
-                  </svg>
-                </div>
-
-                {/* Legend */}
-                <div style={{ display:"flex", gap:16, flexWrap:"wrap", marginTop:8 }}>
-                  {clientData.map(cl=>(
-                    <div key={cl.name} style={{ display:"flex", alignItems:"center", gap:6, fontSize:12 }}>
-                      <div style={{ width:16, height:3, borderRadius:2, background:cl.color }}/>
-                      <span style={{ color:C.muted }}>{cl.name}</span>
-                    </div>
-                  ))}
-                </div>
+            {/* Win Rate */}
+            <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${wrColor}`}}>
+              <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>Win Rate</div>
+              <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:6}}>
+                <div style={{fontSize:36,fontWeight:800,color:wrColor,lineHeight:1}}>{winRate}%</div>
+                <div style={{fontSize:11,color:C.muted}}>12mo</div>
               </div>
-            );
-          })()}
-
-          {/* P&L Bar Chart */}
-          <div style={{ ...card }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
-              <div>
-                <h3 style={{ color:C.text, margin:0, fontSize:16 }}>Client P&L Overview</h3>
-                <div style={{ color:C.muted, fontSize:12, marginTop:4 }}>Realized + MTM P&L per client</div>
-              </div>
-              <div style={{ display:"flex", gap:16, fontSize:12 }}>
-                <span><span style={{ display:"inline-block", width:10, height:10, borderRadius:2, background:C.green, marginRight:5 }}/>Realized P&L</span>
-                <span><span style={{ display:"inline-block", width:10, height:10, borderRadius:2, background:C.purple, marginRight:5 }}/>MTM P&L</span>
+              <div style={{height:4,background:C.border,borderRadius:2,overflow:"hidden"}}>
+                <div style={{height:"100%",width:winRate+"%",background:wrColor,borderRadius:2}}/>
               </div>
             </div>
 
-            {clientPnlData.length === 0 ? (
-              <div style={{ textAlign:"center", padding:"48px 0", color:C.muted }}>
-                <div style={{ fontSize:40, marginBottom:12 }}>📊</div>
-                <div>No P&L data yet. Upload trade files to see client performance.</div>
+            {/* Open Positions */}
+            <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${C.yellow}`,cursor:"pointer"}}
+              onClick={()=>setPage("trades")}
+              onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 6px 24px rgba(0,0,0,0.1)";}}
+              onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="";}}>
+              <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>Open Positions</div>
+              <div style={{fontSize:36,fontWeight:800,color:C.yellow,lineHeight:1,marginBottom:6}}>
+                {clientPnlData.reduce((s,c)=>s+c.openCount,0)}
               </div>
-            ) : (
-              <div style={{ overflowX:"auto" }}>
-                <div style={{ minWidth: Math.max(600, clientPnlData.length * 80) }}>
-                  {/* Y-axis labels + bars */}
-                  <div style={{ display:"flex", alignItems:"flex-end", gap:0, paddingBottom:8 }}>
-                    {/* Y axis */}
-                    <div style={{ width:70, flexShrink:0, display:"flex", flexDirection:"column", justifyContent:"space-between", height:240, paddingRight:8, textAlign:"right" }}>
-                      {[1, 0.5, 0, -0.5, -1].map(f => (
-                        <div key={f} style={{ color:C.muted, fontSize:10 }}>
-                          {f === 0 ? "0" : `₹${(f*maxAbs/1000).toFixed(0)}k`}
-                        </div>
-                      ))}
-                    </div>
-                    {/* Chart area */}
-                    <div style={{ flex:1, position:"relative" }}>
-                      {/* Grid lines */}
-                      {[0,1,2,3,4].map(i => (
-                        <div key={i} style={{ position:"absolute", left:0, right:0, top: i*(240/4), borderTop:`1px dashed ${C.border}`, zIndex:0 }}/>
-                      ))}
-                      {/* Zero line */}
-                      <div style={{ position:"absolute", left:0, right:0, top:120, borderTop:`2px solid ${C.border}44`, zIndex:1 }}/>
-                      {/* Bars */}
-                      <div style={{ display:"flex", alignItems:"center", height:240, gap:8, paddingLeft:8, position:"relative", zIndex:2 }}>
-                        {clientPnlData.map((c, i) => {
-                          const realH = Math.abs(c.realizedPnl) / maxAbs * 110;
-                          const mtmH  = Math.abs(c.mtmPnl) / maxAbs * 110;
-                          const realUp = c.realizedPnl >= 0;
-                          const mtmUp  = c.mtmPnl >= 0;
+              <div style={{fontSize:11,color:C.muted}}>Across all clients →</div>
+            </div>
+          </div>
+
+          {/* Two column layout */}
+          <div style={{display:"grid",gridTemplateColumns:"1.6fr 1fr",gap:16,marginBottom:16}}>
+
+            {/* 6-Month Line Chart */}
+            <div style={{...card,padding:0,overflow:"hidden"}}>
+              <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,
+                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontWeight:700,color:C.text,fontSize:15}}>6-Month P&L Trend</div>
+                  <div style={{color:C.muted,fontSize:12,marginTop:2}}>Net P&L per month per client</div>
+                </div>
+                <select value={chartClientFilter} onChange={e=>setChartClientFilter(e.target.value)}
+                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                    padding:"5px 10px",color:C.text,fontSize:12,cursor:"pointer"}}>
+                  <option value="all">All Clients</option>
+                  {visibleClients.map(c=><option key={c.id} value={c.id}>{c.name||c.id}</option>)}
+                </select>
+              </div>
+              <div style={{padding:"16px 20px 12px"}}>
+                {(() => {
+                  const clientsToShow = chartClientFilter === "all"
+                    ? visibleClients.slice(0, 7)
+                    : visibleClients.filter(c => c.id === chartClientFilter);
+
+                  const clientLines = clientsToShow.map((cl, ci) => ({
+                    name: (cl.name||cl.id).split(" ")[0],
+                    color: CHART_COLORS[ci % CHART_COLORS.length],
+                    pts: months6.map(m => {
+                      const mT = allTrades.filter(t => t.clientId===cl.id && (t.date||"").slice(0,7)===m);
+                      let bv=0,sv=0;
+                      mT.forEach(t => { const v=(t.price||0)*(t.qty||0); if(t.side==="BUY") bv+=v; else sv+=v; });
+                      return sv - bv;
+                    })
+                  }));
+
+                  const allPts = clientLines.flatMap(c=>c.pts);
+                  const maxV   = Math.max(...allPts.map(Math.abs), 1);
+                  const H=140, W=560, pad=8;
+                  const xStep = (W-pad*2)/(months6.length-1);
+                  const toY   = v => (H/2) - (v/maxV)*(H/2-12);
+                  const monthLabels = months6.map(m => new Date(m+"-01").toLocaleString("default",{month:"short"}));
+
+                  return (
+                    <div>
+                      <svg width="100%" height={H+28} viewBox={`0 0 ${W} ${H+28}`} style={{display:"block"}}>
+                        {/* Zero line */}
+                        <line x1={pad} y1={H/2} x2={W-pad} y2={H/2} stroke={C.border} strokeWidth="1" strokeDasharray="4,3"/>
+                        {/* Grid */}
+                        {[0.4,0.8].map(r=>[
+                          <line key={"u"+r} x1={pad} y1={H/2-r*H/2} x2={W-pad} y2={H/2-r*H/2} stroke={C.border} strokeWidth="0.5" strokeOpacity="0.5"/>,
+                          <line key={"d"+r} x1={pad} y1={H/2+r*H/2} x2={W-pad} y2={H/2+r*H/2} stroke={C.border} strokeWidth="0.5" strokeOpacity="0.5"/>
+                        ])}
+                        {/* Lines */}
+                        {clientLines.map(cl=>{
+                          const pts = cl.pts.map((v,i)=>({x:pad+i*xStep, y:toY(v)}));
+                          const d   = pts.map((p,i)=>`${i===0?"M":"L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
                           return (
-                            <div key={c.id} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:2 }}>
-                              {/* Positive area (above zero) */}
-                              <div style={{ height:120, display:"flex", alignItems:"flex-end", gap:3, width:"100%" }}>
-                                <div style={{ flex:1, height: realUp ? realH : 0, background:C.green, borderRadius:"3px 3px 0 0", minHeight: realUp && realH > 0 ? 2 : 0, transition:"height 0.5s ease" }}/>
-                                <div style={{ flex:1, height: mtmUp ? mtmH : 0, background:C.purple, borderRadius:"3px 3px 0 0", minHeight: mtmUp && mtmH > 0 ? 2 : 0, transition:"height 0.5s ease" }}/>
-                              </div>
-                              {/* Zero separator */}
-                              <div style={{ height:2, width:"100%", background:C.border }}/>
-                              {/* Negative area (below zero) */}
-                              <div style={{ height:120, display:"flex", alignItems:"flex-start", gap:3, width:"100%" }}>
-                                <div style={{ flex:1, height: !realUp ? realH : 0, background:C.red+"cc", borderRadius:"0 0 3px 3px", minHeight: !realUp && realH > 0 ? 2 : 0, transition:"height 0.5s ease" }}/>
-                                <div style={{ flex:1, height: !mtmUp ? mtmH : 0, background:C.red+"66", borderRadius:"0 0 3px 3px", minHeight: !mtmUp && mtmH > 0 ? 2 : 0, transition:"height 0.5s ease" }}/>
-                              </div>
-                            </div>
+                            <g key={cl.name}>
+                              <path d={d} fill="none" stroke={cl.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+                              {pts.map((p,i)=>(
+                                <g key={i}>
+                                  <circle cx={p.x} cy={p.y} r="4" fill={cl.color} stroke="#fff" strokeWidth="1.5"/>
+                                  <title>{cl.name}: ₹{cl.pts[i].toLocaleString("en-IN",{maximumFractionDigits:0})}</title>
+                                </g>
+                              ))}
+                            </g>
                           );
                         })}
+                        {/* Month labels */}
+                        {monthLabels.map((m,i)=>(
+                          <text key={m} x={pad+i*xStep} y={H+20} textAnchor="middle" fontSize="11" fill={C.muted}>{m}</text>
+                        ))}
+                      </svg>
+                      {/* Legend */}
+                      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:4}}>
+                        {clientLines.map(cl=>(
+                          <div key={cl.name} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.muted}}>
+                            <div style={{width:12,height:3,borderRadius:2,background:cl.color}}/>
+                            {cl.name}
+                          </div>
+                        ))}
                       </div>
                     </div>
-                  </div>
-                  {/* X axis labels */}
-                  <div style={{ display:"flex", marginLeft:70, gap:8, paddingLeft:8 }}>
-                    {clientPnlData.map(c => (
-                      <div key={c.id} style={{ flex:1, textAlign:"center" }}>
-                        <div style={{ color:C.text, fontSize:11, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name.split(" ")[0]}</div>
-                        <div style={{ color:c.totalPnl>=0?C.green:C.red, fontSize:10, fontWeight:700 }}>₹{(c.totalPnl/1000).toFixed(1)}k</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                  );
+                })()}
               </div>
-            )}
+            </div>
+
+            {/* Client P&L Ranking */}
+            <div style={{...card,padding:0,overflow:"hidden"}}>
+              <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`}}>
+                <div style={{fontWeight:700,color:C.text,fontSize:15}}>Client P&L</div>
+                <div style={{color:C.muted,fontSize:12,marginTop:2}}>This month ranking</div>
+              </div>
+              <div style={{padding:"8px 0"}}>
+                {[...clientPnlData]
+                  .sort((a,b) => {
+                    const aM = (() => {
+                      const m={buyVal:0,sellVal:0};
+                      allTrades.filter(t=>t.clientId===a.id&&(t.date||"").slice(0,7)===currentMonthStr)
+                        .forEach(t=>{const v=(t.price||0)*(t.qty||0);if(t.side==="BUY")m.buyVal+=v;else m.sellVal+=v;});
+                      return m.sellVal-m.buyVal;
+                    })();
+                    const bM = (() => {
+                      const m={buyVal:0,sellVal:0};
+                      allTrades.filter(t=>t.clientId===b.id&&(t.date||"").slice(0,7)===currentMonthStr)
+                        .forEach(t=>{const v=(t.price||0)*(t.qty||0);if(t.side==="BUY")m.buyVal+=v;else m.sellVal+=v;});
+                      return m.sellVal-m.buyVal;
+                    })();
+                    return bM - aM;
+                  })
+                  .slice(0, 7)
+                  .map((c, i) => {
+                    const mPnl = (() => {
+                      const m={buyVal:0,sellVal:0};
+                      allTrades.filter(t=>t.clientId===c.id&&(t.date||"").slice(0,7)===currentMonthStr)
+                        .forEach(t=>{const v=(t.price||0)*(t.qty||0);if(t.side==="BUY")m.buyVal+=v;else m.sellVal+=v;});
+                      return m.sellVal-m.buyVal;
+                    })();
+                    const pct  = Math.abs(mPnl)/Math.max(...clientPnlData.map(x=>{
+                      const m2={buyVal:0,sellVal:0};
+                      allTrades.filter(t=>t.clientId===x.id&&(t.date||"").slice(0,7)===currentMonthStr)
+                        .forEach(t=>{const v=(t.price||0)*(t.qty||0);if(t.side==="BUY")m2.buyVal+=v;else m2.sellVal+=v;});
+                      return Math.abs(m2.sellVal-m2.buyVal);
+                    }),1)*100;
+
+                    return (
+                      <div key={c.id} style={{padding:"10px 20px",display:"flex",alignItems:"center",gap:12,
+                        borderBottom:`1px solid ${C.border}22`}}>
+                        <div style={{width:20,height:20,borderRadius:"50%",background:C.accent+"20",
+                          color:C.accent,fontSize:11,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                          {i+1}
+                        </div>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontWeight:600,color:C.text,fontSize:13,marginBottom:3,
+                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                            {c.name?.split(" ")[0]||c.id}
+                          </div>
+                          <div style={{height:3,background:C.border,borderRadius:2,overflow:"hidden"}}>
+                            <div style={{height:"100%",width:pct+"%",background:mPnl>=0?C.green:C.red,borderRadius:2}}/>
+                          </div>
+                        </div>
+                        <div style={{fontWeight:700,fontSize:13,color:mPnl>=0?C.green:C.red,flexShrink:0}}>
+                          {mPnl>=0?"+":""}₹{Math.abs(mPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                        </div>
+                      </div>
+                    );
+                  })}
+                {clientPnlData.length === 0 && (
+                  <div style={{padding:32,textAlign:"center",color:C.muted,fontSize:13}}>
+                    No trade data this month
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Quote banner */}
+          <div style={{padding:"20px 28px",background:"linear-gradient(135deg,#1e3a5f,#1e3a8a)",
+            borderRadius:14,boxShadow:"0 4px 20px rgba(30,58,138,0.2)",
+            display:"flex",alignItems:"center",gap:20,flexWrap:"wrap"}}>
+            <div style={{fontSize:36,color:"#ffffff20",fontFamily:"Georgia",lineHeight:1,flexShrink:0}}>"</div>
+            <div style={{flex:1}}>
+              <div style={{color:"#ffffff",fontSize:14,fontStyle:"italic",lineHeight:1.7,marginBottom:6}}>
+                {todayQuote.text}
+              </div>
+              <div style={{color:"#93c5fd",fontSize:12}}>— {todayQuote.author}</div>
+            </div>
           </div>
         </div>
       );
     }
 
-    if (page === "clients" && auth.role === "admin") return (
+    if (page === "clients" && (auth.role === "admin" || auth.role === "superadmin")) return (
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
           <h2 style={{ color: C.text, margin: 0 }}>Client Management</h2>
@@ -2925,7 +3373,7 @@ export default function BackOffice() {
     );
 
     if (page === "ledger") {
-      const isAdmin = auth.role === "admin";
+      const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
 
       // Which clients to show
       const allClients = isAdmin ? state.clients : [currentClient];
@@ -3094,7 +3542,7 @@ export default function BackOffice() {
     }
 
     if (page === "trades") {
-      const isAdmin = auth.role === "admin";
+      const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
       const allClients = isAdmin ? state.clients : [currentClient];
       const showClients = isAdmin && tradesClientFilter !== "all"
         ? allClients.filter(c => c.id === tradesClientFilter)
@@ -3311,7 +3759,7 @@ export default function BackOffice() {
     }
 
     if (page === "pnl") {
-      const isAdmin = auth.role === "admin";
+      const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
       const allClients = isAdmin ? state.clients : [currentClient];
       const showClients = isAdmin && pnlClientFilter !== "all"
         ? allClients.filter(c => c.id === pnlClientFilter)
@@ -3569,7 +4017,7 @@ export default function BackOffice() {
       );
     }
 
-    if (page === "charges" && auth.role === "admin") {
+    if (page === "charges" && (auth.role === "admin" || auth.role === "superadmin")) {
       const currentCfg = state.chargesHistory.slice().sort((a,b)=>b.effectiveFrom.localeCompare(a.effectiveFrom))[0] || DEFAULT_CHARGES;
       const numFld = (label, val, onChange, color=C.text) => (
         <div style={{ marginBottom:8 }}>
@@ -3765,7 +4213,7 @@ export default function BackOffice() {
 
 
     if (page === "tickets") {
-      const isAdmin = auth.role === "admin";
+      const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
       const ISSUE_TYPES = ["Trade Discrepancy","Margin Query","Account Statement","P&L Issue","Withdrawal/Deposit","Technical Issue","Bhavcopy/Settlement","Other"];
       const allTickets = isAdmin ? state.tickets : clientTickets(cid);
       const filteredTickets = ticketFilter === "all" ? allTickets : allTickets.filter(t => t.status === ticketFilter);
@@ -3905,11 +4353,32 @@ export default function BackOffice() {
     }
 
     // ── RMS Page ──
-    if (page === "rms" && auth.role === "admin") {
+    if (page === "rms" && (auth.role === "admin" || auth.role === "superadmin")) {
       return <RMSPage state={state} indexPrices={rmsIndexPrices} setIndexPrices={setRmsIndexPrices} funds={rmsFunds} setFunds={setRmsFunds} notify={notify} C={C} card={card} btn={btn} input={input} livePrice={angelLivePrice} rmsRef={rmsPositionsRef} lastUpdated={rmsLastUpdated} />;
     }
-    if (page === "settings" && auth.role === "admin") {
+    if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
       return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} />;
+    }
+
+    // ── Super Admin: Manage Admins ──
+    if (page === "manage_admins" && auth?.role === "superadmin") {
+      return <ManageAdminsPage state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} />;
+    }
+
+    // ── Super Admin: Manage Tokens ──
+    if (page === "manage_tokens" && auth?.role === "superadmin") {
+      return <ManageTokensPage state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} />;
+    }
+
+    // ── Token expiry warning for sub-admins ──
+    if (auth?.role === "admin") {
+      const myAdmin = (state.admins||[]).find(a => a.id === auth.adminId);
+      if (myAdmin?.tokenExpiry) {
+        const daysLeft = Math.ceil((new Date(myAdmin.tokenExpiry) - new Date()) / (1000*60*60*24));
+        if (daysLeft <= 7 && daysLeft > 0) {
+          // Show warning banner — but still render the page
+        }
+      }
     }
   };
 
@@ -4585,7 +5054,7 @@ export default function BackOffice() {
               <div style={{ fontSize: 11, color: C.muted, marginTop: 1, fontFamily: "monospace" }}>{currentClient.id}</div>
             </div>
           )}
-          {auth?.role === "admin" && (
+          {(auth?.role === "admin" || auth?.role === "superadmin") && (
             <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
               <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>Administrator</div>
               <div style={{ fontSize: 14, fontWeight: 700, color: C.text, letterSpacing: "-0.3px" }}>JIYA</div>
@@ -4608,7 +5077,7 @@ export default function BackOffice() {
         </div>
         <div style={{ padding: "14px 16px", borderTop: `1px solid ${C.border}` }}>
           {/* Sync status — admin only */}
-          {auth?.role === "admin" && SUPABASE_CONFIGURED && (
+          {(auth?.role === "admin" || auth?.role === "superadmin") && SUPABASE_CONFIGURED && (
             <div style={{ marginBottom:10, fontSize:11, display:"flex", alignItems:"center", gap:6,
               color: syncStatus==="saved"?C.green : syncStatus==="error"?C.red : syncStatus==="saving"?"#6366f1" : C.muted }}>
               <div style={{ width:6, height:6, borderRadius:"50%", background:"currentColor",
@@ -4617,7 +5086,16 @@ export default function BackOffice() {
               {syncStatus==="saving" ? "Saving..." : syncStatus==="saved" ? "✓ Saved to database" : syncStatus==="error" ? "⚠ Sync failed" : "Database connected"}
             </div>
           )}
-          {auth?.role === "admin" && !SUPABASE_CONFIGURED && (
+          {/* Angel One MTM Status */}
+          {auth?.role === "superadmin" && angelStatus === "connected" && (
+            <div style={{ marginBottom:6, fontSize:11, display:"flex", alignItems:"center", gap:6,
+              color: angelMTMStatus === "live" ? C.green : angelMTMStatus === "error" ? C.red : C.muted }}>
+              <div style={{ width:6, height:6, borderRadius:"50%", background:"currentColor" }}/>
+              {angelMTMStatus === "live" ? "📡 Live prices active" : angelMTMStatus === "error" ? "⚠ Price feed error" : "⏳ Fetching prices..."}
+            </div>
+            </div>
+          )}
+          {(auth?.role === "admin" || auth?.role === "superadmin") && !SUPABASE_CONFIGURED && (
             <div style={{ marginBottom:10, fontSize:11, color:C.yellow, display:"flex", alignItems:"center", gap:6 }}>
               ⚠️ Local mode — data not saved
             </div>
@@ -4628,6 +5106,25 @@ export default function BackOffice() {
 
       {/* Main */}
       <div style={{ flex: 1, padding: "clamp(12px, 3vw, 28px) clamp(12px, 4vw, 36px)", overflowY: "auto", background: C.bg, minWidth:0 }}>
+        {/* Token expiry warning for sub-admins */}
+        {auth?.role === "admin" && (() => {
+          const myAdmin = (state.admins||[]).find(a => a.id === auth.adminId);
+          if (!myAdmin?.tokenExpiry) return null;
+          const dl = Math.ceil((new Date(myAdmin.tokenExpiry) - new Date()) / (1000*60*60*24));
+          if (dl > 7) return null;
+          return (
+            <div style={{background: dl<=0?C.red+"15":C.yellow+"15",
+              border:`1px solid ${dl<=0?C.red:C.yellow}`,
+              borderRadius:8,padding:"10px 16px",marginBottom:16,
+              display:"flex",alignItems:"center",gap:10,fontSize:13}}>
+              <span style={{fontSize:18}}>{dl<=0?"🔴":"⚠️"}</span>
+              <span style={{color:dl<=0?C.red:C.yellow,fontWeight:600}}>
+                {dl<=0 ? "Your access token has expired! Contact JIYA to renew."
+                       : `Your token expires in ${dl} day${dl!==1?"s":""}. Contact JIYA to renew.`}
+              </span>
+            </div>
+          );
+        })()}
         {renderPage()}
       </div>
 
