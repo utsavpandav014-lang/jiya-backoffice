@@ -5207,7 +5207,6 @@ export default function BackOffice() {
               <div style={{ width:6, height:6, borderRadius:"50%", background:"currentColor" }}/>
               {angelMTMStatus === "live" ? "📡 Live prices active" : angelMTMStatus === "error" ? "⚠ Price feed error" : "⏳ Fetching prices..."}
             </div>
-            </div>
           )}
           {(auth?.role === "admin" || auth?.role === "superadmin") && !SUPABASE_CONFIGURED && (
             <div style={{ marginBottom:10, fontSize:11, color:C.yellow, display:"flex", alignItems:"center", gap:6 }}>
