@@ -2958,10 +2958,10 @@ export default function BackOffice() {
     { id: "ledger", label: "Ledger", icon: "ledger" },
     { id: "trades", label: "Trades & Positions", icon: "trades" },
     { id: "pnl", label: "Profit & Loss", icon: "pnl" },
-    ...(hasFeature(auth?.plan, "charges") ? [{ id: "charges", label: "Charges", icon: "charges" }] : []),
+    { id: "charges", label: "Charges", icon: "charges", locked: !hasFeature(auth?.plan, "charges") },
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
     ...(hasFeature(auth?.plan, "audit") ? [{ id: "audit", label: "📋 Audit Log", icon: "ledger" }] : []),
-    ...(hasFeature(auth?.plan, "rms") ? [{ id: "rms", label: "📡 RMS", icon: "dashboard" }] : []),
+    { id: "rms", label: "📡 RMS", icon: "dashboard", locked: !hasFeature(auth?.plan, "rms") },
     { id: "settings", label: "⚙️ Settings", icon: "dashboard" },
     // Super admin only
     ...(auth?.role === "superadmin" ? [
@@ -3047,7 +3047,7 @@ export default function BackOffice() {
       const fmtCcy        = (n) => (n < 0 ? "−" : "+") + "₹" + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
       const fmtAbs        = (n) => "₹" + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
 
-      // ── This Month P&L ───────────────────────────────────────
+      // ── This Month P&L (raw trade value — used only for Win Rate, DO NOT TOUCH) ──
       const allTrades = visibleTrades || state.trades;
       const monthMap  = {};
       allTrades.forEach(t => {
@@ -3058,8 +3058,22 @@ export default function BackOffice() {
         if (t.side === "BUY")  monthMap[m].buyVal  += v;
         if (t.side === "SELL") monthMap[m].sellVal += v;
       });
-      const thisMonthData   = monthMap[currentMonthStr] || { buyVal: 0, sellVal: 0 };
-      const thisMonthPnl    = thisMonthData.sellVal - thisMonthData.buyVal;
+
+      // ── Accurate Net P&L per client for a given month (matches P&L page exactly) ──
+      // Net P&L = Realized (closed FIFO positions) − Expenses − Software Charges − Interest
+      const clientNetPnlForMonth = (clientId, yearMonth) => {
+        const closedForClient = clientClosedPos(clientId);
+        const realized = closedForClient
+          .filter(cp => cp.trades.some(t => (t.date||"").slice(0,7) === yearMonth))
+          .reduce((a,c) => a + c.totalPnl, 0);
+        const expenses = getMonthlyCharges(clientId, yearMonth);
+        const software  = getMonthlyInterest(clientId, yearMonth + "_SW");
+        const interest  = getMonthlyInterest(clientId, yearMonth);
+        return realized - expenses - software - interest;
+      };
+
+      // This Month Net P&L — sum across all visible clients (matches P&L page logic)
+      const thisMonthPnl = visibleClients.reduce((sum, c) => sum + clientNetPnlForMonth(c.id, currentMonthStr), 0);
 
       // ── Win Rate (12 months) ─────────────────────────────────
       const last12     = Object.entries(monthMap).sort((a, b) => a[0] > b[0] ? -1 : 1).slice(0, 12);
@@ -3079,14 +3093,7 @@ export default function BackOffice() {
       if (auth?.role === "client") {
         const myData   = clientPnlData.find(c => c.id === cid) || { realizedPnl: 0, mtmPnl: 0, openCount: 0 };
         const myTrades = allTrades.filter(t => t.clientId === cid);
-        const myMonthPnl = (monthMap[currentMonthStr] && (() => {
-          const m = { buyVal: 0, sellVal: 0 };
-          myTrades.filter(t => (t.date||"").slice(0,7) === currentMonthStr).forEach(t => {
-            const v = (t.price||0)*(t.qty||0);
-            if (t.side==="BUY") m.buyVal+=v; else m.sellVal+=v;
-          });
-          return m.sellVal - m.buyVal;
-        })()) || 0;
+        const myMonthPnl = clientNetPnlForMonth(cid, currentMonthStr);
 
         // Daily win rate this month
         const dayMap2 = {};
@@ -3353,40 +3360,19 @@ export default function BackOffice() {
             <div style={{...card,padding:0,overflow:"hidden"}}>
               <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`}}>
                 <div style={{fontWeight:700,color:C.text,fontSize:15}}>Client P&L</div>
-                <div style={{color:C.muted,fontSize:12,marginTop:2}}>This month ranking</div>
+                <div style={{color:C.muted,fontSize:12,marginTop:2}}>This month ranking — Net P&L</div>
               </div>
               <div style={{padding:"8px 0"}}>
-                {[...clientPnlData]
-                  .sort((a,b) => {
-                    const aM = (() => {
-                      const m={buyVal:0,sellVal:0};
-                      allTrades.filter(t=>t.clientId===a.id&&(t.date||"").slice(0,7)===currentMonthStr)
-                        .forEach(t=>{const v=(t.price||0)*(t.qty||0);if(t.side==="BUY")m.buyVal+=v;else m.sellVal+=v;});
-                      return m.sellVal-m.buyVal;
-                    })();
-                    const bM = (() => {
-                      const m={buyVal:0,sellVal:0};
-                      allTrades.filter(t=>t.clientId===b.id&&(t.date||"").slice(0,7)===currentMonthStr)
-                        .forEach(t=>{const v=(t.price||0)*(t.qty||0);if(t.side==="BUY")m.buyVal+=v;else m.sellVal+=v;});
-                      return m.sellVal-m.buyVal;
-                    })();
-                    return bM - aM;
-                  })
-                  .slice(0, 7)
-                  .map((c, i) => {
-                    const mPnl = (() => {
-                      const m={buyVal:0,sellVal:0};
-                      allTrades.filter(t=>t.clientId===c.id&&(t.date||"").slice(0,7)===currentMonthStr)
-                        .forEach(t=>{const v=(t.price||0)*(t.qty||0);if(t.side==="BUY")m.buyVal+=v;else m.sellVal+=v;});
-                      return m.sellVal-m.buyVal;
-                    })();
-                    const pct  = Math.abs(mPnl)/Math.max(...clientPnlData.map(x=>{
-                      const m2={buyVal:0,sellVal:0};
-                      allTrades.filter(t=>t.clientId===x.id&&(t.date||"").slice(0,7)===currentMonthStr)
-                        .forEach(t=>{const v=(t.price||0)*(t.qty||0);if(t.side==="BUY")m2.buyVal+=v;else m2.sellVal+=v;});
-                      return Math.abs(m2.sellVal-m2.buyVal);
-                    }),1)*100;
+                {(() => {
+                  // Compute accurate Net P&L once per client (matches P&L page exactly)
+                  const ranked = clientPnlData
+                    .map(c => ({ ...c, netPnl: clientNetPnlForMonth(c.id, currentMonthStr) }))
+                    .sort((a,b) => b.netPnl - a.netPnl)
+                    .slice(0, 7);
+                  const maxAbsNet = Math.max(...ranked.map(c => Math.abs(c.netPnl)), 1);
 
+                  return ranked.map((c, i) => {
+                    const pct = (Math.abs(c.netPnl) / maxAbsNet) * 100;
                     return (
                       <div key={c.id} style={{padding:"10px 20px",display:"flex",alignItems:"center",gap:12,
                         borderBottom:`1px solid ${C.border}22`}}>
@@ -3400,15 +3386,16 @@ export default function BackOffice() {
                             {c.name?.split(" ")[0]||c.id}
                           </div>
                           <div style={{height:3,background:C.border,borderRadius:2,overflow:"hidden"}}>
-                            <div style={{height:"100%",width:pct+"%",background:mPnl>=0?C.green:C.red,borderRadius:2}}/>
+                            <div style={{height:"100%",width:pct+"%",background:c.netPnl>=0?C.green:C.red,borderRadius:2}}/>
                           </div>
                         </div>
-                        <div style={{fontWeight:700,fontSize:13,color:mPnl>=0?C.green:C.red,flexShrink:0}}>
-                          {mPnl>=0?"+":""}₹{Math.abs(mPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                        <div style={{fontWeight:700,fontSize:13,color:c.netPnl>=0?C.green:C.red,flexShrink:0}}>
+                          {c.netPnl>=0?"+":""}₹{Math.abs(c.netPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
                         </div>
                       </div>
                     );
-                  })}
+                  });
+                })()}
                 {clientPnlData.length === 0 && (
                   <div style={{padding:32,textAlign:"center",color:C.muted,fontSize:13}}>
                     No trade data this month
@@ -4119,7 +4106,7 @@ export default function BackOffice() {
       );
     }
 
-    if (page === "charges" && (auth.role === "admin" || auth.role === "superadmin")) {
+    if (page === "charges" && (auth.role === "admin" || auth.role === "superadmin") && hasFeature(auth?.plan, "charges")) {
       const currentCfg = state.chargesHistory.slice().sort((a,b)=>b.effectiveFrom.localeCompare(a.effectiveFrom))[0] || DEFAULT_CHARGES;
       const numFld = (label, val, onChange, color=C.text) => (
         <div style={{ marginBottom:8 }}>
@@ -4559,7 +4546,7 @@ export default function BackOffice() {
       );
     }
 
-    if (page === "rms" && (auth.role === "admin" || auth.role === "superadmin")) {
+    if (page === "rms" && (auth.role === "admin" || auth.role === "superadmin") && hasFeature(auth?.plan, "rms")) {
       return <RMSPage state={state} indexPrices={rmsIndexPrices} setIndexPrices={setRmsIndexPrices} funds={rmsFunds} setFunds={setRmsFunds} notify={notify} C={C} card={card} btn={btn} input={input} livePrice={angelLivePrice} rmsRef={rmsPositionsRef} lastUpdated={rmsLastUpdated} />;
     }
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
@@ -4585,6 +4572,25 @@ export default function BackOffice() {
           // Show warning banner — but still render the page
         }
       }
+    }
+
+    // ── Fallback: locked feature requested directly (e.g. RMS/Charges on Basic plan) ──
+    if ((page === "charges" || page === "rms") && (auth.role === "admin" || auth.role === "superadmin")) {
+      const featureLabel = page === "charges" ? "Charges" : "RMS";
+      return (
+        <div style={{ ...card, textAlign:"center", padding:56 }}>
+          <div style={{ fontSize:42, marginBottom:16 }}>🔒</div>
+          <div style={{ fontWeight:800, fontSize:18, color:C.text, marginBottom:8 }}>
+            {featureLabel} is locked on your current plan
+          </div>
+          <div style={{ color:C.muted, fontSize:13, marginBottom:20 }}>
+            Upgrade your plan to unlock {featureLabel} and other premium features.
+          </div>
+          <div style={{ color:C.muted, fontSize:12 }}>
+            Contact JIYA to upgrade your subscription.
+          </div>
+        </div>
+      );
     }
   };
 
@@ -5331,21 +5337,34 @@ export default function BackOffice() {
           {(auth?.role === "admin" || auth?.role === "superadmin") && (
             <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
               <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>Administrator</div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: C.text, letterSpacing: "-0.3px" }}>JIYA</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.text, letterSpacing: "-0.3px" }}>
+                {auth?.role === "superadmin" ? "JIYA" : ((state.admins||[]).find(a=>a.id===auth?.adminId)?.name || "Admin")}
+              </div>
             </div>
           )}
         </div>
         <div style={{ flex: 1, padding: "10px 8px" }}>
           {pages.map((p) => (
-            <button key={p.id} onClick={() => setPage(p.id)} style={{
-              width: "100%", display: "flex", alignItems: "center", gap: 10,
-              padding: "10px 12px", borderRadius: 8, margin: "1px 0",
-              background: page === p.id ? C.accent + "12" : "transparent",
-              border: "none", cursor: "pointer",
-              color: page === p.id ? C.accent : C.muted,
-              fontWeight: page === p.id ? 600 : 400, fontSize: 13.5, textAlign: "left",
-            }}>
-              <Icon name={p.icon} size={16} />{p.label}
+            <button key={p.id}
+              onClick={() => {
+                if (p.locked) {
+                  notify(`🔒 Upgrade your plan to unlock ${p.label}`, "error");
+                  return;
+                }
+                setPage(p.id);
+              }}
+              style={{
+                width: "100%", display: "flex", alignItems: "center", gap: 10,
+                padding: "10px 12px", borderRadius: 8, margin: "1px 0",
+                background: page === p.id ? C.accent + "12" : "transparent",
+                border: "none", cursor: p.locked ? "not-allowed" : "pointer",
+                color: p.locked ? C.muted+"88" : (page === p.id ? C.accent : C.muted),
+                fontWeight: page === p.id ? 600 : 400, fontSize: 13.5, textAlign: "left",
+                opacity: p.locked ? 0.6 : 1,
+              }}>
+              <Icon name={p.icon} size={16} />
+              <span style={{flex:1}}>{p.label}</span>
+              {p.locked && <span style={{fontSize:12}}>🔒</span>}
             </button>
           ))}
         </div>
