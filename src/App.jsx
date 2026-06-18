@@ -212,8 +212,9 @@ const INITIAL_STATE = {
   chargesHistory: [{ ...DEFAULT_CHARGES, effectiveFrom: "2024-01-01" }],
   interest: [],
   lockedMonths: [],
-  admins: [],    // sub-admins created by JIYA
-  tokens: [],    // activation tokens
+  admins: [],     // sub-admins created by JIYA
+  tokens: [],     // activation tokens
+  auditLog: [],   // ledger audit trail — created/edited/deleted entries
 };
 
 // ── Plan feature access ──────────────────────────────
@@ -1997,7 +1998,7 @@ export default function BackOffice() {
         return all;
       };
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins] = await Promise.all([
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         fetchAll("trades",          "?order=date.asc,time.asc"),
         fetchAll("ledger",          "?order=date.asc"),
@@ -2007,6 +2008,7 @@ export default function BackOffice() {
         fetchAll("bhavcopy",        "?order=created_at.desc"),
         sb.select("locked_months",  "?order=month.asc").catch(() => []),
         sb.select("admins",         "?order=created_at.asc").catch(() => []),
+        sb.select("audit_log",      "?order=timestamp.desc&limit=2000").catch(() => []),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -2023,6 +2025,7 @@ export default function BackOffice() {
         bhavcopy:       Array.isArray(bhavcopy)       ? bhavcopy       : [],
         lockedMonths:   Array.isArray(lockedMonthsRaw) ? lockedMonthsRaw.map(r => r.month) : [],
         admins:         Array.isArray(admins) ? admins : [],
+        auditLog:       Array.isArray(auditLog) ? auditLog : [],
       }));
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
@@ -2418,6 +2421,8 @@ export default function BackOffice() {
   const [ledgerClientFilter, setLedgerClientFilter] = useState("all");
   const [ledgerTabFilter, setLedgerTabFilter] = useState("all");
   const [editLedgerEntry, setEditLedgerEntry] = useState(null);
+  const [auditFilterClient, setAuditFilterClient] = useState("all");
+  const [auditFilterAction, setAuditFilterAction] = useState("all");
 
   const addLedger = () => {
     if (!newLedger.clientId || !newLedger.date || !newLedger.description) return notify("Fill required fields", "error");
@@ -2433,25 +2438,57 @@ export default function BackOffice() {
     };
     setState((s) => ({ ...s, ledger: [...s.ledger, entry] }));
     withSync(() => sb.upsert("ledger", entry));
+    pushAudit("ADDED", entry.clientId, `${entry.credit>0?`₹${entry.credit} credit`:`₹${entry.debit} debit`} — "${entry.narration||entry.description||""}"`);
     setNewLedger({ clientId: "", date: "", description: "", credit: "", debit: "", ledgerType: "all" });
     setModal(null);
     notify("Ledger entry added");
     addBell(`New ledger entry added for ${newLedger.clientId}`, "ledger", "ledger");
   };
 
+  // ── Audit trail helper ──
+  const currentActorName = () =>
+    auth?.role === "superadmin" ? "JIYA" : (state.admins||[]).find(a=>a.id===auth?.adminId)?.name || "Admin";
+
+  const pushAudit = (action, clientId, details) => {
+    const entry = {
+      id:        "AUD_" + Date.now() + "_" + Math.random().toString(36).slice(2,6),
+      action,                     // "ADDED" | "EDITED" | "DELETED"
+      clientId,
+      details,                    // human readable string
+      actor:     currentActorName(),
+      timestamp: new Date().toISOString(),
+    };
+    setState(s => ({ ...s, auditLog: [entry, ...(s.auditLog||[])].slice(0, 2000) }));
+    withSync(() => sb.upsert("audit_log", entry));
+  };
+
   const saveLedgerEdit = () => {
     if (!editLedgerEntry) return;
+    const before = state.ledger.find(l => l.id === editLedgerEntry.id);
     const updated = { ...editLedgerEntry, credit: +editLedgerEntry.credit || 0, debit: +editLedgerEntry.debit || 0 };
     setState(s => ({ ...s, ledger: s.ledger.map(l => l.id === updated.id ? updated : l) }));
     withSync(() => sb.upsert("ledger", updated));
+    // Audit: log what changed
+    if (before) {
+      const changes = [];
+      if (before.credit !== updated.credit) changes.push(`Credit ₹${before.credit} → ₹${updated.credit}`);
+      if (before.debit  !== updated.debit)  changes.push(`Debit ₹${before.debit} → ₹${updated.debit}`);
+      if (before.narration !== updated.narration) changes.push(`Note changed`);
+      pushAudit("EDITED", updated.clientId, changes.join(", ") || "Entry updated");
+    }
     setEditLedgerEntry(null);
     setModal(null);
     notify("Entry updated");
   };
 
   const deleteLedgerEntry = (id) => {
+    const entry = state.ledger.find(l => l.id === id);
     setState(s => ({ ...s, ledger: s.ledger.filter(l => l.id !== id) }));
     withSync(() => sb.delete("ledger", id));
+    if (entry) {
+      const amt = entry.credit > 0 ? `₹${entry.credit} credit` : `₹${entry.debit} debit`;
+      pushAudit("DELETED", entry.clientId, `Removed ${amt} — "${entry.narration||""}"`);
+    }
     notify("Entry deleted");
   };
 
@@ -2923,6 +2960,7 @@ export default function BackOffice() {
     { id: "pnl", label: "Profit & Loss", icon: "pnl" },
     ...(hasFeature(auth?.plan, "charges") ? [{ id: "charges", label: "Charges", icon: "charges" }] : []),
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
+    ...(hasFeature(auth?.plan, "audit") ? [{ id: "audit", label: "📋 Audit Log", icon: "ledger" }] : []),
     ...(hasFeature(auth?.plan, "rms") ? [{ id: "rms", label: "📡 RMS", icon: "dashboard" }] : []),
     { id: "settings", label: "⚙️ Settings", icon: "dashboard" },
     // Super admin only
@@ -3178,6 +3216,14 @@ export default function BackOffice() {
                 {thisMonthPnl>=0?"+":""}₹{Math.abs(thisMonthPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
               </div>
               <div style={{fontSize:11,color:C.muted}}>{currentMonthStr} · All clients</div>
+              {(() => {
+                const totalTrades = allTrades.length;
+                const thisMonthTrades = allTrades.filter(t=>(t.date||"").slice(0,7)===currentMonthStr).length;
+                if (totalTrades > 0 && thisMonthTrades === totalTrades && totalTrades > 50) {
+                  return <div style={{fontSize:10,color:C.yellow,marginTop:2}}>⚠️ All trades tagged as {currentMonthStr}</div>;
+                }
+                return null;
+              })()}
             </div>
 
             {/* Total Clients */}
@@ -3830,20 +3876,24 @@ export default function BackOffice() {
               <div style={{ display:"flex", alignItems:"baseline", gap:16, flexWrap:"wrap" }}>
           <h2 style={{ color:C.text, margin:0 }}>Profit & Loss</h2>
           {(() => {
-            const allTimePnL = (() => {
-              const allT = isAdmin ? state.trades : state.trades.filter(t=>t.clientId===cid);
-              let buyVal=0, sellVal=0;
-              allT.forEach(t => {
-                const v=(t.price||0)*(t.qty||0);
-                if(t.side==="BUY")  buyVal +=v;
-                if(t.side==="SELL") sellVal+=v;
-              });
-              return sellVal - buyVal;
-            })();
+            // Correct All-Time Net P&L: sum of (Realized - Expenses - Interest - Software) across all months, all visible clients
+            const clientsForTotal = isAdmin ? visibleClients : visibleClients.filter(c=>c.id===cid);
+            let grandNet = 0;
+            clientsForTotal.forEach(client => {
+              const closed = clientClosedPos(client.id);
+              const realized = closed.reduce((a,c)=>a+c.totalPnl,0);
+              const tradeMonths = [...new Set(state.trades.filter(t=>t.clientId===client.id).map(t=>(t.date||"").slice(0,7)))];
+              const interestMonths = [...new Set((state.interest||[]).filter(i=>i.clientId===client.id).map(i=>(i.yearMonth||"").replace("_SW","")))];
+              const allMonthsForClient = [...new Set([...tradeMonths, ...interestMonths])].filter(Boolean);
+              const expenses = allMonthsForClient.reduce((a,m)=>a+getMonthlyCharges(client.id,m),0);
+              const interest = allMonthsForClient.reduce((a,m)=>a+getMonthlyInterest(client.id,m),0);
+              const software = allMonthsForClient.reduce((a,m)=>a+getMonthlyInterest(client.id,m+"_SW"),0);
+              grandNet += (realized - expenses - interest - software);
+            });
             return (
               <span style={{ fontSize:12, color:C.muted, fontWeight:400 }}>
-                All Time: <span style={{ color:allTimePnL>=0?C.green:C.red, fontWeight:600 }}>
-                  ₹{allTimePnL.toLocaleString("en-IN",{maximumFractionDigits:0})}
+                All Time Net P&L: <span style={{ color:grandNet>=0?C.green:C.red, fontWeight:600 }}>
+                  ₹{grandNet.toLocaleString("en-IN",{maximumFractionDigits:0})}
                 </span>
               </span>
             );
@@ -3914,8 +3964,9 @@ export default function BackOffice() {
             // Grand totals
             const grandRealized = filteredClosed.reduce((a,c) => a + c.totalPnl, 0);
             const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
+            const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
             const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
-            const grandNet      = grandRealized - grandExpenses - grandInterest;
+            const grandNet      = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
@@ -3927,13 +3978,14 @@ export default function BackOffice() {
                 )}
 
                 {/* Grand summary cards */}
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12, marginBottom:24 }}>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(6,1fr)", gap:12, marginBottom:24 }}>
                   {[
-                    { label:"Realized P&L",  val:grandRealized,  color:grandRealized>=0?C.green:C.red },
-                    { label:"Expenses",       val:-grandExpenses, color:C.yellow },
-                    { label:"Interest",       val:-grandInterest, color:C.red },
-                    { label:"Net P&L",        val:grandNet,       color:grandNet>=0?C.green:C.red, big:true },
-                    { label:"Open Positions", val:open.length,    color:C.purple, count:true },
+                    { label:"Realized P&L",     val:grandRealized,  color:grandRealized>=0?C.green:C.red },
+                    { label:"Expenses",          val:-grandExpenses, color:C.yellow },
+                    { label:"Software Charges",  val:-grandSoftware, color:C.purple },
+                    { label:"Interest",          val:-grandInterest, color:C.red },
+                    { label:"Net P&L",           val:grandNet,       color:grandNet>=0?C.green:C.red, big:true },
+                    { label:"Open Positions",    val:open.length,    color:C.accent, count:true },
                   ].map(s => (
                     <div key={s.label} style={{ background:C.bg, borderRadius:10, padding:"14px 16px",
                       border:`1px solid ${s.big ? s.color+"66" : C.border}`,
@@ -3953,6 +4005,9 @@ export default function BackOffice() {
                   <span>−</span>
                   <span style={{ color:C.yellow, fontWeight:600 }}>₹{grandExpenses.toFixed(2)}</span>
                   <span>(Expenses)</span>
+                  <span>−</span>
+                  <span style={{ color:C.purple, fontWeight:600 }}>₹{grandSoftware.toFixed(2)}</span>
+                  <span>(Software)</span>
                   <span>−</span>
                   <span style={{ color:C.red, fontWeight:600 }}>₹{grandInterest.toFixed(2)}</span>
                   <span>(Interest)</span>
@@ -4022,6 +4077,7 @@ export default function BackOffice() {
                           <td style={{ padding:"10px 12px", color:grandRealized>=0?C.green:C.red, fontWeight:700 }}>₹{grandRealized.toFixed(2)}</td>
                           <td style={{ padding:"10px 12px", color:C.yellow, fontWeight:700 }}>− ₹{grandExpenses.toFixed(2)}</td>
                           <td style={{ padding:"10px 12px", color:C.red, fontWeight:700 }}>− ₹{grandInterest.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.purple, fontWeight:700 }}>₹{grandSoftware.toFixed(2)}</td>
                           <td style={{ padding:"10px 12px", color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</td>
                         </tr>
                       </tfoot>
@@ -4029,11 +4085,11 @@ export default function BackOffice() {
                   </div>
                 )}
 
-                {/* Closed contracts detail */}
-                {closed.length > 0 && (
+                {/* Closed contracts detail — filtered by current date selection */}
+                {filteredClosed.length > 0 && (
                   <details>
                     <summary style={{ color:C.muted, fontSize:12, cursor:"pointer", padding:"8px 0", userSelect:"none" }}>
-                      📋 View closed contracts ({closed.length})
+                      📋 View closed contracts ({filteredClosed.length})
                     </summary>
                     <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, marginTop:10 }}>
                       <thead>
@@ -4042,7 +4098,7 @@ export default function BackOffice() {
                         ))}</tr>
                       </thead>
                       <tbody>
-                        {closed.map((c,i)=>(
+                        {filteredClosed.map((c,i)=>(
                           <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
                             <td style={{ padding:"8px 12px", color:C.accent }}>{c.contract}</td>
                             <td style={{ padding:"8px 12px", color:c.totalPnl>=0?C.green:C.red, fontWeight:600 }}>₹{c.totalPnl.toFixed(2)}</td>
@@ -4053,7 +4109,7 @@ export default function BackOffice() {
                   </details>
                 )}
 
-                {closed.length===0 && allMonths.length===0 && (
+                {filteredClosed.length===0 && allMonths.length===0 && (
                   <div style={{ color:C.muted, fontSize:13 }}>No closed positions yet.</div>
                 )}
               </div>
@@ -4399,6 +4455,110 @@ export default function BackOffice() {
     }
 
     // ── RMS Page ──
+    // ── AUDIT LOG PAGE (Perfect plan / Superadmin) ──
+    if (page === "audit" && (auth.role === "admin" || auth.role === "superadmin")) {
+      const myClientIds = visibleClients.map(c => c.id);
+      const fullLog = (state.auditLog || []).filter(a => auth.role === "superadmin" || myClientIds.includes(a.clientId));
+
+      const auditClientFilter = auditFilterClient, setAuditClientFilter_ = setAuditFilterClient;
+      const auditActionFilter = auditFilterAction, setAuditActionFilter_ = setAuditFilterAction;
+
+      const filtered = fullLog.filter(a => {
+        if (auditClientFilter !== "all" && a.clientId !== auditClientFilter) return false;
+        if (auditActionFilter !== "all" && a.action !== auditActionFilter) return false;
+        return true;
+      });
+
+      const actionColor = (act) => act==="ADDED"?C.green:act==="EDITED"?C.yellow:C.red;
+      const actionIcon  = (act) => act==="ADDED"?"➕":act==="EDITED"?"✏️":"🗑️";
+
+      const exportCSV = () => {
+        const header = "Date/Time,Admin,Action,Client,Details\\n";
+        const rows = filtered.map(a =>
+          `"${new Date(a.timestamp).toLocaleString("en-IN")}","${a.actor}","${a.action}","${a.clientId}","${(a.details||"").replace(/"/g,"'")}"`
+        ).join("\\n");
+        const blob = new Blob([header + rows], { type: "text/csv" });
+        const url  = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `audit_log_${new Date().toISOString().slice(0,10)}.csv`;
+        link.click();
+        URL.revokeObjectURL(url);
+      };
+
+      return (
+        <div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20, flexWrap:"wrap", gap:12 }}>
+            <div>
+              <h2 style={{ color:C.text, margin:0 }}>📋 Audit Log</h2>
+              <div style={{ color:C.muted, fontSize:13, marginTop:4 }}>Complete history of ledger changes — who, what, when</div>
+            </div>
+            <button onClick={exportCSV} style={{...btn(C.accent), fontSize:13}}>
+              ⬇ Export CSV
+            </button>
+          </div>
+
+          {/* Filters */}
+          <div style={{ ...card, padding:"14px 20px", marginBottom:16, display:"flex", gap:12, flexWrap:"wrap", alignItems:"center" }}>
+            <span style={{ color:C.muted, fontSize:12, fontWeight:600 }}>FILTER BY:</span>
+            <select value={auditClientFilter} onChange={e=>setAuditClientFilter_(e.target.value)}
+              style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
+              <option value="all">All Clients</option>
+              {visibleClients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
+            </select>
+            <select value={auditActionFilter} onChange={e=>setAuditActionFilter_(e.target.value)}
+              style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
+              <option value="all">All Actions</option>
+              <option value="ADDED">Added</option>
+              <option value="EDITED">Edited</option>
+              <option value="DELETED">Deleted</option>
+            </select>
+            <span style={{ color:C.muted, fontSize:12 }}>{filtered.length} entries</span>
+          </div>
+
+          {/* Log table */}
+          {filtered.length === 0 ? (
+            <div style={{ ...card, textAlign:"center", padding:48, color:C.muted }}>
+              <div style={{ fontSize:36, marginBottom:12 }}>📋</div>
+              <div style={{ fontWeight:600 }}>No audit entries yet</div>
+              <div style={{ fontSize:13, marginTop:4 }}>Changes to ledger entries will appear here</div>
+            </div>
+          ) : (
+            <div style={{ ...card, padding:0, overflow:"hidden" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+                <thead>
+                  <tr style={{ background:"#f8fafc" }}>
+                    {["Date/Time","Admin","Action","Client","Details"].map(h=>(
+                      <th key={h} style={{ textAlign:"left", padding:"10px 16px", color:C.muted, fontSize:11,
+                        fontWeight:600, textTransform:"uppercase", letterSpacing:0.5, borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map(a => (
+                    <tr key={a.id} style={{ borderBottom:`1px solid ${C.border}` }}>
+                      <td style={{ padding:"10px 16px", color:C.muted, whiteSpace:"nowrap" }}>
+                        {new Date(a.timestamp).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}
+                      </td>
+                      <td style={{ padding:"10px 16px", color:C.text, fontWeight:600 }}>{a.actor}</td>
+                      <td style={{ padding:"10px 16px" }}>
+                        <span style={{ fontSize:11, padding:"2px 8px", borderRadius:4, fontWeight:700,
+                          background:actionColor(a.action)+"18", color:actionColor(a.action) }}>
+                          {actionIcon(a.action)} {a.action}
+                        </span>
+                      </td>
+                      <td style={{ padding:"10px 16px", color:C.accent, fontWeight:600 }}>{a.clientId}</td>
+                      <td style={{ padding:"10px 16px", color:C.muted }}>{a.details}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     if (page === "rms" && (auth.role === "admin" || auth.role === "superadmin")) {
       return <RMSPage state={state} indexPrices={rmsIndexPrices} setIndexPrices={setRmsIndexPrices} funds={rmsFunds} setFunds={setRmsFunds} notify={notify} C={C} card={card} btn={btn} input={input} livePrice={angelLivePrice} rmsRef={rmsPositionsRef} lastUpdated={rmsLastUpdated} />;
     }
