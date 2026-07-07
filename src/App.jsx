@@ -5444,7 +5444,7 @@ export default function BackOffice() {
 
         /* ── Count-up number ── */
         .kpi-num { transition: all 0.4s ease; }
-      `}</style>
+
         @media (max-width: 768px) {
           .jiya-sidebar { width: 60px !important; min-width: 60px !important; }
           .jiya-sidebar .label { display: none; }
