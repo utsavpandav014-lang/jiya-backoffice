@@ -1631,6 +1631,24 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
 }
 // ═══════════════════════════════════════════════════════
 
+// ─── Count-up animation hook ─────────────────────────────────────────────────
+function useCountUp(target, duration = 900) {
+  const [val, setVal] = useState(0);
+  useEffect(() => {
+    if (typeof target !== "number" || isNaN(target)) return;
+    const start = performance.now();
+    const tick = (now) => {
+      const progress = Math.min((now - start) / duration, 1);
+      const ease = 1 - Math.pow(1 - progress, 3);
+      setVal(Math.round(target * ease));
+      if (progress < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, [target]);
+  return val;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function BackOffice() {
   const [state, setState] = useState(INITIAL_STATE);
   const [dbLoading, setDbLoading] = useState(SUPABASE_CONFIGURED); // show loading if DB configured
@@ -3296,9 +3314,14 @@ export default function BackOffice() {
               onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 6px 24px rgba(0,0,0,0.1)";}}
               onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="";}}>
               <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>This Month P&L</div>
-              <div style={{fontSize:24,fontWeight:800,color:thisMonthPnl>=0?C.green:C.red,lineHeight:1,marginBottom:6}}>
-                {thisMonthPnl>=0?"+":""}₹{Math.abs(thisMonthPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
-              </div>
+              {(()=>{
+                const v = Math.abs(Math.round(thisMonthPnl));
+                return (
+                  <div className="kpi-num" style={{fontSize:24,fontWeight:800,color:thisMonthPnl>=0?C.green:C.red,lineHeight:1,marginBottom:6}}>
+                    {thisMonthPnl>=0?"+":"−"}₹{v.toLocaleString("en-IN")}
+                  </div>
+                );
+              })()}
               <div style={{fontSize:11,color:C.muted}}>{currentMonthStr} · All clients</div>
               {(() => {
                 const totalTrades = allTrades.length;
@@ -3316,7 +3339,7 @@ export default function BackOffice() {
               onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 6px 24px rgba(0,0,0,0.1)";}}
               onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="";}}>
               <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>Active Clients</div>
-              <div style={{fontSize:36,fontWeight:800,color:C.accent,lineHeight:1,marginBottom:6}}>{visibleClients.length}</div>
+              <div className="kpi-num" style={{fontSize:36,fontWeight:800,color:C.accent,lineHeight:1,marginBottom:6}}>{visibleClients.length}</div>
               <div style={{fontSize:11,color:C.muted}}>Tap to manage →</div>
             </div>
 
@@ -3338,7 +3361,7 @@ export default function BackOffice() {
               onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 6px 24px rgba(0,0,0,0.1)";}}
               onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="";}}>
               <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>Open Positions</div>
-              <div style={{fontSize:36,fontWeight:800,color:C.yellow,lineHeight:1,marginBottom:6}}>
+              <div className="kpi-num" style={{fontSize:36,fontWeight:800,color:C.yellow,lineHeight:1,marginBottom:6}}>
                 {clientPnlData.reduce((s,c)=>s+c.openCount,0)}
               </div>
               <div style={{fontSize:11,color:C.muted}}>Across all clients →</div>
@@ -5316,6 +5339,102 @@ export default function BackOffice() {
     <div style={{ display: "flex", minHeight: "100vh", background: C.bg, fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif", color: C.text }}>
       <style>{`
         * { box-sizing: border-box; }
+
+        /* ── Page transition ── */
+        .page-enter {
+          animation: pageEnter 0.22s cubic-bezier(0.16,1,0.3,1) both;
+        }
+        @keyframes pageEnter {
+          from { opacity:0; transform:translateY(14px); }
+          to   { opacity:1; transform:translateY(0); }
+        }
+
+        /* ── Table row stagger ── */
+        .row-enter {
+          animation: rowEnter 0.28s ease-out both;
+        }
+        @keyframes rowEnter {
+          from { opacity:0; transform:translateX(-8px); }
+          to   { opacity:1; transform:translateX(0); }
+        }
+
+        /* ── Card hover lift (universal) ── */
+        .hover-card {
+          transition: transform 0.18s ease, box-shadow 0.18s ease !important;
+        }
+        .hover-card:hover {
+          transform: translateY(-3px) !important;
+          box-shadow: 0 8px 28px rgba(0,0,0,0.13) !important;
+        }
+
+        /* ── Button press ── */
+        button:active { transform: scale(0.97) !important; }
+
+        /* ── Modal entrance ── */
+        .modal-enter {
+          animation: modalEnter 0.2s cubic-bezier(0.16,1,0.3,1) both;
+        }
+        @keyframes modalEnter {
+          from { opacity:0; transform:scale(0.94); }
+          to   { opacity:1; transform:scale(1); }
+        }
+
+        /* ── Number count-up flash ── */
+        .num-flash-green { animation: flashGreen 0.6s ease-out both; }
+        .num-flash-red   { animation: flashRed   0.6s ease-out both; }
+        @keyframes flashGreen {
+          0%   { color: #10b981; transform:scale(1.06); }
+          100% { color: inherit; transform:scale(1); }
+        }
+        @keyframes flashRed {
+          0%   { color: #ef4444; transform:scale(1.06); }
+          100% { color: inherit; transform:scale(1); }
+        }
+
+        /* ── Skeleton shimmer ── */
+        .skeleton {
+          background: linear-gradient(90deg,#f1f5f9 25%,#e2e8f0 50%,#f1f5f9 75%);
+          background-size: 400px 100%;
+          animation: skeleton-shine 1.4s ease-in-out infinite;
+          border-radius: 6px;
+        }
+        @keyframes skeleton-shine {
+          0%   { background-position: -400px 0; }
+          100% { background-position:  400px 0; }
+        }
+
+        /* ── Bell wobble ── */
+        .bell-ring { animation: bellRing 0.5s ease-in-out; }
+        @keyframes bellRing {
+          0%,100% { transform:rotate(0deg); }
+          20%     { transform:rotate(-18deg); }
+          40%     { transform:rotate(18deg); }
+          60%     { transform:rotate(-10deg); }
+          80%     { transform:rotate(10deg); }
+        }
+
+        /* ── Sidebar active slide ── */
+        .sidebar-active {
+          position: relative;
+          transition: background 0.18s ease, color 0.18s ease !important;
+        }
+        .sidebar-active::before {
+          content: '';
+          position: absolute;
+          left: 0; top: 20%; bottom: 20%;
+          width: 3px;
+          background: #3b82f6;
+          border-radius: 0 3px 3px 0;
+          animation: slideIn 0.18s ease-out both;
+        }
+        @keyframes slideIn {
+          from { transform: scaleY(0); }
+          to   { transform: scaleY(1); }
+        }
+
+        /* ── Count-up number ── */
+        .kpi-num { transition: all 0.4s ease; }
+      `}</style>
         @media (max-width: 768px) {
           .jiya-sidebar { width: 60px !important; min-width: 60px !important; }
           .jiya-sidebar .label { display: none; }
@@ -5340,6 +5459,7 @@ export default function BackOffice() {
             {/* Bell icon */}
             <div style={{ position:"relative" }}>
               <button onClick={()=>{ setBellOpen(v=>!v); if(!bellOpen) markAllRead(); }}
+                className={bellAnimate ? "bell-ring" : ""}
                 style={{ background:"none", border:"none", cursor:"pointer", padding:"2px 4px",
                   color: unreadCount>0 ? C.accent : C.muted, fontSize:16, position:"relative" }}>
                 🔔
@@ -5425,11 +5545,12 @@ export default function BackOffice() {
             <button key={p.id}
               onClick={() => {
                 if (p.locked) {
-                  notify(`🔒 Upgrade your plan to unlock ${p.label}`, "error");
+                  notify("🔒 Upgrade your plan to unlock " + p.label, "error");
                   return;
                 }
                 setPage(p.id);
               }}
+              className={page === p.id ? "sidebar-active" : ""}
               style={{
                 width: "100%", display: "flex", alignItems: "center", gap: 10,
                 padding: "10px 12px", borderRadius: 8, margin: "1px 0",
@@ -5437,7 +5558,7 @@ export default function BackOffice() {
                 border: "none", cursor: p.locked ? "not-allowed" : "pointer",
                 color: p.locked ? C.muted+"88" : (page === p.id ? C.accent : C.muted),
                 fontWeight: page === p.id ? 600 : 400, fontSize: 13.5, textAlign: "left",
-                opacity: p.locked ? 0.6 : 1,
+                opacity: p.locked ? 0.6 : 1, transition:"all 0.18s ease",
               }}>
               <Icon name={p.icon} size={16} />
               <span style={{flex:1}}>{p.label}</span>
@@ -5494,7 +5615,9 @@ export default function BackOffice() {
             </div>
           );
         })()}
-        {renderPage()}
+        <div key={page} className="page-enter">
+          {renderPage()}
+        </div>
       </div>
 
       {/* Modals */}
