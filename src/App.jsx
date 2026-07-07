@@ -2151,12 +2151,21 @@ export default function BackOffice() {
   const saveInterest = () => {
     const { clientId, yearMonth, amount, note, entryType } = addInterestForm;
     if (!clientId || !yearMonth || !amount) return notify("Fill all required fields", "error");
-    const entry = { id: "INT" + Date.now(), clientId, yearMonth, amount: +amount, note };
+    const isSoftware = entryType === "software";
+    const storedMonth = isSoftware ? yearMonth + "_SW" : yearMonth;
+    const entry = {
+      id: "INT" + Date.now(),
+      clientId,
+      yearMonth: storedMonth,
+      amount: +amount,
+      note: note || (isSoftware ? "Software Charges" : ""),
+      entryType: entryType || "interest",
+    };
     setState(s => ({ ...s, interest: [...(s.interest||[]), entry] }));
     withSync(() => sb.upsert("interest", entry));
     setAddInterestForm({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
     setModal(null);
-    notify("Interest entry added");
+    notify(isSoftware ? "Software charge added" : "Interest entry added");
   };
 
   // Delete interest entry
