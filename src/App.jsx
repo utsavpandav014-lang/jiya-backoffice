@@ -1553,7 +1553,13 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
           )}
         </div>
         {angelStatus === "connected" && (
-          <button onClick={disconnectAngel} style={{...btn(C.red),fontSize:12}}>Disconnect</button>
+          <div style={{display:"flex", gap:8}}>
+            <button onClick={disconnectAngel} style={{...btn(C.red),fontSize:12}}>Disconnect</button>
+            <button onClick={()=>fetchAutoBhavcopy(angelTokenRef.current?.jwtToken, angelCreds.apiKey)}
+              style={{...btn(C.green),fontSize:12}}>
+              📋 Fetch Closing Prices Now
+            </button>
+          </div>
         )}
       </div>
 
@@ -1744,6 +1750,9 @@ export default function BackOffice() {
       setAngelStatus("connected");
       notify("✅ Angel One connected! Live prices active.");
 
+      // Store token for manual fetch button
+      angelTokenRef.current = { jwtToken: tokens.jwtToken };
+
       // Start polling LTP every 5 seconds
       startLTPPolling(tokens.jwtToken, creds.apiKey);
 
@@ -1768,7 +1777,8 @@ export default function BackOffice() {
   // ── Angel One: Poll LTP for all open positions ──
   // ── Angel One: Poll LTP for open positions ──────────────────
   const rmsPositionsRef     = useRef({});
-  const contractTokenMapRef = useRef({}); // { "NIFTY 23000 CE 13APR2026": { token:"54990", exchange:"NFO" } }
+  const contractTokenMapRef = useRef({});
+  const angelTokenRef       = useRef({});
 
   // Parse contract name to Angel One search query
   const contractToSearch = (contract) => {
@@ -1922,10 +1932,81 @@ export default function BackOffice() {
   }, []);
 
   const fetchAutoBhavcopy = async (jwtToken, apiKey) => {
-    notify("📋 Auto-fetching closing prices at 7:00 PM...");
-    // Bhavcopy fetching would go here
-    // For now notify user
-    notify("✅ Bhavcopy auto-fetch complete!");
+    notify("📋 Fetching closing prices for open positions...");
+    try {
+      // Get all unique open position contracts
+      const { openPositions } = applyFIFO(state.trades);
+      if (!openPositions.length) {
+        notify("No open positions — nothing to fetch");
+        return;
+      }
+
+      // Build unique contracts list
+      const uniqueContracts = [...new Set(openPositions.map(p => p.contract))];
+      notify(`Fetching prices for ${uniqueContracts.length} contracts...`);
+
+      const newMTM = { ...angelLiveMTM };
+      let fetched = 0;
+
+      // Fetch LTP for each contract via search_token
+      for (const contract of uniqueContracts) {
+        try {
+          // Check if we already have token from live polling
+          const existing = contractTokenMapRef.current[contract];
+          if (existing?.token) {
+            // Use existing token to fetch latest price
+            const isBSE = ["SENSEX","BANKEX"].includes(contract.split(" ")[0]?.toUpperCase());
+            const exchange = isBSE ? "BFO" : "NFO";
+            const resp = await fetch(ANGEL_PROXY, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "ltp", apiKey, jwtToken,
+                payload: { exchangeTokens: { [exchange]: [existing.token] } }
+              })
+            });
+            const data = await resp.json();
+            if (data.status && data.data?.fetched?.length) {
+              const ltp = data.data.fetched[0].ltp;
+              newMTM[contract] = { ltp, token: existing.token };
+              fetched++;
+            }
+          } else {
+            // Search for token
+            const sym = contract.split(" ")[0];
+            const isBSE = ["SENSEX","BANKEX"].includes(sym?.toUpperCase());
+            const exchange = isBSE ? "BFO" : "NFO";
+            const r = await fetch(ANGEL_PROXY, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "search_token", apiKey, jwtToken,
+                payload: { symbol: sym, exchange, query: contract }
+              })
+            });
+            const d = await r.json();
+            if (d.status && d.data?.length) {
+              const token = d.data[0].symboltoken;
+              const ltp   = d.data[0].ltp;
+              contractTokenMapRef.current[contract] = { token, exchange };
+              newMTM[contract] = { ltp, token };
+              fetched++;
+            }
+          }
+          await new Promise(r => setTimeout(r, 150)); // rate limit delay
+        } catch(e) {
+          console.log("Closing price fetch error for", contract, e.message);
+        }
+      }
+
+      // Update live MTM state — this automatically updates P&L via getBhavClose
+      setAngelLiveMTM(newMTM);
+      setAngelMTMStatus("live");
+      notify(`✅ Closing prices updated for ${fetched}/${uniqueContracts.length} contracts`);
+
+    } catch(e) {
+      notify("❌ Closing price fetch failed: " + e.message, "error");
+    }
   };
 
   // ── Auto-reconnect Angel One on page load if creds saved ──
