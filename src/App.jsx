@@ -1682,6 +1682,7 @@ export default function BackOffice() {
   const [bells,         setBells]         = useState(() => {
     try { return JSON.parse(localStorage.getItem("jiya_bells") || "[]"); } catch(e) { return []; }
   });
+  const [bellAnimate,   setBellAnimate]   = useState(false);
   const [bellOpen,      setBellOpen]      = useState(false);
 
   const addBell = (msg, type="info", page=null) => {
@@ -1692,10 +1693,12 @@ export default function BackOffice() {
       read: false,
     };
     setBells(prev => {
-      const updated = [entry, ...prev].slice(0, 50); // keep last 50
+      const updated = [entry, ...prev].slice(0, 50);
       try { localStorage.setItem("jiya_bells", JSON.stringify(updated)); } catch(e) {}
       return updated;
     });
+    setBellAnimate(true);
+    setTimeout(() => setBellAnimate(false), 600);
   };
 
   const markAllRead = () => {
