@@ -2868,23 +2868,100 @@ export default function BackOffice() {
   // ── Login Screen ──
   // ── DB Loading screen ──
   if (dbLoading) return (
-    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#dbeafe,#ede9fe)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Inter',sans-serif" }}>
-      <div style={{ fontSize:40, marginBottom:20 }}>📊</div>
-      <div style={{ fontSize:20, fontWeight:700, color:"#1e3a8a", marginBottom:10 }}>JIYA Back Office</div>
-      <div style={{ fontSize:14, color:"#6366f1", marginBottom:24 }}>Connecting to database...</div>
-      <div style={{ width:40, height:40, border:"4px solid #e0e7ff", borderTop:"4px solid #6366f1", borderRadius:"50%", animation:"spin 1s linear infinite" }}/>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-      {dbError && (
-        <div style={{ marginTop:24, background:"#fef2f2", border:"1px solid #fecaca", borderRadius:12, padding:"16px 24px", maxWidth:480, textAlign:"center" }}>
-          <div style={{ color:"#dc2626", fontWeight:600, marginBottom:8 }}>⚠️ Database connection failed</div>
-          <div style={{ color:"#7f1d1d", fontSize:13, marginBottom:12 }}>{dbError}</div>
-          <div style={{ color:"#6b7280", fontSize:12, marginBottom:12 }}>Make sure SUPABASE_URL and SUPABASE_ANON_KEY are set correctly in the code.</div>
-          <button onClick={() => { setDbLoading(false); setDbError(null); }}
-            style={{ background:"#3b82f6", color:"#fff", border:"none", borderRadius:8, padding:"10px 20px", cursor:"pointer", fontWeight:600 }}>
-            Continue without database (data won't be saved)
-          </button>
+    <div style={{ minHeight:"100vh", background:"#0d1117", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Inter',sans-serif", overflow:"hidden", position:"relative" }}>
+      <style>{`
+        @keyframes pulse-ring {
+          0%   { transform: scale(0.8); opacity:1; }
+          100% { transform: scale(2.2); opacity:0; }
+        }
+        @keyframes fade-up {
+          from { opacity:0; transform:translateY(16px); }
+          to   { opacity:1; transform:translateY(0); }
+        }
+        @keyframes blink {
+          0%,100% { opacity:1; } 50% { opacity:0.2; }
+        }
+        @keyframes ticker {
+          0%   { transform:translateX(0); }
+          100% { transform:translateX(-50%); }
+        }
+        @keyframes bar-grow {
+          from { transform:scaleY(0); }
+          to   { transform:scaleY(1); }
+        }
+        @keyframes shimmer {
+          0%   { background-position: -400px 0; }
+          100% { background-position:  400px 0; }
+        }
+      `}</style>
+
+      {/* Background grid */}
+      <div style={{ position:"absolute", inset:0, backgroundImage:"linear-gradient(rgba(59,130,246,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.04) 1px,transparent 1px)", backgroundSize:"40px 40px", pointerEvents:"none" }}/>
+
+      {/* Animated bars — fake chart in background */}
+      <div style={{ position:"absolute", bottom:0, left:0, right:0, height:180, display:"flex", alignItems:"flex-end", gap:3, padding:"0 40px", opacity:0.12 }}>
+        {[0.4,0.7,0.5,0.9,0.6,0.8,0.3,0.95,0.55,0.75,0.45,0.85,0.65,0.5,0.7,0.4,0.9,0.6,0.8,0.35,0.7,0.5,0.88,0.6,0.45,0.75,0.55,0.9,0.4,0.7].map((h,i) => (
+          <div key={i} style={{ flex:1, background:"#3b82f6", borderRadius:"3px 3px 0 0", height:`${h*100}%`, transformOrigin:"bottom", animation:`bar-grow 0.6s ease-out ${i*0.04}s both` }}/>
+        ))}
+      </div>
+
+      {/* Center content */}
+      <div style={{ position:"relative", textAlign:"center", animation:"fade-up 0.5s ease-out both" }}>
+
+        {/* Pulse ring + logo */}
+        <div style={{ position:"relative", width:88, height:88, margin:"0 auto 28px" }}>
+          <div style={{ position:"absolute", inset:0, borderRadius:"50%", border:"2px solid #3b82f6", animation:"pulse-ring 1.6s ease-out infinite" }}/>
+          <div style={{ position:"absolute", inset:0, borderRadius:"50%", border:"2px solid #3b82f6", animation:"pulse-ring 1.6s ease-out 0.5s infinite" }}/>
+          <div style={{ position:"relative", width:88, height:88, borderRadius:"50%", background:"linear-gradient(135deg,#1e3a8a,#1e2761)", display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 0 32px rgba(59,130,246,0.3)" }}>
+            <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+              <polyline points="4,28 12,18 20,22 28,10 36,14" stroke="#3b82f6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <circle cx="36" cy="14" r="3" fill="#10b981"/>
+            </svg>
+          </div>
         </div>
-      )}
+
+        {/* Brand */}
+        <div style={{ fontSize:28, fontWeight:800, color:"#ffffff", letterSpacing:"-0.5px", marginBottom:6, animation:"fade-up 0.5s ease-out 0.15s both", opacity:0 }}>
+          JIYA <span style={{ color:"#3b82f6" }}>Back Office</span>
+        </div>
+        <div style={{ fontSize:13, color:"#475569", letterSpacing:"3px", textTransform:"uppercase", marginBottom:36, animation:"fade-up 0.5s ease-out 0.25s both", opacity:0 }}>
+          Professional Trading Portal
+        </div>
+
+        {/* Progress bar */}
+        <div style={{ width:240, margin:"0 auto 16px", animation:"fade-up 0.5s ease-out 0.35s both", opacity:0 }}>
+          <div style={{ height:3, background:"#1e2761", borderRadius:2, overflow:"hidden" }}>
+            <div style={{ height:"100%", background:"linear-gradient(90deg,#1e3a8a,#3b82f6,#10b981)", backgroundSize:"200% 100%", animation:"shimmer 1.4s linear infinite", borderRadius:2 }}/>
+          </div>
+        </div>
+
+        {/* Status text */}
+        <div style={{ fontSize:12, color:"#3b82f6", letterSpacing:"1px", animation:"blink 1.4s ease-in-out infinite" }}>
+          {dbError ? "⚠ Connection issue — retrying..." : "● ESTABLISHING SECURE CONNECTION"}
+        </div>
+
+        {/* Error state */}
+        {dbError && (
+          <div style={{ marginTop:24, background:"#1c1c2e", border:"1px solid #ef444433", borderRadius:10, padding:"16px 24px", maxWidth:380, animation:"fade-up 0.3s ease-out both" }}>
+            <div style={{ color:"#ef4444", fontWeight:600, fontSize:13, marginBottom:8 }}>Connection failed</div>
+            <div style={{ color:"#94a3b8", fontSize:12, marginBottom:14 }}>{dbError}</div>
+            <button onClick={() => { setDbLoading(false); setDbError(null); }}
+              style={{ background:"#1e3a8a", color:"#93c5fd", border:"1px solid #3b82f6", borderRadius:6, padding:"8px 18px", cursor:"pointer", fontSize:12, fontWeight:600 }}>
+              Continue offline
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Bottom ticker */}
+      <div style={{ position:"absolute", bottom:0, left:0, right:0, height:32, background:"#0a0e17", borderTop:"1px solid #1e2761", overflow:"hidden", display:"flex", alignItems:"center" }}>
+        <div style={{ display:"flex", gap:40, whiteSpace:"nowrap", animation:"ticker 18s linear infinite", fontSize:11, color:"#334155", fontFamily:"monospace" }}>
+          {["SENSEX  81,245.30  +0.42%","NIFTY  24,812.55  +0.38%","BANKNIFTY  53,124.80  +0.21%","FINNIFTY  23,445.60  -0.12%","MIDCPNIFTY  12,234.15  +0.55%",
+            "SENSEX  81,245.30  +0.42%","NIFTY  24,812.55  +0.38%","BANKNIFTY  53,124.80  +0.21%","FINNIFTY  23,445.60  -0.12%","MIDCPNIFTY  12,234.15  +0.55%"].map((t,i) => (
+            <span key={i} style={{ color: t.includes("-") ? "#ef4444" : "#10b981" }}>{t}</span>
+          ))}
+        </div>
+      </div>
     </div>
   );
 
