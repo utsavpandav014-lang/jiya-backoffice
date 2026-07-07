@@ -597,9 +597,9 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
       setTimeout(()=>setUploadStatus(null),3000);
       if (rmsRef) rmsRef.current = data;
 
-      // ── Auto closing snapshot if uploaded after 3:30 PM ──
+      // ── Auto closing snapshot if uploaded after 7:00 PM ──
       const h = now.getHours(), m = now.getMinutes();
-      if (h > 15 || (h === 15 && m >= 30)) {
+      if (h >= 19) {
         saveClosingSnapshot(data, now);
       } else {
         notify("✅ Positions loaded — " + Object.keys(data).length + " clients");
@@ -681,7 +681,7 @@ function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, 
             <div style={{fontSize:13,color:C.muted}}>No snapshot yet</div>
           )}
           <div style={{fontSize:10,color:C.muted,marginTop:4}}>
-            {snapshotDate ? `Baseline: ${snapshotDate}` : "Upload after 3:30 PM to set baseline"}
+            {snapshotDate ? `Baseline: ${snapshotDate}` : "Upload after 7:00 PM to set baseline"}
           </div>
         </div>
 
@@ -1549,7 +1549,7 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
         <div>
           <div style={{fontWeight:700,color:statusColor,fontSize:14}}>{statusText}</div>
           {angelStatus === "connected" && (
-            <div style={{color:C.muted,fontSize:12,marginTop:2}}>Live prices updating every 5 seconds • Auto bhavcopy at 3:35 PM</div>
+            <div style={{color:C.muted,fontSize:12,marginTop:2}}>Live prices updating every 5 seconds • Auto closing prices at 7:00 PM</div>
           )}
         </div>
         {angelStatus === "connected" && (
@@ -1613,7 +1613,7 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
           {[
             {icon:"📈", label:"Live option prices", desc:"Updates every 5 seconds during market hours"},
             {icon:"💰", label:"Real-time MTM in RMS", desc:"All client positions update automatically"},
-            {icon:"📋", label:"Bhavcopy", desc:"Auto-fetched at 3:35 PM every trading day"},
+            {icon:"📋", label:"Bhavcopy", desc:"Auto-fetched at 7:00 PM every trading day"},
             {icon:"🎯", label:"Accurate scenario analysis", desc:"Uses real option prices not approximations"},
           ].map(item => (
             <div key={item.label} style={{display:"flex",gap:12,marginBottom:10,alignItems:"flex-start"}}>
@@ -1726,7 +1726,7 @@ export default function BackOffice() {
       // Start polling LTP every 5 seconds
       startLTPPolling(tokens.jwtToken, creds.apiKey);
 
-      // Schedule auto bhavcopy at 3:35 PM
+      // Schedule auto closing prices at 7:00 PM
       scheduleAutoBhavcopy(tokens.jwtToken, creds.apiKey);
 
     } catch(e) {
@@ -1888,11 +1888,11 @@ export default function BackOffice() {
     return () => clearInterval(interval);
   }, [state.trades, angelLiveMTM]);
 
-  // ── Angel One: Auto Bhavcopy at 3:35 PM ──
+  // ── Angel One: Auto Closing Prices at 7:00 PM ──
   const scheduleAutoBhavcopy = useCallback((jwtToken, apiKey) => {
     const checkTime = () => {
       const now = new Date();
-      if (now.getHours() === 15 && now.getMinutes() === 35 && now.getSeconds() < 10) {
+      if (now.getHours() === 19 && now.getMinutes() === 0 && now.getSeconds() < 10) {
         fetchAutoBhavcopy(jwtToken, apiKey);
       }
     };
@@ -1901,7 +1901,7 @@ export default function BackOffice() {
   }, []);
 
   const fetchAutoBhavcopy = async (jwtToken, apiKey) => {
-    notify("📋 Auto-fetching bhavcopy at 3:35 PM...");
+    notify("📋 Auto-fetching closing prices at 7:00 PM...");
     // Bhavcopy fetching would go here
     // For now notify user
     notify("✅ Bhavcopy auto-fetch complete!");
