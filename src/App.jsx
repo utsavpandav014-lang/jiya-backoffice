@@ -2116,7 +2116,7 @@ export default function BackOffice() {
   const [pnlMonth, setPnlMonth] = useState(new Date().toISOString().slice(0,7));
   const [pnlDateFrom, setPnlDateFrom] = useState("");
   const [pnlDateTo, setPnlDateTo] = useState("");
-  const [addInterestForm, setAddInterestForm] = useState({ clientId:"", yearMonth:"", amount:"", note:"" });
+  const [addInterestForm, setAddInterestForm] = useState({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
   const [tradesClientFilter, setTradesClientFilter] = useState("all");
   const [chargesEdit, setChargesEdit] = useState(null); // working copy for charges edit
 
@@ -2151,7 +2151,7 @@ export default function BackOffice() {
     const entry = { id: "INT" + Date.now(), clientId, yearMonth, amount: +amount, note };
     setState(s => ({ ...s, interest: [...(s.interest||[]), entry] }));
     withSync(() => sb.upsert("interest", entry));
-    setAddInterestForm({ clientId:"", yearMonth:"", amount:"", note:"" });
+    setAddInterestForm({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
     setModal(null);
     notify("Interest entry added");
   };
@@ -5237,6 +5237,16 @@ export default function BackOffice() {
           </div>
 
           <div style={{ marginBottom:14 }}>
+            <label style={{ color:C.muted, fontSize:12, display:"block", marginBottom:5 }}>Type *</label>
+            <select value={addInterestForm.entryType||"interest"}
+              onChange={e=>setAddInterestForm(s=>({...s,entryType:e.target.value}))}
+              style={{...input, cursor:"pointer"}}>
+              <option value="interest">Interest / Brokerage</option>
+              <option value="software">Software Charges</option>
+            </select>
+          </div>
+
+          <div style={{ marginBottom:14 }}>
             <label style={{ color:C.muted, fontSize:12, display:"block", marginBottom:5 }}>Amount (₹) *</label>
             <input type="number" placeholder="e.g. 5000" value={addInterestForm.amount}
               onChange={e=>setAddInterestForm(s=>({...s,amount:e.target.value}))}
@@ -5456,10 +5466,11 @@ export default function BackOffice() {
           <div style={{ fontSize: 18, fontWeight: 800, color: C.accent, letterSpacing: "-0.5px" }}>📊 JIYA</div>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:2 }}>
             <div style={{ fontSize: 11, color: C.muted }}>Back Office Portal</div>
-            {/* Bell icon */}
-            <div style={{ position:"relative" }}>
-              <button onClick={()=>{ setBellOpen(v=>!v); if(!bellOpen) markAllRead(); }}
-                className={bellAnimate ? "bell-ring" : ""}
+            <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+              {/* Bell icon */}
+              <div style={{ position:"relative" }}>
+                <button onClick={()=>{ setBellOpen(v=>!v); if(!bellOpen) markAllRead(); }}
+                  className={bellAnimate ? "bell-ring" : ""}
                 style={{ background:"none", border:"none", cursor:"pointer", padding:"2px 4px",
                   color: unreadCount>0 ? C.accent : C.muted, fontSize:16, position:"relative" }}>
                 🔔
@@ -5522,6 +5533,16 @@ export default function BackOffice() {
                   </div>
                 </div>
               )}
+            </div>
+              {/* Logout — sticky top */}
+              <button onClick={logout} title="Logout"
+                style={{ background:"none", border:"none", cursor:"pointer", padding:"2px 5px",
+                  color:C.muted, fontSize:15, display:"flex", alignItems:"center",
+                  transition:"color 0.15s" }}
+                onMouseEnter={e=>e.currentTarget.style.color="#ef4444"}
+                onMouseLeave={e=>e.currentTarget.style.color=C.muted}>
+                <Icon name="logout" size={15}/>
+              </button>
             </div>
           </div>
           {auth?.role === "client" && currentClient?.name && (
@@ -5590,7 +5611,7 @@ export default function BackOffice() {
               ⚠️ Local mode — data not saved
             </div>
           )}
-          <button onClick={logout} style={{ ...btn(C.red), padding: "7px 14px", fontSize: 12 }}><Icon name="logout" size={14} /> Logout</button>
+          <button onClick={logout} style={{ display:"none" }}></button>
         </div>
       </div>
 
