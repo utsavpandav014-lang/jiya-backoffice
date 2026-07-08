@@ -449,899 +449,375 @@ function calcMTM(positions) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-function RMSPage({ state, indexPrices, setIndexPrices, funds, setFunds, notify, C, card, btn, input, livePrice = {}, rmsRef, lastUpdated: lastUpdatedProp }) {
-  const [clientData,    setClientData]    = useState({});
-  const [lastUpdated,   setLastUpdated]   = useState(lastUpdatedProp || null);
-  const [expanded,      setExpanded]      = useState({});
-  const [editFund,      setEditFund]      = useState(null);
-  const [fundInput,     setFundInput]     = useState("");
-  const [editIdx,       setEditIdx]       = useState(false);
-  const [idxInput,      setIdxInput]      = useState({...DEFAULT_IDX, ...(indexPrices||{})});
-  const [uploadStatus,  setUploadStatus]  = useState(null);
-  const [snapshot,      setSnapshot]      = useState(() => {
-    // Load yesterday's closing snapshot from localStorage
-    try { return JSON.parse(localStorage.getItem("rms_snapshot") || "null"); } catch(e) { return null; }
-  });
-  const [showIntraday,  setShowIntraday]  = useState(true);
-  const fileRef = useRef();
+function RMSPage({ state, notify, C, card, btn, input, angelLiveMTM, angelMTMStatus }) {
+  const [liveTradesRaw, setLiveTradesRaw] = useState([]);
+  const [lastSync,      setLastSync]      = useState(null);
+  const [loading,       setLoading]       = useState(false);
+  const [filterClient,  setFilterClient]  = useState("all");
+  const [view,          setView]          = useState("positions"); // positions | closed | summary
 
-  const SUPABASE_URL_RMS = "https://jwfucitnaqkuyzizmuve.supabase.co";
-  const SUPABASE_KEY_RMS = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
+  const SUPABASE_URL = "https://jwfucitnaqkuyzizmuve.supabase.co";
+  const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
 
-  const prices = { ...DEFAULT_IDX, ...(indexPrices||{}) };
-
-  const saveFunds = (f) => { setFunds(f); try{localStorage.setItem("rms_funds",JSON.stringify(f));}catch(e){} };
-  const saveIdx   = (p) => { setIndexPrices(p); try{localStorage.setItem("rms_idx",JSON.stringify(p));}catch(e){} };
-
-  // ── Closing snapshot: save to localStorage + Supabase ──
-  const saveClosingSnapshot = async (data, uploadTime) => {
-    const today = uploadTime || new Date();
-    const todayStr = today.toISOString().slice(0,10);
-
-    // For each client: filter non-expiry, sum MTM
-    const snap = {};
-    Object.entries(data).forEach(([cid, positions]) => {
-      const filtered = filterNonExpiry(positions, today);
-      snap[cid] = {
-        mtm:   calcMTM(filtered),
-        date:  todayStr,
-        count: filtered.length,
-      };
-    });
-
-    const snapRecord = { date: todayStr, clients: snap, savedAt: today.toISOString() };
-
-    // Save to localStorage
-    try { localStorage.setItem("rms_snapshot", JSON.stringify(snapRecord)); } catch(e) {}
-    setSnapshot(snapRecord);
-
-    // Save to Supabase for persistence
+  // ── Load live trades from rms_live table ──────────────────────
+  const loadLiveTrades = async () => {
+    setLoading(true);
     try {
-      // Delete old snapshot first
-      await fetch(`${SUPABASE_URL_RMS}/rest/v1/rms_positions?snapshot_type=eq.closing`, {
-        method: "DELETE",
-        headers: { "apikey": SUPABASE_KEY_RMS, "Authorization": `Bearer ${SUPABASE_KEY_RMS}`, "Prefer": "" }
-      });
-      // Insert new
-      await fetch(`${SUPABASE_URL_RMS}/rest/v1/rms_positions`, {
-        method: "POST",
-        headers: { "Content-Type":"application/json", "apikey": SUPABASE_KEY_RMS,
-                   "Authorization": `Bearer ${SUPABASE_KEY_RMS}`, "Prefer": "return=minimal" },
-        body: JSON.stringify({
-          positions_json: JSON.stringify(snapRecord),
-          snapshot_type:  "closing",
-          uploaded_at:    today.toISOString(),
-        })
-      });
-      notify("📸 Closing snapshot saved! Tomorrow's intraday will be calculated from this.");
+      const r = await fetch(
+        `${SUPABASE_URL}/rest/v1/rms_live?admin_id=eq.JIYA&order=captured_at.desc&limit=1`,
+        { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+      );
+      const rows = await r.json();
+      if (rows && rows[0]?.trades_json) {
+        const trades = JSON.parse(rows[0].trades_json);
+        setLiveTradesRaw(trades);
+        setLastSync(new Date(rows[0].captured_at));
+      }
     } catch(e) {
-      notify("📸 Snapshot saved locally. (DB save failed)", "error");
+      notify("RMS load error: " + e.message, "error");
     }
+    setLoading(false);
   };
 
-  // ── Load closing snapshot from Supabase on mount ──
   useEffect(() => {
-    const loadSnapshot = async () => {
-      try {
-        const r = await fetch(
-          `${SUPABASE_URL_RMS}/rest/v1/rms_positions?snapshot_type=eq.closing&order=uploaded_at.desc&limit=1`,
-          { headers: { "apikey": SUPABASE_KEY_RMS, "Authorization": `Bearer ${SUPABASE_KEY_RMS}` } }
-        );
-        const rows = await r.json();
-        if (rows?.length && rows[0].positions_json) {
-          const snap = JSON.parse(rows[0].positions_json);
-          setSnapshot(snap);
-          try { localStorage.setItem("rms_snapshot", JSON.stringify(snap)); } catch(e) {}
-        }
-      } catch(e) {}
-    };
-    loadSnapshot();
+    loadLiveTrades();
+    const t = setInterval(loadLiveTrades, 10000); // refresh every 10s
+    return () => clearInterval(t);
   }, []);
 
-  // ── Calculate intraday P&L for a client ──
-  const getIntradayPnL = (cid, positions, uploadTime) => {
-    if (!snapshot || !snapshot.clients) return null;
-    const today = uploadTime || new Date();
-    const filtered = filterNonExpiry(positions, today);
-    const currentMTM = calcMTM(filtered);
-    const prevSnap = snapshot.clients[cid];
-    if (!prevSnap) return null;
-    return currentMTM - prevSnap.mtm;
-  };
+  // ── Combine System 1 (overnight) + Live F8 trades ─────────────
+  const today = new Date().toISOString().slice(0, 10);
 
-  // ── Auto-load from Supabase every 10 seconds ──
-  useEffect(() => {
-    const loadFromDB = async () => {
-      try {
-        const SUPABASE_URL = "https://jwfucitnaqkuyzizmuve.supabase.co";
-        const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
-        const r = await fetch(
-          `${SUPABASE_URL}/rest/v1/rms_positions?snapshot_type=eq.live&order=uploaded_at.desc&limit=1`,
-          { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
-        );
-        const rows = await r.json();
-        if (rows?.length && rows[0].positions_json) {
-          const positions = JSON.parse(rows[0].positions_json);
-          const grouped   = {};
-          positions.forEach(p => {
-            if (!p.user) return;
-            if (!grouped[p.user]) grouped[p.user] = [];
-            grouped[p.user].push(p);
-          });
-          if (Object.keys(grouped).length > 0) {
-            setClientData(grouped);
-            setLastUpdated(new Date(rows[0].uploaded_at));
-            if (rmsRef) rmsRef.current = grouped;
-          }
-        }
-      } catch(e) {
-        // Silent fail — manual upload still works
-      }
-    };
+  const combinedTrades = useMemo(() => {
+    // System 1 trades — all historical (overnight carry positions)
+    const sys1 = (state.trades || []).map(t => ({ ...t, source: "sys1" }));
 
-    loadFromDB(); // Load immediately on mount
-    const interval = setInterval(loadFromDB, 10000); // Refresh every 10 seconds
-    return () => clearInterval(interval);
-  }, []);
+    // Live F8 trades from today only — tagged as sys2
+    const sys2 = liveTradesRaw.map(t => ({
+      id:         `live_${t.clientId}_${t.time}_${t.scripName}`,
+      clientId:   t.clientId,
+      contract:   t.scripName || `${t.symbol} ${t.strike} ${t.optionType} ${t.expiry}`,
+      side:       t.side,
+      qty:        t.qty,
+      price:      t.price,
+      date:       today,
+      time:       t.time || "09:15:00",
+      source:     "sys2",
+    }));
 
-  const onFile = (e) => {
-    const f = e.target.files[0]; if(!f) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const data = parseRMSCsv(ev.target.result);
-      if (!Object.keys(data).length) { setUploadStatus("error"); setTimeout(()=>setUploadStatus(null),3000); return; }
-      const now = new Date();
-      setClientData(data);
-      setLastUpdated(now);
-      setUploadStatus("ok");
-      setTimeout(()=>setUploadStatus(null),3000);
-      if (rmsRef) rmsRef.current = data;
+    // Merge: sys1 first (historical), then sys2 (today's live)
+    // Deduplicate sys2 against sys1 by clientId+contract+side+qty+price+time
+    const sys1Keys = new Set(sys1.map(t => `${t.clientId}|${t.contract}|${t.side}|${t.qty}|${t.price}|${t.time}`));
+    const uniqueSys2 = sys2.filter(t => !sys1Keys.has(`${t.clientId}|${t.contract}|${t.side}|${t.qty}|${t.price}|${t.time}`));
 
-      // ── Auto closing snapshot if uploaded after 7:00 PM ──
-      const h = now.getHours(), m = now.getMinutes();
-      if (h >= 19) {
-        saveClosingSnapshot(data, now);
-      } else {
-        notify("✅ Positions loaded — " + Object.keys(data).length + " clients");
-      }
-    };
-    reader.readAsText(f);
-    e.target.value="";
-  };
+    return [...sys1, ...uniqueSys2];
+  }, [state.trades, liveTradesRaw, today]);
 
-  const fmtN = (n) => { const v=Math.abs(n); const s=v>=1e7?(v/1e7).toFixed(2)+"Cr":v>=1e5?(v/1e5).toFixed(2)+"L":v>=1e3?(v/1e3).toFixed(1)+"K":v.toFixed(0); return (n<0?"−":"")+"₹"+s; };
-  const fmtFull = (n) => (n<0?"−":"")+"₹"+Math.abs(Math.round(n)).toLocaleString("en-IN");
-  const pnlClr = (n) => n>0?C.green:n<0?C.red:C.muted;
-
-  // Use live-updated data from Angel One ref if available, else local state
-  const displayData  = (rmsRef && Object.keys(rmsRef.current || {}).length) ? rmsRef.current : clientData;
-  const today        = lastUpdated || new Date();
-
-  // Filtered data (non-expiry only) for intraday calculation
-  const filteredData = Object.fromEntries(
-    Object.entries(displayData).map(([cid,pos]) => [cid, filterNonExpiry(pos, today)])
+  // ── Run FIFO on combined trades (same engine as System 1) ──────
+  const { openPositions: allOpen, closedPositions: allClosed } = useMemo(
+    () => applyFIFO(combinedTrades),
+    [combinedTrades]
   );
 
-  const totalMTM     = Object.values(displayData).flat().reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
-  const totalFilteredMTM = Object.values(filteredData).flat().reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
-  const totalMargin  = Object.entries(displayData).reduce((s,[,pos])=>s+calcRMSMargin(pos,prices).total,0);
-  const totalFund    = Object.values(funds||{}).reduce((s,f)=>s+(parseFloat(f)||0),0);
-  const hasData      = Object.keys(displayData).length>0;
-  const btnClr       = uploadStatus==="ok"?C.green:uploadStatus==="error"?C.red:C.accent;
+  // ── Filter to visible clients ──────────────────────────────────
+  const clients = state.clients || [];
+  const filteredClients = filterClient === "all" ? clients : clients.filter(c => c.id === filterClient);
+  const clientIds = new Set(filteredClients.map(c => c.id));
 
-  // Total intraday P&L across all clients
-  const totalIntraday = snapshot ? Object.keys(displayData).reduce((s,cid) => {
-    const v = getIntradayPnL(cid, displayData[cid] || [], today);
-    return s + (v !== null ? v : 0);
-  }, 0) : null;
+  const openPos   = allOpen.filter(p => clientIds.has(p.clientId));
+  // Only show TODAY's closed positions (intraday closed)
+  const closedPos = allClosed.filter(p =>
+    clientIds.has(p.clientId) &&
+    p.trades?.some(t => t.date === today && t.source === "sys2")
+  );
 
-  const snapshotDate = snapshot?.date || null;
+  // ── Live P&L calculation ───────────────────────────────────────
+  const getLTP = (contract) => angelLiveMTM?.[contract]?.ltp || null;
+
+  const getPosMTM = (pos) => {
+    const ltp = getLTP(pos.contract);
+    if (ltp === null) return null;
+    const mtm = pos.side === "SELL"
+      ? (pos.avgPrice - ltp) * pos.netQty
+      : (ltp - pos.avgPrice) * pos.netQty;
+    return +mtm.toFixed(2);
+  };
+
+  // Per-client summary
+  const clientSummary = useMemo(() => {
+    return filteredClients.map(client => {
+      const myOpen   = openPos.filter(p => p.clientId === client.id);
+      const myClosed = closedPos.filter(p => p.clientId === client.id);
+      const bookedPnl = myClosed.reduce((s, p) => s + p.totalPnl, 0);
+      const liveMTM   = myOpen.reduce((s, p) => {
+        const m = getPosMTM(p);
+        return s + (m ?? 0);
+      }, 0);
+      return {
+        client,
+        openCount:  myOpen.length,
+        closedCount: myClosed.length,
+        bookedPnl:  +bookedPnl.toFixed(2),
+        liveMTM:    +liveMTM.toFixed(2),
+        totalPnl:   +(bookedPnl + liveMTM).toFixed(2),
+        myOpen,
+        myClosed,
+      };
+    });
+  }, [filteredClients, openPos, closedPos, angelLiveMTM]);
+
+  const totalOpen   = openPos.length;
+  const totalMTM    = clientSummary.reduce((s, c) => s + c.liveMTM, 0);
+  const totalBooked = clientSummary.reduce((s, c) => s + c.bookedPnl, 0);
+  const totalPnl    = totalMTM + totalBooked;
+
+  const fmtPnl = (n) => (n >= 0 ? "+" : "") + "₹" + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  const pnlColor = (n) => n >= 0 ? C.green : C.red;
 
   return (
     <div>
       {/* Header */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:24,flexWrap:"wrap",gap:12}}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20, flexWrap:"wrap", gap:12 }}>
         <div>
-          <h2 style={{margin:0,color:C.text,fontSize:22,fontWeight:800}}>📡 Risk Management System</h2>
-          <div style={{color:C.muted,fontSize:12,marginTop:4}}>
-            {(lastUpdated||rmsRef?.current?._lastUpdate) ? `🟢 Live — Last updated: ${(lastUpdated||new Date()).toLocaleTimeString()}` : "Upload ODIN Positions CSV to begin"}
+          <h2 style={{ margin:0, color:C.text, fontSize:22, fontWeight:800 }}>📡 RMS — Live Risk Monitor</h2>
+          <div style={{ color:C.muted, fontSize:12, marginTop:4, display:"flex", gap:12, alignItems:"center" }}>
+            {lastSync && <span>Last sync: {lastSync.toLocaleTimeString("en-IN")}</span>}
+            <span style={{ color: angelMTMStatus === "live" ? C.green : C.muted }}>
+              {angelMTMStatus === "live" ? "● Live prices active" : "○ Prices not connected"}
+            </span>
+            {liveTradesRaw.length > 0 && (
+              <span style={{ color:C.accent }}>F8: {liveTradesRaw.length} trades captured</span>
+            )}
           </div>
         </div>
-        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-          <button onClick={()=>setEditIdx(true)} style={{...btn(C.card),border:`1px solid ${C.border}`,color:C.text,fontSize:13}}>
-            📈 Index Prices
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <select value={filterClient} onChange={e => setFilterClient(e.target.value)}
+            style={{ ...input, minWidth:160, cursor:"pointer" }}>
+            <option value="all">All Clients</option>
+            {clients.map(c => <option key={c.id} value={c.id}>{c.name?.split(" ")[0]} ({c.id})</option>)}
+          </select>
+          <button onClick={loadLiveTrades} disabled={loading}
+            style={{ ...btn(C.accent), fontSize:12 }}>
+            {loading ? "⏳" : "🔄 Refresh"}
           </button>
-          {/* Manual snapshot button */}
-          <button onClick={()=>{
-            if(Object.keys(clientData).length===0){notify("Upload positions CSV first","error");return;}
-            saveClosingSnapshot(clientData, new Date());
-          }} style={{...btn(C.card),border:`1px solid ${C.yellow}`,color:C.yellow,fontSize:13}}>
-            📸 Save Snapshot
-          </button>
-          <button onClick={()=>fileRef.current.click()}
-            style={{...btn(btnClr),fontSize:13}}>
-            {uploadStatus==="ok"?"✅ Updated!":uploadStatus==="error"?"❌ Invalid CSV":"⬆️ Upload Positions CSV"}
-          </button>
-          <input ref={fileRef} type="file" accept=".csv" onChange={onFile} style={{display:"none"}}/>
         </div>
       </div>
 
-      {/* Summary cards */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:14,marginBottom:20}}>
-        {/* Intraday P&L card - special */}
-        <div style={{...card,padding:"16px 20px",borderLeft:`3px solid ${totalIntraday!=null?(totalIntraday>=0?C.green:C.red):C.muted}`}}>
-          <div style={{color:C.muted,fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:4}}>
-            📊 Today's Intraday P&L
-          </div>
-          {totalIntraday !== null ? (
-            <div style={{fontSize:22,fontWeight:800,color:pnlClr(totalIntraday)}}>
-              {totalIntraday>=0?"+":""}{fmtFull(Math.round(totalIntraday))}
-            </div>
-          ) : (
-            <div style={{fontSize:13,color:C.muted}}>No snapshot yet</div>
-          )}
-          <div style={{fontSize:10,color:C.muted,marginTop:4}}>
-            {snapshotDate ? `Baseline: ${snapshotDate}` : "Upload after 7:00 PM to set baseline"}
-          </div>
-        </div>
-
+      {/* KPI Row */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:20 }}>
         {[
-          {label:"Total MTM P&L",    val:fmtFull(Math.round(totalMTM)), color:pnlClr(totalMTM)},
-          {label:"Total Margin Used", val:fmtN(totalMargin),             color:C.text},
-          {label:"Total Fund",        val:totalFund>0?fmtN(totalFund):"Not set", color:C.text},
-          {label:"Active Clients",    val:Object.keys(displayData).length, color:C.text},
-        ].map(c => (
-          <div key={c.label} style={{...card,padding:"16px 20px"}}>
-            <div style={{color:C.muted,fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>{c.label}</div>
-            <div style={{fontSize:22,fontWeight:800,color:c.color}}>{c.val}</div>
+          { label:"Open Positions", val: totalOpen, color: C.accent, fmt: false },
+          { label:"Live MTM",       val: totalMTM,  color: pnlColor(totalMTM),   fmt: true },
+          { label:"Booked P&L",    val: totalBooked, color: pnlColor(totalBooked), fmt: true },
+          { label:"Total P&L",     val: totalPnl,   color: pnlColor(totalPnl),    fmt: true, big: true },
+        ].map(k => (
+          <div key={k.label} style={{ ...card, padding:"16px 20px",
+            borderLeft: k.big ? `4px solid ${k.color}` : "none" }}>
+            <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase", letterSpacing:0.8, marginBottom:6 }}>{k.label}</div>
+            <div style={{ fontSize: k.big ? 24 : 20, fontWeight:800, color:k.color }}>
+              {k.fmt ? fmtPnl(k.val) : k.val}
+            </div>
           </div>
         ))}
       </div>
 
-      {/* Snapshot status bar */}
-      {snapshot && (
-        <div style={{...card,padding:"10px 16px",marginBottom:16,display:"flex",
-          alignItems:"center",gap:12,borderLeft:`3px solid ${C.accent}`}}>
-          <span style={{fontSize:16}}>📸</span>
-          <div style={{flex:1}}>
-            <span style={{color:C.text,fontSize:13,fontWeight:600}}>
-              Closing snapshot: {snapshotDate}
-            </span>
-            <span style={{color:C.muted,fontSize:12,marginLeft:12}}>
-              Intraday = Current MTM (non-expiry) − {fmtFull(Object.values(snapshot.clients||{}).reduce((s,v)=>s+(v.mtm||0),0))} baseline
-            </span>
-          </div>
-          <button onClick={()=>{if(window.confirm("Clear snapshot? Intraday P&L will reset.")){setSnapshot(null);localStorage.removeItem("rms_snapshot");notify("Snapshot cleared");}}}
-            style={{...btn(C.card),border:`1px solid ${C.border}`,fontSize:11,color:C.muted}}>
-            🗑 Clear
+      {/* View Toggle */}
+      <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+        {[
+          { id:"summary",   label:"📋 Summary" },
+          { id:"positions", label:"📈 Open Positions" },
+          { id:"closed",    label:"✅ Closed Today" },
+        ].map(v => (
+          <button key={v.id} onClick={() => setView(v.id)}
+            style={{ ...btn(view === v.id ? C.accent : C.card),
+              border: `1px solid ${view === v.id ? C.accent : C.border}`,
+              color: view === v.id ? "#fff" : C.muted,
+              fontSize:13 }}>
+            {v.label}
           </button>
-        </div>
-      )}
-
-      {!hasData && (
-        <div style={{...card,textAlign:"center",padding:"60px 20px"}}>
-          <div style={{fontSize:48,marginBottom:12}}>📂</div>
-          <div style={{fontSize:16,fontWeight:700,color:C.text,marginBottom:6}}>No data loaded</div>
-          <div style={{color:C.muted,fontSize:13,marginBottom:20}}>Export from ODIN and upload the Positions CSV</div>
-          <button onClick={()=>fileRef.current.click()} style={{...btn(C.accent)}}>⬆️ Upload Positions CSV</button>
-        </div>
-      )}
-
-      {hasData && (
-        <>
-          {/* Client table */}
-          <div style={{...card,padding:0,overflow:"hidden",marginBottom:20}}>
-            <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontWeight:700,fontSize:15,color:C.text}}>👥 Client Portfolio</span>
-              <span style={{color:C.muted,fontSize:12}}>— click ▶ to expand positions</span>
-            </div>
-
-            {/* Table head */}
-            <div style={{display:"grid",gridTemplateColumns:"32px 1fr 1fr 1fr 1fr 1fr 1fr 140px",
-              gap:4,padding:"10px 16px",background:C.accent+"08",borderBottom:`1px solid ${C.border}`}}>
-              {["","Client","Intraday P&L","MTM P&L","SPAN","Exposure","Total Margin","Fund & Usage"].map((h,i)=>(
-                <div key={i} style={{color: h==="Intraday P&L" ? C.accent : C.muted,
-                  fontSize:11,fontWeight:700,textTransform:"uppercase",
-                  letterSpacing:0.6,textAlign:i>1?"right":"left"}}>{h}</div>
-              ))}
-            </div>
-
-            {/* Client rows */}
-            {Object.entries(displayData).map(([cid, positions]) => {
-              const totalMTMc  = positions.reduce((s,p)=>s+(parseFloat(p.mtmGL)||0),0);
-              const margin     = calcRMSMargin(positions, prices);
-              const fund       = parseFloat((funds||{})[cid])||0;
-              const pctUsed    = fund>0?(margin.total/fund*100):0;
-              const ac         = pctUsed>90?C.red:pctUsed>70?C.yellow:C.green;
-              const isExp      = expanded[cid];
-              const openPos    = positions.filter(p=>parseFloat(p.netQty)!==0).length;
-              const intradayPnL = getIntradayPnL(cid, positions, today);
-
-              return (
-                <Fragment key={cid}>
-                  <div style={{display:"grid",gridTemplateColumns:"32px 1fr 120px 1fr 1fr 1fr 1fr 140px",
-                    gap:4,padding:"13px 16px",borderBottom:`1px solid ${C.border}`,
-                    cursor:"pointer",transition:"background 0.15s"}}
-                    onClick={()=>setExpanded(e=>({...e,[cid]:!e[cid]}))}>
-                    <div style={{color:C.accent,fontWeight:700,fontSize:16}}>{isExp?"▼":"▶"}</div>
-                    <div>
-                      <div style={{fontWeight:700,color:C.text,fontSize:14}}>{CLIENT_NAMES_RMS[cid]||cid}</div>
-                      <div style={{color:C.muted,fontSize:11,marginTop:2}}>{cid} · {openPos} open</div>
-                    </div>
-                    {/* Intraday P&L column */}
-                    <div style={{textAlign:"right"}}>
-                      {intradayPnL !== null ? (
-                        <div>
-                          <div style={{fontWeight:800,fontSize:14,color:pnlClr(intradayPnL)}}>
-                            {intradayPnL>=0?"+":""}{fmtFull(intradayPnL)}
-                          </div>
-                          <div style={{fontSize:10,color:C.muted,marginTop:2}}>intraday</div>
-                        </div>
-                      ) : (
-                        <div>
-                          <div style={{fontWeight:700,fontSize:13,color:C.muted}}>₹0</div>
-                          <div style={{fontSize:10,color:C.muted,marginTop:2}}>no baseline</div>
-                        </div>
-                      )}
-                    </div>
-                    <div style={{textAlign:"right",fontWeight:800,fontSize:15,color:pnlClr(totalMTMc)}}>
-                      {totalMTMc>=0?"+":""}{fmtFull(totalMTMc)}
-                    </div>
-                    <div style={{textAlign:"right",color:C.text,fontSize:13}}>{fmtN(margin.span)}</div>
-                    <div style={{textAlign:"right",color:C.yellow,fontSize:13}}>{fmtN(margin.exposure)}</div>
-                    <div style={{textAlign:"right",fontWeight:700,color:C.text,fontSize:13}}>{fmtN(margin.total)}</div>
-                    <div style={{textAlign:"right"}}>
-                      <div style={{display:"flex",alignItems:"center",gap:6,justifyContent:"flex-end"}}>
-                        <div>
-                          <div style={{fontWeight:700,fontSize:14,color:ac}}>{fund>0?pctUsed.toFixed(1)+"%":"—"}</div>
-                          <div style={{color:C.muted,fontSize:10}}>of {fund>0?fmtN(fund):"no fund"}</div>
-                        </div>
-                        <button onClick={e=>{e.stopPropagation();setEditFund(cid);setFundInput((funds||{})[cid]||"");}}
-                          style={{...btn(C.card),padding:"3px 7px",fontSize:11,border:`1px solid ${C.border}`}}>✏️</button>
-                      </div>
-                      <div style={{marginTop:4,height:3,background:C.border,borderRadius:2,overflow:"hidden"}}>
-                        <div style={{height:"100%",width:`${Math.min(pctUsed,100)}%`,background:ac,borderRadius:2,transition:"width 0.5s"}}/>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Expanded */}
-                  {isExp && (
-                    <div style={{background:C.bg,borderBottom:`1px solid ${C.border}`,padding:"8px 24px 16px"}}>
-                      {/* Scenario */}
-                      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:12,padding:"10px 0"}}>
-                        <span style={{fontSize:11,fontWeight:700,color:C.muted,marginRight:4}}>SCENARIO:</span>
-                        {SCENARIO_STEPS.map(s=>{
-                          const v=calcRMSScenario(positions,s,prices);
-                          return (
-                            <div key={s} style={{background:(s>0?C.green:C.red)+"15",border:`1px solid ${(s>0?C.green:C.red)}33`,
-                              borderRadius:6,padding:"3px 10px",textAlign:"center",minWidth:64}}>
-                              <div style={{fontSize:10,color:C.muted}}>{s>0?"+":""}{s}%</div>
-                              <div style={{fontSize:12,fontWeight:700,color:pnlClr(v)}}>{v>=0?"+":""}{fmtN(v).replace("₹","₹")}</div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                      {/* Positions */}
-                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                        <thead>
-                          <tr style={{borderBottom:`1px solid ${C.border}`}}>
-                            {["Symbol","Expiry","Strike","Type","Side","Qty","Avg","LTP","MTM"].map(h=>(
-                              <th key={h} style={{padding:"6px 8px",color:C.muted,fontWeight:600,
-                                textAlign:["Qty","Avg","LTP","MTM"].includes(h)?"right":"left",fontSize:10,textTransform:"uppercase",letterSpacing:0.5}}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {positions.filter(p=>parseFloat(p.netQty)!==0).map((p,i)=>{
-                            const qty=parseFloat(p.netQty)||0;
-                            const mtm=parseFloat(p.mtmGL)||0;
-                            const side=qty>0?"LONG":qty<0?"SHORT":"—";
-                            const sc=qty>0?C.green:C.red;
-                            return (
-                              <tr key={i} style={{borderBottom:`1px solid ${C.border}22`}}>
-                                <td style={{padding:"6px 8px",fontWeight:700,color:C.accent}}>{p.symbol}</td>
-                                <td style={{padding:"6px 8px",color:C.muted}}>{p.expiry}</td>
-                                <td style={{padding:"6px 8px"}}>{parseFloat(p.strikePrice).toLocaleString()}</td>
-                                <td style={{padding:"6px 8px"}}>
-                                  <span style={{background:(p.optionType==="CE"?C.green:C.red)+"22",color:p.optionType==="CE"?C.green:C.red,
-                                    padding:"1px 6px",borderRadius:4,fontWeight:700}}>{p.optionType}</span>
-                                </td>
-                                <td style={{padding:"6px 8px"}}>
-                                  <span style={{color:sc,fontWeight:700}}>{side}</span>
-                                </td>
-                                <td style={{padding:"6px 8px",textAlign:"right",color:C.text}}>{Math.abs(qty).toLocaleString()}</td>
-                                <td style={{padding:"6px 8px",textAlign:"right",color:C.muted}}>{(parseFloat(p.netPrice)||0).toFixed(2)}</td>
-                                <td style={{padding:"6px 8px",textAlign:"right"}}>{(parseFloat(p.marketPrice)||0).toFixed(2)}</td>
-                                <td style={{padding:"6px 8px",textAlign:"right",fontWeight:700,color:pnlClr(mtm)}}>
-                                  {mtm>=0?"+":""}{fmtFull(mtm)}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                          <tr style={{background:C.accent+"08",fontWeight:700}}>
-                            <td colSpan={8} style={{padding:"7px 8px",color:C.muted,fontSize:11}}>
-                              TOTAL ({positions.length} positions)
-                            </td>
-                            <td style={{padding:"7px 8px",textAlign:"right",fontSize:13,color:pnlClr(totalMTMc)}}>
-                              {totalMTMc>=0?"+":""}{fmtFull(totalMTMc)}
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </Fragment>
-              );
-            })}
-          </div>
-
-          {/* Scenario summary table */}
-          <div style={{...card,padding:0,overflow:"hidden"}}>
-            <div style={{padding:"12px 20px",borderBottom:`1px solid ${C.border}`}}>
-              <span style={{fontWeight:700,fontSize:15,color:C.text}}>📊 Scenario Analysis — All Clients</span>
-            </div>
-            <div style={{overflowX:"auto"}}>
-              <table style={{width:"100%",borderCollapse:"collapse",minWidth:800}}>
-                <thead>
-                  <tr style={{borderBottom:`1px solid ${C.border}`,background:C.accent+"06"}}>
-                    <th style={{padding:"10px 16px",color:C.muted,fontSize:11,fontWeight:700,textAlign:"left",textTransform:"uppercase",letterSpacing:0.6}}>Client</th>
-                    {SCENARIO_STEPS.map(s=>(
-                      <th key={s} style={{padding:"10px 12px",fontSize:11,fontWeight:700,textAlign:"right",
-                        color:s>0?C.green:C.red}}>{s>0?"+":""}{s}%</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(displayData).map(([cid,pos])=>(
-                    <tr key={cid} style={{borderBottom:`1px solid ${C.border}22`}}>
-                      <td style={{padding:"10px 16px",fontWeight:600,color:C.text}}>{CLIENT_NAMES_RMS[cid]||cid}</td>
-                      {SCENARIO_STEPS.map(s=>{
-                        const v=calcRMSScenario(pos,s,prices);
-                        return <td key={s} style={{padding:"10px 12px",textAlign:"right",fontWeight:600,
-                          color:pnlClr(v),fontSize:12}}>{v>=0?"+":""}{fmtN(v)}</td>;
-                      })}
-                    </tr>
-                  ))}
-                  <tr style={{borderTop:`2px solid ${C.border}`,background:C.accent+"08",fontWeight:800}}>
-                    <td style={{padding:"12px 16px",color:C.text}}>TOTAL</td>
-                    {SCENARIO_STEPS.map(s=>{
-                      const v=Object.values(clientData).reduce((sum,pos)=>sum+calcRMSScenario(pos,s,prices),0);
-                      return <td key={s} style={{padding:"12px 12px",textAlign:"right",fontWeight:800,
-                        color:pnlClr(v),fontSize:13}}>{v>=0?"+":""}{fmtN(v)}</td>;
-                    })}
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* Fund edit modal */}
-      {editFund && (
-        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",display:"flex",
-          alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={()=>setEditFund(null)}>
-          <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:16,padding:28,
-            width:360,boxShadow:"0 20px 60px rgba(0,0,0,0.15)"}} onClick={e=>e.stopPropagation()}>
-            <div style={{fontWeight:700,fontSize:16,color:C.text,marginBottom:4}}>Set Fund Amount</div>
-            <div style={{color:C.muted,fontSize:13,marginBottom:16}}>{CLIENT_NAMES_RMS[editFund]||editFund}</div>
-            <input type="number" value={fundInput} onChange={e=>setFundInput(e.target.value)}
-              placeholder="Enter fund in ₹ (e.g. 6000000)"
-              style={{...input,width:"100%",marginBottom:16,boxSizing:"border-box",fontSize:15}}
-              onKeyDown={e=>{if(e.key==="Enter"){saveFunds({...funds,[editFund]:fundInput});setEditFund(null);}}}
-              autoFocus/>
-            <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>setEditFund(null)} style={{...btn(C.card),flex:1,border:`1px solid ${C.border}`}}>Cancel</button>
-              <button onClick={()=>{saveFunds({...funds,[editFund]:fundInput});setEditFund(null);}}
-                style={{...btn(C.green),flex:1}}>Save ✓</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Index prices modal */}
-      {editIdx && (
-        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",display:"flex",
-          alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={()=>setEditIdx(false)}>
-          <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:16,padding:28,
-            width:360,boxShadow:"0 20px 60px rgba(0,0,0,0.15)"}} onClick={e=>e.stopPropagation()}>
-            <div style={{fontWeight:700,fontSize:16,color:C.text,marginBottom:16}}>📈 Update Index Prices</div>
-            {["NIFTY","SENSEX","BANKNIFTY","BANKEX"].map(sym=>(
-              <div key={sym} style={{marginBottom:12}}>
-                <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:4,textTransform:"uppercase",letterSpacing:0.5}}>{sym}</div>
-                <input type="number" value={idxInput[sym]||""} onChange={e=>setIdxInput(p=>({...p,[sym]:parseFloat(e.target.value)||0}))}
-                  style={{...input,width:"100%",boxSizing:"border-box"}}/>
-              </div>
-            ))}
-            <div style={{display:"flex",gap:10,marginTop:16}}>
-              <button onClick={()=>setEditIdx(false)} style={{...btn(C.card),flex:1,border:`1px solid ${C.border}`}}>Cancel</button>
-              <button onClick={()=>{saveIdx(idxInput);setEditIdx(false);}} style={{...btn(C.green),flex:1}}>Save ✓</button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-// ═══════════════════════════════════════════════════════
-
-
-// ═══════════════════════════════════════════════════════
-// ANGEL ONE SMARTAPI INTEGRATION
-// ═══════════════════════════════════════════════════════
-
-// Generate TOTP from secret
-async function generateTOTP(secret) {
-  // Convert base32 secret to bytes
-  const base32chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  const cleanSecret = secret.toUpperCase().replace(/=+$/, "");
-  let bits = "";
-  for (const char of cleanSecret) {
-    const val = base32chars.indexOf(char);
-    if (val < 0) continue;
-    bits += val.toString(2).padStart(5, "0");
-  }
-  const bytes = [];
-  for (let i = 0; i + 8 <= bits.length; i += 8) {
-    bytes.push(parseInt(bits.slice(i, i + 8), 2));
-  }
-
-  // HOTP with time counter (30 second window)
-  const counter = Math.floor(Date.now() / 1000 / 30);
-  const counterBytes = new Uint8Array(8);
-  let c = counter;
-  for (let i = 7; i >= 0; i--) { counterBytes[i] = c & 0xff; c = Math.floor(c / 256); }
-
-  const key = await crypto.subtle.importKey("raw", new Uint8Array(bytes), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, counterBytes);
-  const hash = new Uint8Array(sig);
-  const offset = hash[19] & 0xf;
-  const code = ((hash[offset] & 0x7f) << 24 | hash[offset+1] << 16 | hash[offset+2] << 8 | hash[offset+3]) % 1000000;
-  return code.toString().padStart(6, "0");
-}
-
-// Angel One Login — via Vercel proxy (avoids CORS)
-const ANGEL_PROXY = "/api/angel";
-
-async function angelLogin(creds) {
-  const totp = await generateTOTP(creds.totpSecret);
-  const resp = await fetch(ANGEL_PROXY, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action:  "login",
-      apiKey:  creds.apiKey,
-      payload: { clientId: creds.clientId, password: creds.password, totp },
-    })
-  });
-  const data = await resp.json();
-  if (!data.status) throw new Error(data.message || "Login failed");
-  return {
-    jwtToken:     data.data.jwtToken,
-    feedToken:    data.data.feedToken,
-    refreshToken: data.data.refreshToken,
-  };
-}
-
-// Get LTP for multiple tokens
-async function angelGetLTP(jwtToken, apiKey, tokens) {
-  // tokens = [{ exchange: "NFO", symboltoken: "35003", tradingsymbol: "NIFTY23000CE" }]
-  const resp = await fetch("https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/quote/", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-      "X-UserType": "USER",
-      "X-SourceID": "WEB",
-      "X-ClientLocalIP": "192.168.1.1",
-      "X-ClientPublicIP": "106.193.147.98",
-      "X-MACAddress": "fe80::216e:6507:4b90:3719",
-      "X-PrivateKey": apiKey,
-      "Authorization": `Bearer ${jwtToken}`,
-    },
-    body: JSON.stringify({ mode: "LTP", exchangeTokens: tokens })
-  });
-  const data = await resp.json();
-  if (!data.status) throw new Error(data.message || "Quote failed");
-  return data.data;
-}
-
-// Fetch instrument master to get token for each symbol
-async function fetchInstrumentToken(symbol, expiry, strike, optType) {
-  // Use Angel One's open instrument file
-  try {
-    const resp = await fetch("https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json");
-    const instruments = await resp.json();
-    // Format: NIFTY23APR2026C23000 or similar
-    const expiryFmt = expiry.replace(/(\d{2})([A-Z]{3})(\d{4})/, (m, d, mo, y) => `${d}${mo}${y.slice(2)}`);
-    const optChar = optType === "CE" ? "C" : "P";
-    const searchKey = `${symbol}${expiryFmt}${optChar}${parseInt(strike)}`;
-    const found = instruments.find(i =>
-      i.symbol && i.symbol.includes(symbol) &&
-      i.symbol.includes(strike.toString()) &&
-      i.exch_seg === "NFO" &&
-      i.instrumenttype?.includes("OPTIDX")
-    );
-    return found?.token || null;
-  } catch(e) {
-    return null;
-  }
-}
-
-// ── Settings Page Component ────────────────────────────
-
-
-// ═══════════════════════════════════════════════════════
-// MANAGE ADMINS PAGE — Super Admin only
-// ═══════════════════════════════════════════════════════
-function ManageAdminsPage({ state, setState, sb, withSync, notify, C, card, btn, input }) {
-  const [form, setForm] = useState({ username:"", password:"", name:"", plan:"basic", tokenExpiry:"" });
-  const [showPwd, setShowPwd] = useState(false);
-
-  const admins = state.admins || [];
-
-  const defaultExpiry = () => {
-    const d = new Date();
-    d.setDate(d.getDate() + 30);
-    return d.toISOString().slice(0,10);
-  };
-
-  const createAdmin = async () => {
-    if (!form.username || !form.password || !form.name) {
-      notify("Fill all fields", "error"); return;
-    }
-    if (admins.find(a => a.username === form.username)) {
-      notify("Username already exists", "error"); return;
-    }
-    const token = generateToken(form.plan);
-    const newAdmin = {
-      id: "ADM_" + Date.now(),
-      username: form.username,
-      password: form.password,
-      name: form.name,
-      plan: form.plan,
-      token,
-      tokenExpiry: form.tokenExpiry || defaultExpiry(),
-      createdAt: new Date().toISOString(),
-      createdBy: "JIYA",
-    };
-    withSync(() => sb.upsert("admins", newAdmin));
-    setState(s => ({ ...s, admins: [...(s.admins||[]), newAdmin] }));
-    setForm({ username:"", password:"", name:"", plan:"basic", tokenExpiry:"" });
-    notify("✅ Admin " + form.name + " created! Token: " + token);
-  };
-
-  const deleteAdmin = (id) => {
-    if (!window.confirm("Delete this admin? Their clients will remain.")) return;
-    withSync(() => sb.delete("admins", id));
-    setState(s => ({ ...s, admins: (s.admins||[]).filter(a => a.id !== id) }));
-    notify("Admin deleted");
-  };
-
-  const renewToken = (admin) => {
-    const d = new Date();
-    d.setDate(d.getDate() + 30);
-    const newExpiry = d.toISOString().slice(0,10);
-    const newToken  = generateToken(admin.plan);
-    const updated   = { ...admin, token: newToken, tokenExpiry: newExpiry };
-    withSync(() => sb.upsert("admins", updated));
-    setState(s => ({ ...s, admins: (s.admins||[]).map(a => a.id===admin.id ? updated : a) }));
-    notify("✅ Token renewed until " + newExpiry);
-  };
-
-  const planColor = p => p==="perfect"?C.accent:p==="pro"?C.green:C.yellow;
-  const daysLeft  = expiry => Math.ceil((new Date(expiry) - new Date()) / (1000*60*60*24));
-
-  return (
-    <div>
-      <h2 style={{margin:"0 0 4px",color:C.text,fontSize:22,fontWeight:800}}>👥 Manage Admins</h2>
-      <div style={{color:C.muted,fontSize:13,marginBottom:24}}>Create and manage sub-admin accounts</div>
-
-      {/* Create Admin Form */}
-      <div style={{...card,padding:24,marginBottom:24}}>
-        <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:16}}>➕ Create New Admin</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
-          {[
-            {key:"name",      label:"Full Name",   placeholder:"e.g. Nitin Shah",    type:"text"},
-            {key:"username",  label:"Username",    placeholder:"e.g. NITIN",         type:"text"},
-          ].map(f => (
-            <div key={f.key}>
-              <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>{f.label}</div>
-              <input type={f.type} value={form[f.key]} onChange={e=>setForm(v=>({...v,[f.key]:e.target.value}))}
-                placeholder={f.placeholder} style={{...input,width:"100%",boxSizing:"border-box"}}/>
-            </div>
-          ))}
-        </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:16}}>
-          <div>
-            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>Password</div>
-            <div style={{position:"relative"}}>
-              <input type={showPwd?"text":"password"} value={form.password}
-                onChange={e=>setForm(v=>({...v,password:e.target.value}))}
-                placeholder="Strong password" style={{...input,width:"100%",boxSizing:"border-box",paddingRight:36}}/>
-              <span onClick={()=>setShowPwd(v=>!v)}
-                style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",cursor:"pointer",fontSize:14,color:C.muted}}>
-                {showPwd?"🙈":"👁️"}
-              </span>
-            </div>
-          </div>
-          <div>
-            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>Plan</div>
-            <select value={form.plan} onChange={e=>setForm(v=>({...v,plan:e.target.value}))}
-              style={{...input,width:"100%",cursor:"pointer"}}>
-              <option value="basic">Basic — ₹2,000/mo</option>
-              <option value="pro">Pro — ₹3,500/mo</option>
-              <option value="perfect">Perfect — ₹5,000/mo</option>
-            </select>
-          </div>
-          <div>
-            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>Token Expiry</div>
-            <input type="date" value={form.tokenExpiry||defaultExpiry()}
-              onChange={e=>setForm(v=>({...v,tokenExpiry:e.target.value}))}
-              style={{...input,width:"100%",boxSizing:"border-box"}}/>
-          </div>
-        </div>
-        <button onClick={createAdmin} style={{...btn(C.accent),padding:"10px 24px",fontWeight:700}}>
-          ➕ Create Admin
-        </button>
+        ))}
       </div>
 
-      {/* Admins List */}
-      {admins.length === 0 ? (
-        <div style={{...card,textAlign:"center",padding:48,color:C.muted}}>
-          <div style={{fontSize:36,marginBottom:12}}>👥</div>
-          <div style={{fontWeight:600,marginBottom:4}}>No admins created yet</div>
-          <div style={{fontSize:13}}>Create your first admin above</div>
-        </div>
-      ) : (
-        <div style={{...card,padding:0,overflow:"hidden"}}>
-          <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,fontWeight:700,color:C.text}}>
-            {admins.length} Admin{admins.length!==1?"s":""}
-          </div>
-          {admins.map(a => {
-            const dl = daysLeft(a.tokenExpiry);
-            const expired = dl <= 0;
-            const warning = dl > 0 && dl <= 7;
-            return (
-              <div key={a.id} style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,
-                display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
-                <div style={{flex:1,minWidth:200}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                    <span style={{fontWeight:700,color:C.text,fontSize:14}}>{a.name}</span>
-                    <span style={{fontSize:11,padding:"1px 8px",borderRadius:4,fontWeight:700,
-                      background:planColor(a.plan)+"20",color:planColor(a.plan),textTransform:"uppercase"}}>
-                      {a.plan}
+      {/* ── SUMMARY VIEW ── */}
+      {view === "summary" && (
+        <div style={{ ...card, padding:0, overflow:"hidden" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+            <thead>
+              <tr style={{ background: C.bg }}>
+                {["Client","Open Pos","Live MTM","Booked P&L","Total P&L"].map(h => (
+                  <th key={h} style={{ padding:"10px 16px", color:C.muted, fontSize:11,
+                    fontWeight:600, textTransform:"uppercase", letterSpacing:0.5,
+                    textAlign: h === "Client" ? "left" : "right",
+                    borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {clientSummary.map((cs, i) => (
+                <tr key={cs.client.id} className="row-enter"
+                  style={{ borderBottom:`1px solid ${C.border}`, animationDelay:`${i*0.04}s` }}>
+                  <td style={{ padding:"12px 16px" }}>
+                    <div style={{ fontWeight:700, color:C.text }}>{cs.client.name?.split(" ")[0]}</div>
+                    <div style={{ fontSize:11, color:C.muted, fontFamily:"monospace" }}>{cs.client.id}</div>
+                  </td>
+                  <td style={{ padding:"12px 16px", textAlign:"right", color:C.accent, fontWeight:700 }}>
+                    {cs.openCount}
+                  </td>
+                  <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:700, color:pnlColor(cs.liveMTM) }}>
+                    {getLTP(cs.myOpen[0]?.contract) !== null || cs.liveMTM !== 0 ? fmtPnl(cs.liveMTM) : "—"}
+                  </td>
+                  <td style={{ padding:"12px 16px", textAlign:"right", color:pnlColor(cs.bookedPnl), fontWeight:700 }}>
+                    {cs.closedCount > 0 ? fmtPnl(cs.bookedPnl) : "—"}
+                  </td>
+                  <td style={{ padding:"12px 16px", textAlign:"right" }}>
+                    <span style={{ fontWeight:800, fontSize:15, color:pnlColor(cs.totalPnl) }}>
+                      {fmtPnl(cs.totalPnl)}
                     </span>
-                    {expired && <span style={{fontSize:11,padding:"1px 8px",borderRadius:4,
-                      background:C.red+"20",color:C.red,fontWeight:700}}>EXPIRED</span>}
-                    {warning && <span style={{fontSize:11,padding:"1px 8px",borderRadius:4,
-                      background:C.yellow+"20",color:C.yellow,fontWeight:700}}>{dl}d left</span>}
-                  </div>
-                  <div style={{color:C.muted,fontSize:12}}>
-                    @{a.username} · Expires: {new Date(a.tokenExpiry).toLocaleDateString("en-IN")}
-                  </div>
-                  <div style={{color:C.muted,fontSize:11,fontFamily:"monospace",marginTop:4,
-                    background:C.bg,padding:"3px 8px",borderRadius:4,display:"inline-block"}}>
-                    {a.token}
-                  </div>
-                </div>
-                <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>renewToken(a)}
-                    style={{...btn(C.green),fontSize:12,padding:"6px 14px"}}>
-                    🔄 Renew 30d
-                  </button>
-                  <button onClick={()=>deleteAdmin(a.id)}
-                    style={{...btn(C.card),border:`1px solid ${C.border}`,color:C.red,fontSize:12,padding:"6px 14px"}}>
-                    🗑 Delete
-                  </button>
-                </div>
-              </div>
-            );
-          })}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr style={{ borderTop:`2px solid ${C.border}`, background:C.bg }}>
+                <td style={{ padding:"12px 16px", fontWeight:700, color:C.muted }}>TOTAL</td>
+                <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:700, color:C.accent }}>{totalOpen}</td>
+                <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:700, color:pnlColor(totalMTM) }}>{fmtPnl(totalMTM)}</td>
+                <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:700, color:pnlColor(totalBooked) }}>{fmtPnl(totalBooked)}</td>
+                <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:800, fontSize:16, color:pnlColor(totalPnl) }}>{fmtPnl(totalPnl)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+
+      {/* ── OPEN POSITIONS VIEW ── */}
+      {view === "positions" && (
+        <div style={{ ...card, padding:0, overflow:"hidden" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+            <thead>
+              <tr style={{ background:C.bg }}>
+                {["Client","Contract","Side","Qty","Avg Price","LTP","Live MTM","Source"].map(h => (
+                  <th key={h} style={{ padding:"10px 14px", color:C.muted, fontSize:11,
+                    fontWeight:600, textTransform:"uppercase", letterSpacing:0.5,
+                    textAlign: h==="Client"||h==="Contract"||h==="Side"||h==="Source" ? "left" : "right",
+                    borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {openPos.length === 0 ? (
+                <tr><td colSpan={8} style={{ padding:40, textAlign:"center", color:C.muted }}>No open positions</td></tr>
+              ) : openPos.map((pos, i) => {
+                const ltp = getLTP(pos.contract);
+                const mtm = getPosMTM(pos);
+                const client = clients.find(c => c.id === pos.clientId);
+                // Determine source: if position has any sys2 trade today it's partly live
+                const hasLive = combinedTrades.some(t => t.clientId===pos.clientId && t.contract===pos.contract && t.source==="sys2");
+                return (
+                  <tr key={`${pos.clientId}_${pos.contract}`} className="row-enter"
+                    style={{ borderBottom:`1px solid ${C.border}`, animationDelay:`${i*0.03}s`,
+                      background: hasLive ? C.accent+"06" : "transparent" }}>
+                    <td style={{ padding:"10px 14px" }}>
+                      <div style={{ fontWeight:600, color:C.text, fontSize:12 }}>{client?.name?.split(" ")[0] || pos.clientId}</div>
+                      <div style={{ fontSize:10, color:C.muted, fontFamily:"monospace" }}>{pos.clientId}</div>
+                    </td>
+                    <td style={{ padding:"10px 14px", color:C.accent, fontWeight:600 }}>{pos.contract}</td>
+                    <td style={{ padding:"10px 14px" }}>
+                      <span style={{ background: pos.side==="SELL"?C.red+"18":C.green+"18",
+                        color: pos.side==="SELL"?C.red:C.green,
+                        padding:"2px 8px", borderRadius:4, fontWeight:700, fontSize:12 }}>
+                        {pos.side}
+                      </span>
+                    </td>
+                    <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:700 }}>{pos.netQty.toLocaleString()}</td>
+                    <td style={{ padding:"10px 14px", textAlign:"right" }}>₹{pos.avgPrice.toFixed(2)}</td>
+                    <td style={{ padding:"10px 14px", textAlign:"right", color:C.accent, fontWeight:700 }}>
+                      {ltp !== null ? `₹${ltp.toFixed(2)}` : "—"}
+                    </td>
+                    <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800,
+                      color: mtm !== null ? pnlColor(mtm) : C.muted }}>
+                      {mtm !== null ? fmtPnl(mtm) : "—"}
+                    </td>
+                    <td style={{ padding:"10px 14px" }}>
+                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:4,
+                        background: hasLive ? C.accent+"18" : C.muted+"18",
+                        color: hasLive ? C.accent : C.muted }}>
+                        {hasLive ? "Live" : "Overnight"}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── CLOSED TODAY VIEW ── */}
+      {view === "closed" && (
+        <div style={{ ...card, padding:0, overflow:"hidden" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+            <thead>
+              <tr style={{ background:C.bg }}>
+                {["Client","Contract","Booked P&L","Trades"].map(h => (
+                  <th key={h} style={{ padding:"10px 14px", color:C.muted, fontSize:11,
+                    fontWeight:600, textTransform:"uppercase", letterSpacing:0.5,
+                    textAlign: h==="Client"||h==="Contract" ? "left" : "right",
+                    borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {closedPos.length === 0 ? (
+                <tr><td colSpan={4} style={{ padding:40, textAlign:"center", color:C.muted }}>No positions closed today</td></tr>
+              ) : closedPos.map((pos, i) => {
+                const client = clients.find(c => c.id === pos.clientId);
+                return (
+                  <tr key={`${pos.clientId}_${pos.contract}`} className="row-enter"
+                    style={{ borderBottom:`1px solid ${C.border}`, animationDelay:`${i*0.03}s` }}>
+                    <td style={{ padding:"10px 14px" }}>
+                      <div style={{ fontWeight:600, color:C.text, fontSize:12 }}>{client?.name?.split(" ")[0] || pos.clientId}</div>
+                      <div style={{ fontSize:10, color:C.muted, fontFamily:"monospace" }}>{pos.clientId}</div>
+                    </td>
+                    <td style={{ padding:"10px 14px", color:C.accent, fontWeight:600 }}>{pos.contract}</td>
+                    <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, fontSize:15,
+                      color:pnlColor(pos.totalPnl) }}>
+                      {fmtPnl(pos.totalPnl)}
+                    </td>
+                    <td style={{ padding:"10px 14px", textAlign:"right", color:C.muted }}>
+                      {pos.trades?.length || 0} trades
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            {closedPos.length > 0 && (
+              <tfoot>
+                <tr style={{ borderTop:`2px solid ${C.border}`, background:C.bg }}>
+                  <td colSpan={2} style={{ padding:"10px 14px", fontWeight:700, color:C.muted }}>TOTAL BOOKED</td>
+                  <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, fontSize:16,
+                    color:pnlColor(totalBooked) }}>{fmtPnl(totalBooked)}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      )}
+
+      {liveTradesRaw.length === 0 && (
+        <div style={{ ...card, textAlign:"center", padding:48, marginTop:16 }}>
+          <div style={{ fontSize:36, marginBottom:12 }}>📡</div>
+          <div style={{ fontWeight:700, color:C.text, marginBottom:8 }}>No live F8 data yet</div>
+          <div style={{ color:C.muted, fontSize:13 }}>
+            Run JIYA RMS Capture tool → open ODIN → press F8 → right-click Copy
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-// ═══════════════════════════════════════════════════════
-// MANAGE TOKENS PAGE — Super Admin only
-// ═══════════════════════════════════════════════════════
-function ManageTokensPage({ state, setState, sb, withSync, notify, C, card, btn, input }) {
-  const [plan,   setPlan]   = useState("basic");
-  const [days,   setDays]   = useState(30);
-  const [generated, setGenerated] = useState(null);
-  const admins = state.admins || [];
-
-  const genToken = () => {
-    const token = generateToken(plan);
-    const expiry = new Date();
-    expiry.setDate(expiry.getDate() + parseInt(days));
-    setGenerated({ token, plan, expiry: expiry.toISOString().slice(0,10) });
-  };
-
-  const planColor = p => p==="perfect"?C.accent:p==="pro"?C.green:C.yellow;
-
-  return (
-    <div>
-      <h2 style={{margin:"0 0 4px",color:C.text,fontSize:22,fontWeight:800}}>🔑 Token Management</h2>
-      <div style={{color:C.muted,fontSize:13,marginBottom:24}}>Generate and manage activation tokens</div>
-
-      {/* Generator */}
-      <div style={{...card,padding:24,marginBottom:24}}>
-        <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:16}}>⚡ Quick Token Generator</div>
-        <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}}>
-          <div>
-            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase"}}>Plan</div>
-            <select value={plan} onChange={e=>setPlan(e.target.value)}
-              style={{...input,minWidth:180,cursor:"pointer"}}>
-              <option value="basic">Basic</option>
-              <option value="pro">Pro</option>
-              <option value="perfect">Perfect</option>
-              <option value="trial">Free Trial (7 days)</option>
-            </select>
-          </div>
-          <div>
-            <div style={{color:C.muted,fontSize:11,fontWeight:600,marginBottom:5,textTransform:"uppercase"}}>Duration (days)</div>
-            <input type="number" value={days} onChange={e=>setDays(e.target.value)}
-              style={{...input,width:100}} min={1} max={365}/>
-          </div>
-          <button onClick={genToken} style={{...btn(C.accent),padding:"10px 20px",fontWeight:700}}>
-            🔑 Generate Token
-          </button>
-        </div>
-
-        {generated && (
-          <div style={{marginTop:16,padding:16,background:C.accent+"10",borderRadius:10,
-            border:`1px solid ${C.accent}30`}}>
-            <div style={{color:C.muted,fontSize:11,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>Generated Token</div>
-            <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-              <div style={{fontSize:20,fontWeight:800,fontFamily:"monospace",color:C.accent,
-                letterSpacing:2}}>{generated.token}</div>
-              <button onClick={()=>{navigator.clipboard.writeText(generated.token);notify("Token copied!");}}
-                style={{...btn(C.card),border:`1px solid ${C.border}`,fontSize:12}}>
-                📋 Copy
-              </button>
-            </div>
-            <div style={{marginTop:8,display:"flex",gap:16,fontSize:12,color:C.muted}}>
-              <span>Plan: <b style={{color:planColor(generated.plan)}}>{generated.plan.toUpperCase()}</b></span>
-              <span>Expires: <b style={{color:C.text}}>{new Date(generated.expiry).toLocaleDateString("en-IN")}</b></span>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Plan Features Reference */}
-      <div style={{...card,padding:20}}>
-        <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:16}}>📋 Plan Features</div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
-          {[
-            { plan:"basic",   price:"₹2,000/mo", features:["Dashboard","Clients","Trades","P&L","Ledger","Tickets"] },
-            { plan:"pro",     price:"₹3,500/mo", features:["Everything in Basic","Charges","RMS Live"] },
-            { plan:"perfect", price:"₹5,000/mo", features:["Everything in Pro","Audit Log","PDF Export"] },
-          ].map(p => (
-            <div key={p.plan} style={{padding:16,borderRadius:10,border:`2px solid ${planColor(p.plan)}30`,
-              background:planColor(p.plan)+"08"}}>
-              <div style={{fontWeight:800,color:planColor(p.plan),textTransform:"uppercase",fontSize:13,marginBottom:4}}>
-                {p.plan}
-              </div>
-              <div style={{color:C.muted,fontSize:12,marginBottom:10}}>{p.price}</div>
-              {p.features.map(f=>(
-                <div key={f} style={{fontSize:12,color:C.text,marginBottom:4}}>
-                  ✅ {f}
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-// ═══════════════════════════════════════════════════════
-
-// ─── Password Manager Component ───────────────────────────────────────────────
 function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, input }) {
   const [adminPwd,    setAdminPwd]    = useState("");
   const [clientSel,   setClientSel]   = useState("");
@@ -4740,7 +4216,7 @@ export default function BackOffice() {
     }
 
     if (page === "rms" && (auth.role === "admin" || auth.role === "superadmin") && hasFeature(auth?.plan, "rms")) {
-      return <RMSPage state={state} indexPrices={rmsIndexPrices} setIndexPrices={setRmsIndexPrices} funds={rmsFunds} setFunds={setRmsFunds} notify={notify} C={C} card={card} btn={btn} input={input} livePrice={angelLivePrice} rmsRef={rmsPositionsRef} lastUpdated={rmsLastUpdated} />;
+      return <RMSPage state={state} notify={notify} C={C} card={card} btn={btn} input={input} angelLiveMTM={angelLiveMTM} angelMTMStatus={angelMTMStatus} />;
     }
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
       return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} />;
