@@ -1216,6 +1216,28 @@ export default function BackOffice() {
   const [angelWS,        setAngelWS]        = useState(null);
 
   // ── Angel One: Connect & start live prices ──
+  const angelLogin = async (creds) => {
+    const resp = await fetch(ANGEL_PROXY, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "login",
+        apiKey: creds.apiKey,
+        payload: {
+          clientId: creds.clientId,
+          password: creds.password,
+          totp:     creds.totpSecret,
+        }
+      })
+    });
+    const data = await resp.json();
+    if (!data.status) throw new Error(data.message || "Login failed");
+    return {
+      jwtToken:  data.data?.jwtToken,
+      feedToken: data.data?.feedToken,
+    };
+  };
+
   const connectAngel = async (creds) => {
     setAngelStatus("connecting");
     try {
