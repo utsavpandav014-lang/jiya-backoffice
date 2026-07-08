@@ -659,7 +659,6 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
           <div style={{fontSize:14,fontWeight:700,color:C.text,marginBottom:12}}>✅ Now Automated</div>
           {[
             {icon:"📈", label:"Live option prices", desc:"Updates every 5 seconds during market hours"},
-            {icon:"💰", label:"Real-time MTM in RMS", desc:"All client positions update automatically"},
             {icon:"📋", label:"Bhavcopy", desc:"Auto-fetched at 7:00 PM every trading day"},
             {icon:"🎯", label:"Accurate scenario analysis", desc:"Uses real option prices not approximations"},
           ].map(item => (
@@ -763,9 +762,6 @@ export default function BackOffice() {
 
   const unreadCount = bells.filter(b => !b.read).length;
   // RMS state
-  const [rmsFunds,       setRmsFunds]       = useState(() => { try { return JSON.parse(localStorage.getItem("rms_funds")||"{}"); } catch(e){ return {}; } });
-  const [rmsIndexPrices, setRmsIndexPrices] = useState(() => { try { return JSON.parse(localStorage.getItem("rms_idx")||"{}"); } catch(e){ return { NIFTY:24050, SENSEX:77550, BANKNIFTY:52000, BANKEX:52000 }; } });
-  const [rmsLastUpdated, setRmsLastUpdated] = useState(null);
 
   // ── Angel One API State ──
   const [angelCreds, setAngelCreds] = useState(() => {
@@ -4725,8 +4721,6 @@ export default function BackOffice() {
               <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}`}</style>
               {syncStatus==="saving" ? "Saving..." : syncStatus==="saved" ? "✓ Saved to database" : syncStatus==="error" ? "⚠ Sync failed" : "Database connected"}
             </div>
-          )}
-          {false && (
           )}
           {(auth?.role === "admin" || auth?.role === "superadmin") && !SUPABASE_CONFIGURED && (
             <div style={{ marginBottom:10, fontSize:11, color:C.yellow, display:"flex", alignItems:"center", gap:6 }}>
