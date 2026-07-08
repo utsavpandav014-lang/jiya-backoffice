@@ -353,73 +353,7 @@ const LOT_SIZES    = { NIFTY:75, SENSEX:20, BANKNIFTY:35, BANKEX:15, FINNIFTY:40
 const DEFAULT_IDX  = { NIFTY:24050, SENSEX:77550, BANKNIFTY:52000, BANKEX:52000 };
 const SPAN_PCT     = 0.0187;
 const EXPOSURE_PCT = 0.0702;
-const SCENARIO_STEPS = [-20,-15,-10,-5,5,10,15,20];
-const CLIENT_NAMES_RMS = {
-  DLL11647:"UTSAV", DLL12771:"HARSH", DWH00916:"NILESH",
-  ZZJ14748:"AMBALIYA", ZZJ14749:"NITIN", ZZJ14750:"SANDIP", ZZJ5538:"JAYESHBHAI"
-};
-
-function calcRMSMargin(positions, indexPrices) {
-  let span = 0, exposure = 0, premium = 0;
-  (positions||[]).forEach(p => {
-    const sym = (p.symbol||"").toUpperCase();
-    const lot = LOT_SIZES[sym] || 75;
-    const idx = (indexPrices||{})[sym] || DEFAULT_IDX[sym] || 24050;
-    const qty = parseFloat(p.netQty) || 0;
-    const netP = Math.abs(parseFloat(p.netPrice)||0);
-    const mktP = Math.abs(parseFloat(p.marketPrice)||0);
-    if (qty===0) return;
-    const lots = Math.abs(qty)/lot;
-    if (qty < 0) { const s=SPAN_PCT*idx*lot*lots; span+=s; exposure+=s*EXPOSURE_PCT; }
-    else { premium += (netP||mktP)*Math.abs(qty); }
-  });
-  return { span:Math.round(span), exposure:Math.round(exposure), premium:Math.round(premium), total:Math.round(span+exposure+premium) };
-}
-
-function calcRMSScenario(positions, pct, indexPrices) {
-  let impact = 0;
-  (positions||[]).forEach(p => {
-    const sym = (p.symbol||"").toUpperCase();
-    const idx = (indexPrices||{})[sym] || DEFAULT_IDX[sym] || 24050;
-    const qty = parseFloat(p.netQty)||0;
-    const mktP = parseFloat(p.marketPrice)||0;
-    const strike = parseFloat(p.strikePrice)||idx;
-    const optType = (p.optionType||"").toUpperCase();
-    if (qty===0||mktP<=0) return;
-    const moneyness = optType==="CE"?(idx-strike)/idx:(strike-idx)/idx;
-    let delta = Math.max(0.05, Math.min(0.95, 0.5+moneyness*2));
-    if (optType==="PE") delta=-delta;
-    const priceChg = mktP*(Math.abs(pct)/100)*Math.abs(delta)*(pct>0?1:-1);
-    impact += (optType==="CE"?priceChg:-priceChg)*qty;
-  });
-  return Math.round(impact);
-}
-
-function parseRMSCsv(text) {
-  const lines = text.split(/\r?\n/).filter(l => { const t=l.trim(); return t&&!t.startsWith("(ALL)")&&!t.startsWith("---"); });
-  if (lines.length<2) return {};
-  const header = lines[0].split(",").map(h=>h.trim().toLowerCase());
-  const fi = k => header.findIndex(h=>h.includes(k));
-  const [iU,iSy,iEx,iSt,iOt,iNq,iNp,iMp,iMt] = [fi("user"),fi("symbol"),fi("ser"),fi("strike"),fi("option"),fi("net qty"),fi("net p"),fi("market"),fi("mtm")];
-  const byClient = {};
-  lines.slice(1).forEach(line => {
-    const c = line.split(",").map(x=>x.trim());
-    if (c.length<5) return;
-    const cid = c[iU]||"";
-    if (!cid||cid.includes("ALL")||cid.startsWith("-")) return;
-    if (!byClient[cid]) byClient[cid]=[];
-    byClient[cid].push({ symbol:c[iSy]||"", expiry:iEx>=0?c[iEx]:"", strikePrice:iSt>=0?c[iSt]:"0",
-      optionType:iOt>=0?c[iOt]:"", netQty:iNq>=0?c[iNq]:"0", netPrice:iNp>=0?c[iNp]:"0",
-      marketPrice:iMp>=0?c[iMp]:"0", mtmGL:iMt>=0?c[iMt]:"0" });
-  });
-  return byClient;
-}
-
-
-// ── RMS Intraday Helpers ─────────────────────────────────────────────────────
-
-// Parse expiry string like "21APR2026" or "13APR2026" to Date
-function parseExpiry(expStr) {
+const SCENARIO_STEPS = [-20,-15,-10,-5,5,10,15,20];function parseExpiry(expStr) {
   if (!expStr) return null;
   const months = {JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,
                   JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
@@ -449,375 +383,6 @@ function calcMTM(positions) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-function RMSPage({ state, notify, C, card, btn, input, angelLiveMTM, angelMTMStatus }) {
-  const [liveTradesRaw, setLiveTradesRaw] = useState([]);
-  const [lastSync,      setLastSync]      = useState(null);
-  const [loading,       setLoading]       = useState(false);
-  const [filterClient,  setFilterClient]  = useState("all");
-  const [view,          setView]          = useState("positions"); // positions | closed | summary
-
-  const SUPABASE_URL = "https://jwfucitnaqkuyzizmuve.supabase.co";
-  const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
-
-  // ── Load live trades from rms_live table ──────────────────────
-  const loadLiveTrades = async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(
-        `${SUPABASE_URL}/rest/v1/rms_live?admin_id=eq.JIYA&order=captured_at.desc&limit=1`,
-        { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
-      );
-      const rows = await r.json();
-      if (rows && rows[0]?.trades_json) {
-        const trades = JSON.parse(rows[0].trades_json);
-        setLiveTradesRaw(trades);
-        setLastSync(new Date(rows[0].captured_at));
-      }
-    } catch(e) {
-      notify("RMS load error: " + e.message, "error");
-    }
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    loadLiveTrades();
-    const t = setInterval(loadLiveTrades, 10000); // refresh every 10s
-    return () => clearInterval(t);
-  }, []);
-
-  // ── Combine System 1 (overnight) + Live F8 trades ─────────────
-  const today = new Date().toISOString().slice(0, 10);
-
-  const combinedTrades = useMemo(() => {
-    // System 1 trades — all historical (overnight carry positions)
-    const sys1 = (state.trades || []).map(t => ({ ...t, source: "sys1" }));
-
-    // Live F8 trades from today only — tagged as sys2
-    const sys2 = liveTradesRaw.map(t => ({
-      id:         `live_${t.clientId}_${t.time}_${t.scripName}`,
-      clientId:   t.clientId,
-      contract:   t.scripName || `${t.symbol} ${t.strike} ${t.optionType} ${t.expiry}`,
-      side:       t.side,
-      qty:        t.qty,
-      price:      t.price,
-      date:       today,
-      time:       t.time || "09:15:00",
-      source:     "sys2",
-    }));
-
-    // Merge: sys1 first (historical), then sys2 (today's live)
-    // Deduplicate sys2 against sys1 by clientId+contract+side+qty+price+time
-    const sys1Keys = new Set(sys1.map(t => `${t.clientId}|${t.contract}|${t.side}|${t.qty}|${t.price}|${t.time}`));
-    const uniqueSys2 = sys2.filter(t => !sys1Keys.has(`${t.clientId}|${t.contract}|${t.side}|${t.qty}|${t.price}|${t.time}`));
-
-    return [...sys1, ...uniqueSys2];
-  }, [state.trades, liveTradesRaw, today]);
-
-  // ── Run FIFO on combined trades (same engine as System 1) ──────
-  const { openPositions: allOpen, closedPositions: allClosed } = useMemo(
-    () => applyFIFO(combinedTrades),
-    [combinedTrades]
-  );
-
-  // ── Filter to visible clients ──────────────────────────────────
-  const clients = state.clients || [];
-  const filteredClients = filterClient === "all" ? clients : clients.filter(c => c.id === filterClient);
-  const clientIds = new Set(filteredClients.map(c => c.id));
-
-  const openPos   = allOpen.filter(p => clientIds.has(p.clientId));
-  // Only show TODAY's closed positions (intraday closed)
-  const closedPos = allClosed.filter(p =>
-    clientIds.has(p.clientId) &&
-    p.trades?.some(t => t.date === today && t.source === "sys2")
-  );
-
-  // ── Live P&L calculation ───────────────────────────────────────
-  const getLTP = (contract) => angelLiveMTM?.[contract]?.ltp || null;
-
-  const getPosMTM = (pos) => {
-    const ltp = getLTP(pos.contract);
-    if (ltp === null) return null;
-    const mtm = pos.side === "SELL"
-      ? (pos.avgPrice - ltp) * pos.netQty
-      : (ltp - pos.avgPrice) * pos.netQty;
-    return +mtm.toFixed(2);
-  };
-
-  // Per-client summary
-  const clientSummary = useMemo(() => {
-    return filteredClients.map(client => {
-      const myOpen   = openPos.filter(p => p.clientId === client.id);
-      const myClosed = closedPos.filter(p => p.clientId === client.id);
-      const bookedPnl = myClosed.reduce((s, p) => s + p.totalPnl, 0);
-      const liveMTM   = myOpen.reduce((s, p) => {
-        const m = getPosMTM(p);
-        return s + (m ?? 0);
-      }, 0);
-      return {
-        client,
-        openCount:  myOpen.length,
-        closedCount: myClosed.length,
-        bookedPnl:  +bookedPnl.toFixed(2),
-        liveMTM:    +liveMTM.toFixed(2),
-        totalPnl:   +(bookedPnl + liveMTM).toFixed(2),
-        myOpen,
-        myClosed,
-      };
-    });
-  }, [filteredClients, openPos, closedPos, angelLiveMTM]);
-
-  const totalOpen   = openPos.length;
-  const totalMTM    = clientSummary.reduce((s, c) => s + c.liveMTM, 0);
-  const totalBooked = clientSummary.reduce((s, c) => s + c.bookedPnl, 0);
-  const totalPnl    = totalMTM + totalBooked;
-
-  const fmtPnl = (n) => (n >= 0 ? "+" : "") + "₹" + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 2 });
-  const pnlColor = (n) => n >= 0 ? C.green : C.red;
-
-  return (
-    <div>
-      {/* Header */}
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20, flexWrap:"wrap", gap:12 }}>
-        <div>
-          <h2 style={{ margin:0, color:C.text, fontSize:22, fontWeight:800 }}>📡 RMS — Live Risk Monitor</h2>
-          <div style={{ color:C.muted, fontSize:12, marginTop:4, display:"flex", gap:12, alignItems:"center" }}>
-            {lastSync && <span>Last sync: {lastSync.toLocaleTimeString("en-IN")}</span>}
-            <span style={{ color: angelMTMStatus === "live" ? C.green : C.muted }}>
-              {angelMTMStatus === "live" ? "● Live prices active" : "○ Prices not connected"}
-            </span>
-            {liveTradesRaw.length > 0 && (
-              <span style={{ color:C.accent }}>F8: {liveTradesRaw.length} trades captured</span>
-            )}
-          </div>
-        </div>
-        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-          <select value={filterClient} onChange={e => setFilterClient(e.target.value)}
-            style={{ ...input, minWidth:160, cursor:"pointer" }}>
-            <option value="all">All Clients</option>
-            {clients.map(c => <option key={c.id} value={c.id}>{c.name?.split(" ")[0]} ({c.id})</option>)}
-          </select>
-          <button onClick={loadLiveTrades} disabled={loading}
-            style={{ ...btn(C.accent), fontSize:12 }}>
-            {loading ? "⏳" : "🔄 Refresh"}
-          </button>
-        </div>
-      </div>
-
-      {/* KPI Row */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:20 }}>
-        {[
-          { label:"Open Positions", val: totalOpen, color: C.accent, fmt: false },
-          { label:"Live MTM",       val: totalMTM,  color: pnlColor(totalMTM),   fmt: true },
-          { label:"Booked P&L",    val: totalBooked, color: pnlColor(totalBooked), fmt: true },
-          { label:"Total P&L",     val: totalPnl,   color: pnlColor(totalPnl),    fmt: true, big: true },
-        ].map(k => (
-          <div key={k.label} style={{ ...card, padding:"16px 20px",
-            borderLeft: k.big ? `4px solid ${k.color}` : "none" }}>
-            <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase", letterSpacing:0.8, marginBottom:6 }}>{k.label}</div>
-            <div style={{ fontSize: k.big ? 24 : 20, fontWeight:800, color:k.color }}>
-              {k.fmt ? fmtPnl(k.val) : k.val}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* View Toggle */}
-      <div style={{ display:"flex", gap:8, marginBottom:16 }}>
-        {[
-          { id:"summary",   label:"📋 Summary" },
-          { id:"positions", label:"📈 Open Positions" },
-          { id:"closed",    label:"✅ Closed Today" },
-        ].map(v => (
-          <button key={v.id} onClick={() => setView(v.id)}
-            style={{ ...btn(view === v.id ? C.accent : C.card),
-              border: `1px solid ${view === v.id ? C.accent : C.border}`,
-              color: view === v.id ? "#fff" : C.muted,
-              fontSize:13 }}>
-            {v.label}
-          </button>
-        ))}
-      </div>
-
-      {/* ── SUMMARY VIEW ── */}
-      {view === "summary" && (
-        <div style={{ ...card, padding:0, overflow:"hidden" }}>
-          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
-            <thead>
-              <tr style={{ background: C.bg }}>
-                {["Client","Open Pos","Live MTM","Booked P&L","Total P&L"].map(h => (
-                  <th key={h} style={{ padding:"10px 16px", color:C.muted, fontSize:11,
-                    fontWeight:600, textTransform:"uppercase", letterSpacing:0.5,
-                    textAlign: h === "Client" ? "left" : "right",
-                    borderBottom:`1px solid ${C.border}` }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {clientSummary.map((cs, i) => (
-                <tr key={cs.client.id} className="row-enter"
-                  style={{ borderBottom:`1px solid ${C.border}`, animationDelay:`${i*0.04}s` }}>
-                  <td style={{ padding:"12px 16px" }}>
-                    <div style={{ fontWeight:700, color:C.text }}>{cs.client.name?.split(" ")[0]}</div>
-                    <div style={{ fontSize:11, color:C.muted, fontFamily:"monospace" }}>{cs.client.id}</div>
-                  </td>
-                  <td style={{ padding:"12px 16px", textAlign:"right", color:C.accent, fontWeight:700 }}>
-                    {cs.openCount}
-                  </td>
-                  <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:700, color:pnlColor(cs.liveMTM) }}>
-                    {getLTP(cs.myOpen[0]?.contract) !== null || cs.liveMTM !== 0 ? fmtPnl(cs.liveMTM) : "—"}
-                  </td>
-                  <td style={{ padding:"12px 16px", textAlign:"right", color:pnlColor(cs.bookedPnl), fontWeight:700 }}>
-                    {cs.closedCount > 0 ? fmtPnl(cs.bookedPnl) : "—"}
-                  </td>
-                  <td style={{ padding:"12px 16px", textAlign:"right" }}>
-                    <span style={{ fontWeight:800, fontSize:15, color:pnlColor(cs.totalPnl) }}>
-                      {fmtPnl(cs.totalPnl)}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr style={{ borderTop:`2px solid ${C.border}`, background:C.bg }}>
-                <td style={{ padding:"12px 16px", fontWeight:700, color:C.muted }}>TOTAL</td>
-                <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:700, color:C.accent }}>{totalOpen}</td>
-                <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:700, color:pnlColor(totalMTM) }}>{fmtPnl(totalMTM)}</td>
-                <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:700, color:pnlColor(totalBooked) }}>{fmtPnl(totalBooked)}</td>
-                <td style={{ padding:"12px 16px", textAlign:"right", fontWeight:800, fontSize:16, color:pnlColor(totalPnl) }}>{fmtPnl(totalPnl)}</td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      )}
-
-      {/* ── OPEN POSITIONS VIEW ── */}
-      {view === "positions" && (
-        <div style={{ ...card, padding:0, overflow:"hidden" }}>
-          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
-            <thead>
-              <tr style={{ background:C.bg }}>
-                {["Client","Contract","Side","Qty","Avg Price","LTP","Live MTM","Source"].map(h => (
-                  <th key={h} style={{ padding:"10px 14px", color:C.muted, fontSize:11,
-                    fontWeight:600, textTransform:"uppercase", letterSpacing:0.5,
-                    textAlign: h==="Client"||h==="Contract"||h==="Side"||h==="Source" ? "left" : "right",
-                    borderBottom:`1px solid ${C.border}` }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {openPos.length === 0 ? (
-                <tr><td colSpan={8} style={{ padding:40, textAlign:"center", color:C.muted }}>No open positions</td></tr>
-              ) : openPos.map((pos, i) => {
-                const ltp = getLTP(pos.contract);
-                const mtm = getPosMTM(pos);
-                const client = clients.find(c => c.id === pos.clientId);
-                // Determine source: if position has any sys2 trade today it's partly live
-                const hasLive = combinedTrades.some(t => t.clientId===pos.clientId && t.contract===pos.contract && t.source==="sys2");
-                return (
-                  <tr key={`${pos.clientId}_${pos.contract}`} className="row-enter"
-                    style={{ borderBottom:`1px solid ${C.border}`, animationDelay:`${i*0.03}s`,
-                      background: hasLive ? C.accent+"06" : "transparent" }}>
-                    <td style={{ padding:"10px 14px" }}>
-                      <div style={{ fontWeight:600, color:C.text, fontSize:12 }}>{client?.name?.split(" ")[0] || pos.clientId}</div>
-                      <div style={{ fontSize:10, color:C.muted, fontFamily:"monospace" }}>{pos.clientId}</div>
-                    </td>
-                    <td style={{ padding:"10px 14px", color:C.accent, fontWeight:600 }}>{pos.contract}</td>
-                    <td style={{ padding:"10px 14px" }}>
-                      <span style={{ background: pos.side==="SELL"?C.red+"18":C.green+"18",
-                        color: pos.side==="SELL"?C.red:C.green,
-                        padding:"2px 8px", borderRadius:4, fontWeight:700, fontSize:12 }}>
-                        {pos.side}
-                      </span>
-                    </td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:700 }}>{pos.netQty.toLocaleString()}</td>
-                    <td style={{ padding:"10px 14px", textAlign:"right" }}>₹{pos.avgPrice.toFixed(2)}</td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", color:C.accent, fontWeight:700 }}>
-                      {ltp !== null ? `₹${ltp.toFixed(2)}` : "—"}
-                    </td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800,
-                      color: mtm !== null ? pnlColor(mtm) : C.muted }}>
-                      {mtm !== null ? fmtPnl(mtm) : "—"}
-                    </td>
-                    <td style={{ padding:"10px 14px" }}>
-                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:4,
-                        background: hasLive ? C.accent+"18" : C.muted+"18",
-                        color: hasLive ? C.accent : C.muted }}>
-                        {hasLive ? "Live" : "Overnight"}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* ── CLOSED TODAY VIEW ── */}
-      {view === "closed" && (
-        <div style={{ ...card, padding:0, overflow:"hidden" }}>
-          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
-            <thead>
-              <tr style={{ background:C.bg }}>
-                {["Client","Contract","Booked P&L","Trades"].map(h => (
-                  <th key={h} style={{ padding:"10px 14px", color:C.muted, fontSize:11,
-                    fontWeight:600, textTransform:"uppercase", letterSpacing:0.5,
-                    textAlign: h==="Client"||h==="Contract" ? "left" : "right",
-                    borderBottom:`1px solid ${C.border}` }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {closedPos.length === 0 ? (
-                <tr><td colSpan={4} style={{ padding:40, textAlign:"center", color:C.muted }}>No positions closed today</td></tr>
-              ) : closedPos.map((pos, i) => {
-                const client = clients.find(c => c.id === pos.clientId);
-                return (
-                  <tr key={`${pos.clientId}_${pos.contract}`} className="row-enter"
-                    style={{ borderBottom:`1px solid ${C.border}`, animationDelay:`${i*0.03}s` }}>
-                    <td style={{ padding:"10px 14px" }}>
-                      <div style={{ fontWeight:600, color:C.text, fontSize:12 }}>{client?.name?.split(" ")[0] || pos.clientId}</div>
-                      <div style={{ fontSize:10, color:C.muted, fontFamily:"monospace" }}>{pos.clientId}</div>
-                    </td>
-                    <td style={{ padding:"10px 14px", color:C.accent, fontWeight:600 }}>{pos.contract}</td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, fontSize:15,
-                      color:pnlColor(pos.totalPnl) }}>
-                      {fmtPnl(pos.totalPnl)}
-                    </td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", color:C.muted }}>
-                      {pos.trades?.length || 0} trades
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-            {closedPos.length > 0 && (
-              <tfoot>
-                <tr style={{ borderTop:`2px solid ${C.border}`, background:C.bg }}>
-                  <td colSpan={2} style={{ padding:"10px 14px", fontWeight:700, color:C.muted }}>TOTAL BOOKED</td>
-                  <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, fontSize:16,
-                    color:pnlColor(totalBooked) }}>{fmtPnl(totalBooked)}</td>
-                  <td></td>
-                </tr>
-              </tfoot>
-            )}
-          </table>
-        </div>
-      )}
-
-      {liveTradesRaw.length === 0 && (
-        <div style={{ ...card, textAlign:"center", padding:48, marginTop:16 }}>
-          <div style={{ fontSize:36, marginBottom:12 }}>📡</div>
-          <div style={{ fontWeight:700, color:C.text, marginBottom:8 }}>No live F8 data yet</div>
-          <div style={{ color:C.muted, fontSize:13 }}>
-            Run JIYA RMS Capture tool → open ODIN → press F8 → right-click Copy
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, input }) {
   const [adminPwd,    setAdminPwd]    = useState("");
   const [clientSel,   setClientSel]   = useState("");
@@ -1081,7 +646,7 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
 
         <div style={{marginTop:16,padding:12,background:C.yellow+"10",borderRadius:8,border:`1px solid ${C.yellow}33`,fontSize:12,color:C.muted,lineHeight:1.6}}>
           🔒 <strong>Privacy:</strong> Credentials are saved in your browser only. Never sent anywhere except directly to Angel One servers.
-          <br/>⚡ <strong>What this enables:</strong> Live option prices → Real-time MTM in RMS → Auto bhavcopy daily.
+          <br/>⚡ <strong>What this enables:</strong> Live option prices for accurate MTM calculation.
         </div>
       </div>
 
@@ -1198,7 +763,6 @@ export default function BackOffice() {
 
   const unreadCount = bells.filter(b => !b.read).length;
   // RMS state
-  const [rmsPositions,   setRmsPositions]   = useState({});
   const [rmsFunds,       setRmsFunds]       = useState(() => { try { return JSON.parse(localStorage.getItem("rms_funds")||"{}"); } catch(e){ return {}; } });
   const [rmsIndexPrices, setRmsIndexPrices] = useState(() => { try { return JSON.parse(localStorage.getItem("rms_idx")||"{}"); } catch(e){ return { NIFTY:24050, SENSEX:77550, BANKNIFTY:52000, BANKEX:52000 }; } });
   const [rmsLastUpdated, setRmsLastUpdated] = useState(null);
@@ -1274,7 +838,6 @@ export default function BackOffice() {
 
   // ── Angel One: Poll LTP for all open positions ──
   // ── Angel One: Poll LTP for open positions ──────────────────
-  const rmsPositionsRef     = useRef({});
   const contractTokenMapRef = useRef({});
   const angelTokenRef       = useRef({});
 
@@ -1385,26 +948,7 @@ export default function BackOffice() {
           setAngelLiveMTM(newMTM);
           setAngelMTMStatus("live");
 
-          // Also update RMS positions if active
-          const rmsPos = rmsPositionsRef.current;
-          if (Object.keys(rmsPos).length) {
-            const updated = {};
-            Object.entries(rmsPos).forEach(([cid, positions]) => {
-              updated[cid] = positions.map(p => {
-                const tok = (p.scripCode || "").toString().trim();
-                const ltp = (data.data.fetched||[]).find(x=>x.symbolToken===tok)?.ltp;
-                if (ltp !== undefined) {
-                  const qty    = parseFloat(p.netQty)  || 0;
-                  const buyAvg = parseFloat(p.buyAvg)  || parseFloat(p.netPrice) || 0;
-                  const newMTMval = qty !== 0 ? ((ltp - buyAvg) * qty).toFixed(2) : (parseFloat(p.mtmGL)||0).toFixed(2);
-                  return { ...p, marketPrice: ltp.toString(), mtmGL: newMTMval };
-                }
-                return p;
-              });
-            });
-            rmsPositionsRef.current = updated;
-            setRmsLastUpdated(new Date());
-          }
+
         }
       } catch(e) {
         console.log("LTP poll error:", e.message);
@@ -2889,10 +2433,7 @@ export default function BackOffice() {
                 style={{...btn(C.accent),fontSize:13,padding:"8px 16px"}}>
                 ⬆️ Upload Trades
               </button>
-              <button onClick={()=>setPage("rms")}
-                style={{...btn(C.card),border:`1px solid ${C.border}`,color:C.text,fontSize:13,padding:"8px 16px"}}>
-                📡 Open RMS
-              </button>
+
             </div>
           </div>
 
