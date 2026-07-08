@@ -220,9 +220,9 @@ const INITIAL_STATE = {
 // ── Plan feature access ──────────────────────────────
 const PLAN_FEATURES = {
   basic:   ["dashboard","clients","trades","pnl","ledger","tickets","settings"],
-  pro:     ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","rms"],
-  perfect: ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","rms","audit","export"],
-  superadmin: ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","rms","audit","export","admins","tokens"],
+  pro:     ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges"],
+  perfect: ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","audit","export"],
+  superadmin: ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","audit","export","admins","tokens"],
 };
 
 const hasFeature = (plan, feature) => {
@@ -2647,7 +2647,6 @@ export default function BackOffice() {
     { id: "charges", label: "Charges", icon: "charges", locked: !hasFeature(auth?.plan, "charges") },
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
     ...(hasFeature(auth?.plan, "audit") ? [{ id: "audit", label: "📋 Audit Log", icon: "ledger" }] : []),
-    { id: "rms", label: "📡 RMS", icon: "dashboard", locked: !hasFeature(auth?.plan, "rms") },
     { id: "settings", label: "⚙️ Settings", icon: "dashboard" },
     // Super admin only
     ...(auth?.role === "superadmin" ? [
@@ -4237,9 +4236,7 @@ export default function BackOffice() {
       );
     }
 
-    if (page === "rms" && (auth.role === "admin" || auth.role === "superadmin") && hasFeature(auth?.plan, "rms")) {
-      return <RMSPage state={state} notify={notify} C={C} card={card} btn={btn} input={input} angelLiveMTM={angelLiveMTM} angelMTMStatus={angelMTMStatus} />;
-    }
+
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
       return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} />;
     }
@@ -4266,16 +4263,15 @@ export default function BackOffice() {
     }
 
     // ── Fallback: locked feature requested directly (e.g. RMS/Charges on Basic plan) ──
-    if ((page === "charges" || page === "rms") && (auth.role === "admin" || auth.role === "superadmin")) {
-      const featureLabel = page === "charges" ? "Charges" : "RMS";
+    if (page === "charges" && (auth.role === "admin" || auth.role === "superadmin")) {
       return (
         <div style={{ ...card, textAlign:"center", padding:56 }}>
           <div style={{ fontSize:42, marginBottom:16 }}>🔒</div>
           <div style={{ fontWeight:800, fontSize:18, color:C.text, marginBottom:8 }}>
-            {featureLabel} is locked on your current plan
+            Charges is locked on your current plan
           </div>
           <div style={{ color:C.muted, fontSize:13, marginBottom:20 }}>
-            Upgrade your plan to unlock {featureLabel} and other premium features.
+            Upgrade your plan to unlock Charges and other premium features.
           </div>
           <div style={{ color:C.muted, fontSize:12 }}>
             Contact JIYA to upgrade your subscription.
@@ -5189,13 +5185,7 @@ export default function BackOffice() {
               {syncStatus==="saving" ? "Saving..." : syncStatus==="saved" ? "✓ Saved to database" : syncStatus==="error" ? "⚠ Sync failed" : "Database connected"}
             </div>
           )}
-          {/* Angel One MTM Status */}
-          {auth?.role === "superadmin" && angelStatus === "connected" && (
-            <div style={{ marginBottom:6, fontSize:11, display:"flex", alignItems:"center", gap:6,
-              color: angelMTMStatus === "live" ? C.green : angelMTMStatus === "error" ? C.red : C.muted }}>
-              <div style={{ width:6, height:6, borderRadius:"50%", background:"currentColor" }}/>
-              {angelMTMStatus === "live" ? "📡 Live prices active" : angelMTMStatus === "error" ? "⚠ Price feed error" : "⏳ Fetching prices..."}
-            </div>
+          {false && (
           )}
           {(auth?.role === "admin" || auth?.role === "superadmin") && !SUPABASE_CONFIGURED && (
             <div style={{ marginBottom:10, fontSize:11, color:C.yellow, display:"flex", alignItems:"center", gap:6 }}>
