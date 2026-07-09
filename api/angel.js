@@ -32,9 +32,58 @@ export default async function handler(req, res) {
     // LOGIN
     if (action === 'login') {
       const { clientId, password, totp } = payload;
+
+      // Generate live 6-digit TOTP from secret using RFC 6238
+      const generateTOTP = async (secret) => {
+        // Clean secret — remove spaces, uppercase
+        const cleanSecret = secret.replace(/\s/g, '').toUpperCase();
+
+        // Base32 decode
+        const base32Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+        let bits = '';
+        for (const c of cleanSecret) {
+          const idx = base32Chars.indexOf(c);
+          if (idx === -1) continue;
+          bits += idx.toString(2).padStart(5, '0');
+        }
+        const bytes = new Uint8Array(Math.floor(bits.length / 8));
+        for (let i = 0; i < bytes.length; i++) {
+          bytes[i] = parseInt(bits.slice(i*8, i*8+8), 2);
+        }
+
+        // HMAC-SHA1 with time counter
+        const counter = Math.floor(Date.now() / 1000 / 30);
+        const counterBytes = new Uint8Array(8);
+        let c = counter;
+        for (let i = 7; i >= 0; i--) { counterBytes[i] = c & 0xff; c >>= 8; }
+
+        const key = await crypto.subtle.importKey(
+          'raw', bytes, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']
+        );
+        const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, counterBytes));
+
+        // Dynamic truncation
+        const offset = sig[sig.length - 1] & 0xf;
+        const code = ((sig[offset] & 0x7f) << 24 |
+                       sig[offset+1] << 16 |
+                       sig[offset+2] << 8  |
+                       sig[offset+3]) % 1000000;
+        return code.toString().padStart(6, '0');
+      };
+
+      // If totp looks like a secret (not 6 digits), generate the code
+      let totpCode = totp;
+      if (totp && totp.length > 6) {
+        try {
+          totpCode = await generateTOTP(totp);
+        } catch(e) {
+          totpCode = totp; // fallback to original
+        }
+      }
+
       const r = await fetch(
         'https://apiconnect.angelbroking.com/rest/auth/angelbroking/user/v1/loginByPassword',
-        { method: 'POST', headers: ANGEL_H(apiKey), body: JSON.stringify({ clientcode: clientId, password, totp }) }
+        { method: 'POST', headers: ANGEL_H(apiKey), body: JSON.stringify({ clientcode: clientId, password, totp: totpCode }) }
       );
       return res.status(200).json(await r.json());
     }
