@@ -550,7 +550,7 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
-function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth }) {
+function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
     password:    angelCreds.password    || "",
@@ -597,9 +597,9 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
         {angelStatus === "connected" && (
           <div style={{display:"flex", gap:8}}>
             <button onClick={disconnectAngel} style={{...btn(C.red),fontSize:12}}>Disconnect</button>
-            <button onClick={()=>fetchAutoBhavcopy(angelTokenRef.current?.jwtToken, angelCreds.apiKey)}
+            <button onClick={fetchPrices}
               style={{...btn(C.green),fontSize:12}}>
-              📋 Fetch Closing Prices Now
+              📋 Fetch Live Prices Now
             </button>
           </div>
         )}
@@ -979,7 +979,9 @@ export default function BackOffice() {
   }, []);
 
   const fetchAutoBhavcopy = async (jwtToken, apiKey) => {
-    notify("📋 Fetching closing prices for open positions...");
+    if (!jwtToken) { notify("⚠ Angel One not connected — connect first in Settings", "error"); return; }
+    if (!apiKey)   { notify("⚠ API Key missing — check Settings", "error"); return; }
+    notify("📋 Fetching live prices for open positions...");
     try {
       // Get all unique open position contracts
       const { openPositions } = applyFIFO(state.trades);
@@ -3784,7 +3786,7 @@ export default function BackOffice() {
 
 
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
-      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} />;
+      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} />;
     }
 
     // ── Super Admin: Manage Admins ──
