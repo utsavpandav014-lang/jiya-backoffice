@@ -88,6 +88,22 @@ export default async function handler(req, res) {
       return res.status(200).json(await r.json());
     }
 
+    // INSTRUMENT MASTER — fetch Angel One scrip master (no auth needed)
+    if (action === 'instrument_master') {
+      try {
+        const r = await fetch(
+          'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json',
+          { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }
+        );
+        const data = await r.json();
+        // Filter to only NFO + BFO to reduce size
+        const filtered = data.filter(x => x.exch_seg === 'NFO' || x.exch_seg === 'BFO');
+        return res.status(200).json({ status: true, data: filtered });
+      } catch(e) {
+        return res.status(200).json({ status: false, message: e.message, data: [] });
+      }
+    }
+
     // SEARCH TOKEN — find Angel One symbol token for a contract
     if (action === 'search_token') {
       const { symbol, exchange } = payload;
