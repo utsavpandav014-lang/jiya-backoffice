@@ -112,7 +112,31 @@ export default async function handler(req, res) {
 
         // If expired and we have login creds, re-login and retry
         if (!data && loginPayload?.clientId) {
-          // Re-login
+          // Generate fresh TOTP
+          let freshTotp = loginPayload.totp;
+          if (loginPayload.totp && loginPayload.totp.length > 6) {
+            try {
+              const cleanSecret = loginPayload.totp.replace(/\s/g, '').toUpperCase();
+              const base32Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+              let bits = '';
+              for (const c of cleanSecret) {
+                const idx = base32Chars.indexOf(c);
+                if (idx === -1) continue;
+                bits += idx.toString(2).padStart(5, '0');
+              }
+              const bytes = new Uint8Array(Math.floor(bits.length / 8));
+              for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(bits.slice(i*8, i*8+8), 2);
+              const counter = Math.floor(Date.now() / 1000 / 30);
+              const cb = new Uint8Array(8);
+              let ct = counter;
+              for (let i = 7; i >= 0; i--) { cb[i] = ct & 0xff; ct >>= 8; }
+              const key = await crypto.subtle.importKey('raw', bytes, { name:'HMAC', hash:'SHA-1' }, false, ['sign']);
+              const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, cb));
+              const off = sig[sig.length-1] & 0xf;
+              const code = ((sig[off]&0x7f)<<24|sig[off+1]<<16|sig[off+2]<<8|sig[off+3]) % 1000000;
+              freshTotp = code.toString().padStart(6, '0');
+            } catch(e) {}
+          }
           const relogin = await fetch(
             'https://apiconnect.angelbroking.com/rest/auth/angelbroking/user/v1/loginByPassword',
             {
@@ -121,7 +145,7 @@ export default async function handler(req, res) {
               body: JSON.stringify({
                 clientcode: loginPayload.clientId,
                 password:   loginPayload.password,
-                totp:       loginPayload.totp
+                totp:       freshTotp
               })
             }
           );
