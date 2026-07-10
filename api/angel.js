@@ -91,16 +91,49 @@ export default async function handler(req, res) {
     // SEARCH TOKEN — find Angel One symbol token for a contract
     if (action === 'search_token') {
       const { symbol, exchange } = payload;
-      try {
+      const loginPayload = req.body.loginPayload; // optional creds for auto-relogin
+
+      const doSearch = async (jwt) => {
         const r = await fetch(
           'https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/searchscrip',
           {
             method: 'POST',
-            headers: ANGEL_H(apiKey, jwtToken),
+            headers: ANGEL_H(apiKey, jwt),
             body: JSON.stringify({ exchange: exchange || 'NFO', searchscrip: symbol })
           }
         );
-        const data = await r.json();
+        const text = await r.text();
+        if (text.trim().startsWith('<')) return null; // HTML = expired
+        return JSON.parse(text);
+      };
+
+      try {
+        let data = await doSearch(jwtToken);
+
+        // If expired and we have login creds, re-login and retry
+        if (!data && loginPayload?.clientId) {
+          // Re-login
+          const relogin = await fetch(
+            'https://apiconnect.angelbroking.com/rest/auth/angelbroking/user/v1/loginByPassword',
+            {
+              method: 'POST',
+              headers: ANGEL_H(apiKey),
+              body: JSON.stringify({
+                clientcode: loginPayload.clientId,
+                password:   loginPayload.password,
+                totp:       loginPayload.totp
+              })
+            }
+          );
+          const redata = await relogin.json();
+          if (redata.status && redata.data?.jwtToken) {
+            data = await doSearch(redata.data.jwtToken);
+          }
+        }
+
+        if (!data) {
+          return res.status(200).json({ status: false, message: 'Session expired — reconnect Angel One in Settings', data: [] });
+        }
         return res.status(200).json(data);
       } catch(e) {
         return res.status(200).json({ status: false, message: e.message, data: [] });
