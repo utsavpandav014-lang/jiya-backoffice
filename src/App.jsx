@@ -1450,13 +1450,17 @@ export default function BackOffice() {
   // Get closing price for a contract from bhavcopy
   // getBhavClose: checks Angel One live MTM first, then bhavcopy
   const getBhavClose = (contract) => {
-    // Direct lookup
-    if (angelLiveMTM[contract]?.ltp) return angelLiveMTM[contract].ltp;
-    // Try normalizing strike decimals: "ITC 280.00 PE" → "ITC 280 PE"
+    const direct = angelLiveMTM[contract]?.ltp;
+    if (direct) return direct;
     const normalized = contract.replace(/(\d+)\.0+\s/g, (m, n) => n + ' ');
-    if (angelLiveMTM[normalized]?.ltp) return angelLiveMTM[normalized].ltp;
-    // Bhavcopy fallback
+    const norm = angelLiveMTM[normalized]?.ltp;
+    if (norm) return norm;
     if (bhavLookup[contract]?.closePrice) return bhavLookup[contract].closePrice;
+    // Debug: log first miss to understand the problem
+    if (Object.keys(angelLiveMTM).length > 0 && !window._bhavDebugDone) {
+      window._bhavDebugDone = true;
+      console.log("getBhavClose miss. Contract:", JSON.stringify(contract), "Available keys:", Object.keys(angelLiveMTM).slice(0,3));
+    }
     return null;
   };
   const getBhavSettl = (contract) => bhavLookup[contract]?.settlPrice || null;
