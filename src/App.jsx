@@ -1034,12 +1034,34 @@ export default function BackOffice() {
               })
             });
             const d = await r.json();
+            console.log(`Search ${contract}:`, d.status, d.data?.length, d.data?.[0]?.symboltoken, d.data?.[0]?.ltp);
             if (d.status && d.data?.length) {
               const token = d.data[0].symboltoken;
               const ltp   = d.data[0].ltp;
               contractTokenMapRef.current[contract] = { token, exchange };
-              newMTM[contract] = { ltp, token };
-              fetched++;
+              if (ltp && ltp > 0) {
+                newMTM[contract] = { ltp, token };
+                fetched++;
+              } else {
+                // Token found but no LTP in search result — fetch LTP separately
+                const ltpResp = await fetch(ANGEL_PROXY, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    action: "ltp", apiKey, jwtToken,
+                    payload: { exchangeTokens: { [exchange]: [token] } }
+                  })
+                });
+                const ltpData = await ltpResp.json();
+                console.log(`LTP for ${contract}:`, ltpData.status, ltpData.data?.fetched?.[0]?.ltp);
+                const fetchedLtp = ltpData.data?.fetched?.[0]?.ltp;
+                if (fetchedLtp && fetchedLtp > 0) {
+                  newMTM[contract] = { ltp: fetchedLtp, token };
+                  fetched++;
+                }
+              }
+            } else {
+              console.log(`No token found for ${contract} (${sym} on ${exchange}):`, d.message);
             }
           }
           await new Promise(r => setTimeout(r, 150)); // rate limit delay
@@ -1158,7 +1180,7 @@ export default function BackOffice() {
         fetchAll("charges_history", "?order=created_at.asc"),
         fetchAll("bhavcopy",        "?order=created_at.desc"),
         sb.select("locked_months",  "?order=month.asc").catch(() => []),
-        sb.select("admins",         "?order=created_at.asc").catch(() => []),
+        sb.select("admins",         "?order=id.asc").catch(() => []),
         sb.select("audit_log",      "?order=timestamp.desc&limit=2000").catch(() => []),
       ]);
 
