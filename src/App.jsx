@@ -853,33 +853,44 @@ export default function BackOffice() {
     };
   };
 
-  // Fetch token for a single contract from Angel One
+  // Fetch token for a single contract from Angel One via search
   const fetchContractToken = async (jwtToken, apiKey, contractInfo) => {
     try {
-      const resp = await fetch(ANGEL_PROXY, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "ltp",
-          apiKey, jwtToken,
-          payload: { exchangeTokens: { [contractInfo.exchange]: [] } } // ping to check connection
-        })
-      });
-      // We'll use search_token action instead
       const r = await fetch(ANGEL_PROXY, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action: "search_token",
-          apiKey, jwtToken,
+          action:  "search_token",
+          apiKey,  jwtToken,
           payload: contractInfo
         })
       });
       const data = await r.json();
-      if (data.status && data.data?.length) {
-        const best = data.data[0];
-        return { token: best.symboltoken, exchange: contractInfo.exchange, ltp: best.ltp };
+      if (!data.status || !data.data?.length) return null;
+
+      // Parse contract to extract strike and expiry for matching
+      // Contract format: "SENSEX 81000.00 CE 09JUL2026"
+      const parts   = contractInfo.contract.trim().split(/\s+/);
+      const strike  = parts[1] ? parseFloat(parts[1]).toString() : "";
+      const optType = parts[2] || ""; // CE or PE
+      const expiry  = parts[3] || ""; // 09JUL2026
+
+      // Try to find best match from search results
+      let best = data.data[0]; // fallback to first result
+      if (strike) {
+        const matched = data.data.find(d => {
+          const name = (d.tradingsymbol || d.symbol || "").toUpperCase();
+          return name.includes(optType.toUpperCase()) &&
+                 name.includes(parseFloat(strike).toFixed(0));
+        });
+        if (matched) best = matched;
       }
+
+      return {
+        token:    best.symboltoken,
+        exchange: contractInfo.exchange,
+        ltp:      best.ltp,
+      };
     } catch(e) {}
     return null;
   };
@@ -896,17 +907,14 @@ export default function BackOffice() {
         const { openPositions: allOpen } = applyFIFO(state.trades);
         if (!allOpen.length) return;
 
-        // Build token map for contracts we don't have yet
+        // Build token map for unknown contracts via search_token
         const unknownContracts = allOpen.filter(p => !contractTokenMapRef.current[p.contract]);
-        
-        // Fetch tokens for unknown contracts (batch, max 5 at once to avoid rate limit)
         for (let i = 0; i < Math.min(unknownContracts.length, 5); i++) {
-          const pos = unknownContracts[i];
+          const pos  = unknownContracts[i];
           const info = contractToSearch(pos.contract);
           const result = await fetchContractToken(jwtToken, apiKey, info);
-          if (result) {
-            contractTokenMapRef.current[pos.contract] = result;
-          }
+          if (result) contractTokenMapRef.current[pos.contract] = result;
+          await new Promise(r => setTimeout(r, 200)); // rate limit
         }
 
         // Build exchange tokens from known map
