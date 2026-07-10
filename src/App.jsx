@@ -872,23 +872,21 @@ export default function BackOffice() {
   // Our format: "NIFTY 23800 PE 14JUL2026"
   // Angel One format: "NIFTY14JUL2623800PE"
   const contractToAngelSymbol = (contract) => {
-    const parts  = contract.trim().split(/\s+/);
+    const parts   = contract.trim().split(/\s+/);
     if (parts.length < 2) return null;
-    const name   = parts[0].toUpperCase();
-    const isFut  = contract.includes("FUT");
+    const name    = parts[0].toUpperCase();
+    const isBSE   = ["SENSEX","BANKEX","SENSEX50"].includes(name);
+    const isFut   = contract.toUpperCase().includes("FUT");
     if (isFut) {
-      // "NIFTY FUT 28JUL2026" → "NIFTY28JUL26FUT"
       const expiry = parts[2] || parts[1];
-      const exp6   = expiry.slice(0,5) + expiry.slice(7,9); // 28JUL2026 → 28JUL26
-      return name + exp6 + "FUT";
+      const exp6   = expiry.slice(0,5) + expiry.slice(7,9);
+      return { symbol: name + exp6 + "FUT", exchange: isBSE ? "BFO" : "NFO" };
     } else {
-      // "NIFTY 23800 PE 14JUL2026" → "NIFTY14JUL2623800PE"
       const strike  = parseFloat(parts[1] || 0);
       const optType = (parts[2] || "").toUpperCase();
       const expiry  = parts[3] || "";
-      const exp6    = expiry.slice(0,5) + expiry.slice(7,9); // 14JUL2026 → 14JUL26
-      // Strike in Angel One symbols: 23800 (no decimals usually)
-      return name + exp6 + Math.round(strike) + optType;
+      const exp6    = expiry.slice(0,5) + expiry.slice(7,9);
+      return { symbol: name + exp6 + Math.round(strike) + optType, exchange: isBSE ? "BFO" : "NFO" };
     }
   };
 
@@ -966,10 +964,10 @@ export default function BackOffice() {
         if (unknownContracts.length > 0) {
           await loadInstrumentMaster();
           unknownContracts.forEach(pos => {
-            const angelSymbol = contractToAngelSymbol(pos.contract);
-            if (angelSymbol) {
-              const entry = instrMasterRef.current[angelSymbol];
-              if (entry) contractTokenMapRef.current[pos.contract] = { token: entry.token, exchange: entry.exchange };
+            const result = contractToAngelSymbol(pos.contract);
+            if (result) {
+              const entry = instrMasterRef.current[result.symbol];
+              if (entry) contractTokenMapRef.current[pos.contract] = { token: entry.token, exchange: result.exchange };
             }
           });
         }
@@ -1076,16 +1074,15 @@ export default function BackOffice() {
         // Check existing token map first
         let mapped = contractTokenMapRef.current[contract];
         if (!mapped) {
-          // Try instrument master lookup
-          const angelSymbol = contractToAngelSymbol(contract);
-          if (angelSymbol) {
-            const entry = instrMasterRef.current[angelSymbol];
+          const result = contractToAngelSymbol(contract);
+          if (result) {
+            const entry = instrMasterRef.current[result.symbol];
             if (entry) {
-              mapped = { token: entry.token, exchange: entry.exchange };
+              mapped = { token: entry.token, exchange: result.exchange };
               contractTokenMapRef.current[contract] = mapped;
-              console.log(`Mapped ${contract} → ${angelSymbol} → token ${entry.token}`);
+              console.log(`Mapped ${contract} → ${result.symbol} → token ${entry.token}`);
             } else {
-              console.log(`Not in master: ${contract} → tried ${angelSymbol}`);
+              console.log(`Not in master: ${contract} → tried ${result.symbol}`);
             }
           }
         }
@@ -1122,6 +1119,7 @@ export default function BackOffice() {
             if (contract && item.ltp > 0) {
               newMTM[contract] = { ltp: item.ltp, token: item.symbolToken };
               fetched++;
+              console.log(`MTM set: ${contract} = ₹${item.ltp}`);
             }
           });
         }
