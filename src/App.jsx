@@ -979,8 +979,25 @@ export default function BackOffice() {
   }, []);
 
   const fetchAutoBhavcopy = async (jwtToken, apiKey) => {
-    if (!jwtToken) { notify("⚠ Angel One not connected — connect first in Settings", "error"); return; }
-    if (!apiKey)   { notify("⚠ API Key missing — check Settings", "error"); return; }
+    if (!apiKey) { notify("⚠ API Key missing — check Settings", "error"); return; }
+
+    // If no token or token might be expired, reconnect first
+    let activeToken = jwtToken;
+    if (!activeToken) {
+      notify("🔄 Reconnecting Angel One...");
+      try {
+        const tokens = await angelLogin(angelCreds);
+        activeToken  = tokens.jwtToken;
+        setAngelToken(activeToken);
+        angelTokenRef.current = { jwtToken: activeToken };
+        setAngelStatus("connected");
+        notify("✅ Reconnected — fetching prices...");
+      } catch(e) {
+        notify("❌ Could not reconnect Angel One — go to Settings and reconnect manually", "error");
+        return;
+      }
+    }
+    jwtToken = activeToken;
     notify("📋 Fetching live prices for open positions...");
     try {
       // Get all unique open position contracts
@@ -1030,7 +1047,9 @@ export default function BackOffice() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 action: "search_token", apiKey, jwtToken,
-                payload: { symbol: sym, exchange, query: contract }
+                payload: { symbol: sym, exchange, query: contract },
+                // Pass creds for auto-relogin if token expired
+                loginPayload: { clientId: angelCreds.clientId, password: angelCreds.password, totp: angelCreds.totpSecret }
               })
             });
             const d = await r.json();
