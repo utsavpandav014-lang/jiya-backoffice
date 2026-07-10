@@ -768,8 +768,12 @@ export default function BackOffice() {
   const [angelCreds, setAngelCreds] = useState(() => {
     try { return JSON.parse(localStorage.getItem("angel_creds") || "{}"); } catch(e) { return {}; }
   });
-  const [angelStatus,    setAngelStatus]    = useState("disconnected"); // disconnected|connecting|connected|error
-  const [angelToken,     setAngelToken]     = useState(null);
+  const [angelStatus, setAngelStatus] = useState(() => {
+    try { return localStorage.getItem("angel_jwt") ? "connected" : "disconnected"; } catch(e) { return "disconnected"; }
+  });
+  const [angelToken,     setAngelToken]     = useState(() => {
+    try { return localStorage.getItem("angel_jwt") || null; } catch(e) { return null; }
+  });
   const [angelFeedToken, setAngelFeedToken] = useState(null);
   const [angelLivePrice, setAngelLivePrice] = useState({}); // { "NIFTY_23000_CE_13APR2026": 45.50, ... }
   const [angelLiveMTM,   setAngelLiveMTM]   = useState({}); // { "NIFTY 23000 CE 13APR2026": { ltp, token, exchange } }
@@ -809,7 +813,8 @@ export default function BackOffice() {
       setAngelStatus("connected");
       notify("✅ Angel One connected! Live prices active.");
 
-      // Store token for manual fetch button
+      setAngelToken(tokens.jwtToken);
+      try { localStorage.setItem("angel_jwt", tokens.jwtToken); } catch(e) {}
       angelTokenRef.current = { jwtToken: tokens.jwtToken };
 
       // Start polling LTP every 5 seconds
@@ -830,13 +835,14 @@ export default function BackOffice() {
     setAngelToken(null);
     setAngelStatus("disconnected");
     setAngelLivePrice({});
+    try { localStorage.removeItem("angel_jwt"); } catch(e) {}
     notify("Disconnected from Angel One");
   };
 
   // ── Angel One: Poll LTP for all open positions ──
   // ── Angel One: Poll LTP for open positions ──────────────────
   const contractTokenMapRef = useRef({});
-  const angelTokenRef       = useRef({});
+  const angelTokenRef = useRef({ jwtToken: (() => { try { return localStorage.getItem("angel_jwt") || null; } catch(e) { return null; } })() });
 
   // Parse contract name to Angel One search query
   const contractToSearch = (contract) => {
