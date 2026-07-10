@@ -88,6 +88,25 @@ export default async function handler(req, res) {
       return res.status(200).json(await r.json());
     }
 
+    // SEARCH TOKEN — find Angel One symbol token for a contract
+    if (action === 'search_token') {
+      const { symbol, exchange } = payload;
+      try {
+        const r = await fetch(
+          'https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/searchscrip',
+          {
+            method: 'POST',
+            headers: ANGEL_H(apiKey, jwtToken),
+            body: JSON.stringify({ exchange: exchange || 'NFO', searchscrip: symbol })
+          }
+        );
+        const data = await r.json();
+        return res.status(200).json(data);
+      } catch(e) {
+        return res.status(200).json({ status: false, message: e.message, data: [] });
+      }
+    }
+
     // LTP
     if (action === 'ltp') {
       const r = await fetch(
