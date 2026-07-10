@@ -1128,6 +1128,17 @@ export default function BackOffice() {
       // Update live MTM state — this automatically updates P&L via getBhavClose
       setAngelLiveMTM(newMTM);
       setAngelMTMStatus("live");
+
+      // Debug: compare stored keys vs open position contract names
+      const { openPositions: dbgOpen } = applyFIFO(state.trades);
+      const dbgContracts = [...new Set(dbgOpen.map(p => p.contract))];
+      const dbgKeys = Object.keys(newMTM);
+      console.log("angelLiveMTM keys:", dbgKeys);
+      console.log("FIFO contract names:", dbgContracts);
+      const matched = dbgContracts.filter(c => newMTM[c]);
+      const unmatched = dbgContracts.filter(c => !newMTM[c]);
+      console.log("Matched:", matched.length, "Unmatched:", unmatched);
+
       notify(`✅ Closing prices updated for ${fetched}/${uniqueContracts.length} contracts`);
 
     } catch(e) {
@@ -1439,9 +1450,10 @@ export default function BackOffice() {
   // Get closing price for a contract from bhavcopy
   // getBhavClose: checks Angel One live MTM first, then bhavcopy
   const getBhavClose = (contract) => {
-    // Priority 1: Angel One live price (most accurate)
     if (angelLiveMTM[contract]?.ltp) return angelLiveMTM[contract].ltp;
-    // Priority 2: Manual bhavcopy upload
+    // Try trimmed/normalized key
+    const normalized = contract.trim().replace(/\s+/g, ' ');
+    if (angelLiveMTM[normalized]?.ltp) return angelLiveMTM[normalized].ltp;
     if (bhavLookup[contract]?.closePrice) return bhavLookup[contract].closePrice;
     return null;
   };
