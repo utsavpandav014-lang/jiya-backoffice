@@ -150,6 +150,7 @@ export default async function handler(req, res) {
             }
           );
           const redata = await relogin.json();
+          console.log('Relogin result:', redata.status, redata.message, 'totp used:', freshTotp);
           if (redata.status && redata.data?.jwtToken) {
             data = await doSearch(redata.data.jwtToken);
           }
