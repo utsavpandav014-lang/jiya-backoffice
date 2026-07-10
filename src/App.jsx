@@ -1450,10 +1450,12 @@ export default function BackOffice() {
   // Get closing price for a contract from bhavcopy
   // getBhavClose: checks Angel One live MTM first, then bhavcopy
   const getBhavClose = (contract) => {
+    // Direct lookup
     if (angelLiveMTM[contract]?.ltp) return angelLiveMTM[contract].ltp;
-    // Try trimmed/normalized key
-    const normalized = contract.trim().replace(/\s+/g, ' ');
+    // Try normalizing strike decimals: "ITC 280.00 PE" → "ITC 280 PE"
+    const normalized = contract.replace(/(\d+)\.0+\s/g, (m, n) => n + ' ');
     if (angelLiveMTM[normalized]?.ltp) return angelLiveMTM[normalized].ltp;
+    // Bhavcopy fallback
     if (bhavLookup[contract]?.closePrice) return bhavLookup[contract].closePrice;
     return null;
   };
@@ -1804,7 +1806,9 @@ export default function BackOffice() {
     const optType = (row.optType  || "").trim().toUpperCase();
 
     if (["OPTIONS","OPTION","OPT","OPTIDX","OPTSTK"].includes(type)) {
-      return `${symbol} ${strike} ${optType} ${expiry}`.replace(/\s+/g," ").trim();
+      // Normalize strike: "280.00" → "280", "23800.00" → "23800"
+      const strikeClean = strike.replace(/\.0+$/, '').replace(/\.00$/, '');
+      return `${symbol} ${strikeClean} ${optType} ${expiry}`.replace(/\s+/g," ").trim();
     } else if (["FUTURE","FUT","FUTURES","FUTIDX","FUTSTK"].includes(type)) {
       return `${symbol} FUT ${expiry}`.replace(/\s+/g," ").trim();
     } else {
