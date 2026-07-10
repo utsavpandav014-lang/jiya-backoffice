@@ -842,7 +842,55 @@ export default function BackOffice() {
   // ── Angel One: Poll LTP for all open positions ──
   // ── Angel One: Poll LTP for open positions ──────────────────
   const contractTokenMapRef = useRef({});
-  const angelTokenRef = useRef({ jwtToken: (() => { try { return localStorage.getItem("angel_jwt") || null; } catch(e) { return null; } })() });
+  const angelTokenRef    = useRef({ jwtToken: (() => { try { return localStorage.getItem("angel_jwt") || null; } catch(e) { return null; } })() });
+  const instrMasterRef   = useRef({}); // { "NIFTY28JUL2623800PE": { token:"12345", exchange:"NFO" } }
+
+  // Load instrument master from Angel One (no auth needed)
+  const loadInstrumentMaster = async () => {
+    if (Object.keys(instrMasterRef.current).length > 0) return; // already loaded
+    try {
+      const r = await fetch(ANGEL_PROXY, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "instrument_master", apiKey: angelCreds.apiKey })
+      });
+      const data = await r.json();
+      if (data.status && data.data?.length) {
+        const map = {};
+        data.data.forEach(x => {
+          map[x.symbol.toUpperCase()] = { token: x.token, exchange: x.exch_seg };
+        });
+        instrMasterRef.current = map;
+        console.log("Instrument master loaded:", Object.keys(map).length, "contracts");
+      }
+    } catch(e) {
+      console.log("Instrument master load error:", e.message);
+    }
+  };
+
+  // Match our contract name to Angel One symbol
+  // Our format: "NIFTY 23800 PE 14JUL2026"
+  // Angel One format: "NIFTY14JUL2623800PE"
+  const contractToAngelSymbol = (contract) => {
+    const parts  = contract.trim().split(/\s+/);
+    if (parts.length < 2) return null;
+    const name   = parts[0].toUpperCase();
+    const isFut  = contract.includes("FUT");
+    if (isFut) {
+      // "NIFTY FUT 28JUL2026" → "NIFTY28JUL26FUT"
+      const expiry = parts[2] || parts[1];
+      const exp6   = expiry.slice(0,5) + expiry.slice(7,9); // 28JUL2026 → 28JUL26
+      return name + exp6 + "FUT";
+    } else {
+      // "NIFTY 23800 PE 14JUL2026" → "NIFTY14JUL2623800PE"
+      const strike  = parseFloat(parts[1] || 0);
+      const optType = (parts[2] || "").toUpperCase();
+      const expiry  = parts[3] || "";
+      const exp6    = expiry.slice(0,5) + expiry.slice(7,9); // 14JUL2026 → 14JUL26
+      // Strike in Angel One symbols: 23800 (no decimals usually)
+      return name + exp6 + Math.round(strike) + optType;
+    }
+  };
 
   // Parse contract name to Angel One search query
   const contractToSearch = (contract) => {
@@ -913,14 +961,17 @@ export default function BackOffice() {
         const { openPositions: allOpen } = applyFIFO(state.trades);
         if (!allOpen.length) return;
 
-        // Build token map for unknown contracts via search_token
+        // Build token map for unknown contracts via instrument master
         const unknownContracts = allOpen.filter(p => !contractTokenMapRef.current[p.contract]);
-        for (let i = 0; i < Math.min(unknownContracts.length, 5); i++) {
-          const pos  = unknownContracts[i];
-          const info = contractToSearch(pos.contract);
-          const result = await fetchContractToken(jwtToken, apiKey, info);
-          if (result) contractTokenMapRef.current[pos.contract] = result;
-          await new Promise(r => setTimeout(r, 200)); // rate limit
+        if (unknownContracts.length > 0) {
+          await loadInstrumentMaster();
+          unknownContracts.forEach(pos => {
+            const angelSymbol = contractToAngelSymbol(pos.contract);
+            if (angelSymbol) {
+              const entry = instrMasterRef.current[angelSymbol];
+              if (entry) contractTokenMapRef.current[pos.contract] = { token: entry.token, exchange: entry.exchange };
+            }
+          });
         }
 
         // Build exchange tokens from known map
@@ -1006,6 +1057,9 @@ export default function BackOffice() {
     jwtToken = activeToken;
     notify("📋 Fetching live prices for open positions...");
     try {
+      // Load instrument master first (no auth needed)
+      await loadInstrumentMaster();
+
       // Get all unique open position contracts
       const { openPositions } = applyFIFO(state.trades);
       if (!openPositions.length) {
@@ -1013,85 +1067,63 @@ export default function BackOffice() {
         return;
       }
 
-      // Build unique contracts list
       const uniqueContracts = [...new Set(openPositions.map(p => p.contract))];
-      notify(`Fetching prices for ${uniqueContracts.length} contracts...`);
+      notify(`Looking up tokens for ${uniqueContracts.length} contracts...`);
+
+      // Map contracts to Angel One tokens using instrument master
+      const nfoTokens = [], bfoTokens = [], tokenToContract = {};
+      for (const contract of uniqueContracts) {
+        // Check existing token map first
+        let mapped = contractTokenMapRef.current[contract];
+        if (!mapped) {
+          // Try instrument master lookup
+          const angelSymbol = contractToAngelSymbol(contract);
+          if (angelSymbol) {
+            const entry = instrMasterRef.current[angelSymbol];
+            if (entry) {
+              mapped = { token: entry.token, exchange: entry.exchange };
+              contractTokenMapRef.current[contract] = mapped;
+              console.log(`Mapped ${contract} → ${angelSymbol} → token ${entry.token}`);
+            } else {
+              console.log(`Not in master: ${contract} → tried ${angelSymbol}`);
+            }
+          }
+        }
+        if (mapped?.token) {
+          const tok = mapped.token;
+          tokenToContract[tok] = contract;
+          if (mapped.exchange === "BFO") bfoTokens.push(tok);
+          else nfoTokens.push(tok);
+        }
+      }
+
+      console.log(`Found tokens: NFO=${nfoTokens.length} BFO=${bfoTokens.length}`);
+      notify(`Fetching LTP for ${nfoTokens.length + bfoTokens.length} contracts...`);
+
+      // Build batch LTP request
+      const exchangeTokens = {};
+      if (nfoTokens.length) exchangeTokens["NFO"] = nfoTokens;
+      if (bfoTokens.length) exchangeTokens["BFO"] = bfoTokens;
 
       const newMTM = { ...angelLiveMTM };
       let fetched = 0;
 
-      // Fetch LTP for each contract via search_token
-      for (const contract of uniqueContracts) {
-        try {
-          // Check if we already have token from live polling
-          const existing = contractTokenMapRef.current[contract];
-          if (existing?.token) {
-            // Use existing token to fetch latest price
-            const isBSE = ["SENSEX","BANKEX"].includes(contract.split(" ")[0]?.toUpperCase());
-            const exchange = isBSE ? "BFO" : "NFO";
-            const resp = await fetch(ANGEL_PROXY, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                action: "ltp", apiKey, jwtToken,
-                payload: { exchangeTokens: { [exchange]: [existing.token] } }
-              })
-            });
-            const data = await resp.json();
-            if (data.status && data.data?.fetched?.length) {
-              const ltp = data.data.fetched[0].ltp;
-              newMTM[contract] = { ltp, token: existing.token };
+      if (Object.keys(exchangeTokens).length > 0) {
+        const resp = await fetch(ANGEL_PROXY, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "ltp", apiKey, jwtToken, payload: { exchangeTokens } })
+        });
+        const data = await resp.json();
+        console.log("LTP response:", data.status, data.data?.fetched?.length, "fetched");
+        if (data.status && data.data?.fetched?.length) {
+          data.data.fetched.forEach(item => {
+            const contract = tokenToContract[item.symbolToken];
+            if (contract && item.ltp > 0) {
+              newMTM[contract] = { ltp: item.ltp, token: item.symbolToken };
               fetched++;
             }
-          } else {
-            // Search for token
-            const sym = contract.split(" ")[0];
-            const isBSE = ["SENSEX","BANKEX"].includes(sym?.toUpperCase());
-            const exchange = isBSE ? "BFO" : "NFO";
-            const r = await fetch(ANGEL_PROXY, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                action: "search_token", apiKey, jwtToken,
-                payload: { symbol: sym, exchange, query: contract },
-                // Pass creds for auto-relogin if token expired
-                loginPayload: { clientId: angelCreds.clientId, password: angelCreds.password, totp: angelCreds.totpSecret }
-              })
-            });
-            const d = await r.json();
-            console.log(`Search ${contract}:`, d.status, d.data?.length, d.data?.[0]?.symboltoken, d.data?.[0]?.ltp);
-            if (d.status && d.data?.length) {
-              const token = d.data[0].symboltoken;
-              const ltp   = d.data[0].ltp;
-              contractTokenMapRef.current[contract] = { token, exchange };
-              if (ltp && ltp > 0) {
-                newMTM[contract] = { ltp, token };
-                fetched++;
-              } else {
-                // Token found but no LTP in search result — fetch LTP separately
-                const ltpResp = await fetch(ANGEL_PROXY, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    action: "ltp", apiKey, jwtToken,
-                    payload: { exchangeTokens: { [exchange]: [token] } }
-                  })
-                });
-                const ltpData = await ltpResp.json();
-                console.log(`LTP for ${contract}:`, ltpData.status, ltpData.data?.fetched?.[0]?.ltp);
-                const fetchedLtp = ltpData.data?.fetched?.[0]?.ltp;
-                if (fetchedLtp && fetchedLtp > 0) {
-                  newMTM[contract] = { ltp: fetchedLtp, token };
-                  fetched++;
-                }
-              }
-            } else {
-              console.log(`No token found for ${contract} (${sym} on ${exchange}):`, d.message);
-            }
-          }
-          await new Promise(r => setTimeout(r, 150)); // rate limit delay
-        } catch(e) {
-          console.log("Closing price fetch error for", contract, e.message);
+          });
         }
       }
 
