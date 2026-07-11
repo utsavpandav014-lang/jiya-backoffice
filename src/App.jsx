@@ -1149,17 +1149,15 @@ export default function BackOffice() {
   // ── Auto-reconnect Angel One on page load ──
   useEffect(() => {
     const savedJwt = localStorage.getItem("angel_jwt");
-    if (savedJwt && angelCreds.apiKey) {
-      // Use stored JWT directly — no TOTP needed
+    const savedKey = JSON.parse(localStorage.getItem("angel_creds") || "{}").apiKey;
+    if (savedJwt && savedKey) {
       setAngelToken(savedJwt);
       setAngelStatus("connected");
       angelTokenRef.current = { jwtToken: savedJwt };
-      startLTPPolling(savedJwt, angelCreds.apiKey);
-      scheduleAutoBhavcopy(savedJwt, angelCreds.apiKey);
-      // Also load instrument master in background
-      setTimeout(() => loadInstrumentMaster(), 2000);
+      scheduleAutoBhavcopy(savedJwt, savedKey);
+      loadInstrumentMaster(); // preload instrument master
+      // Note: startLTPPolling is called after data loads (in loadAllData)
     } else if (angelCreds.clientId && angelCreds.password && angelCreds.totpSecret && angelCreds.apiKey) {
-      // No saved JWT — do full login
       connectAngel(angelCreds);
     }
   }, []); // eslint-disable-line
@@ -1279,6 +1277,15 @@ export default function BackOffice() {
       }));
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
+
+      // Start live prices AFTER trades are loaded
+      const savedJwt = localStorage.getItem("angel_jwt");
+      const savedKey = JSON.parse(localStorage.getItem("angel_creds") || "{}").apiKey;
+      if (savedJwt && savedKey) {
+        setTimeout(() => {
+          startLTPPolling(savedJwt, savedKey);
+        }, 500); // short delay so state is settled
+      }
     } catch (err) {
       console.error("Load error:", err);
       setDbError(err.message);
