@@ -2295,67 +2295,75 @@ export default function BackOffice() {
   );
 
   if (!auth) return (
-    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg, #dbeafe 0%, #ede9fe 50%, #fce7f3 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter','Segoe UI',sans-serif" }}>
-      <div style={{ background: "#fff", borderRadius: 24, padding: "52px 44px", width: 420, boxShadow: "0 24px 64px rgba(59,130,246,0.14), 0 4px 16px rgba(0,0,0,0.06)" }}>
-        <div style={{ textAlign: "center", marginBottom: 40 }}>
-          <div style={{ width: 64, height: 64, background: "linear-gradient(135deg, #3b82f6, #6366f1)", borderRadius: 20, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontSize: 28, boxShadow: "0 6px 20px rgba(59,130,246,0.35)" }}>📊</div>
-          <h1 style={{ color: "#1a202c", margin: 0, fontSize: 28, fontWeight: 800, letterSpacing: "-0.5px" }}>JIYA Back Office</h1>
-          <p style={{ color: "#718096", margin: "8px 0 0", fontSize: 14 }}>Authorized Personnel Only</p>
+    <div style={{ minHeight:"100vh", background:"#0f1117", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"'Inter','Segoe UI',sans-serif", position:"relative", overflow:"hidden" }}>
+      {/* Background grid */}
+      <div style={{ position:"absolute", inset:0, backgroundImage:"linear-gradient(rgba(59,130,246,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.04) 1px,transparent 1px)", backgroundSize:"40px 40px", pointerEvents:"none" }}/>
+      {/* Glow */}
+      <div style={{ position:"absolute", top:"20%", left:"50%", transform:"translateX(-50%)", width:400, height:400, background:"radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 70%)", pointerEvents:"none" }}/>
+
+      <div style={{ position:"relative", background:"#161b27", borderRadius:24, padding:"48px 44px", width:420, boxShadow:"0 24px 64px rgba(0,0,0,0.5), 0 0 0 1px rgba(59,130,246,0.15)", animation:"fade-up 0.4s ease-out both" }}>
+        <div style={{ textAlign:"center", marginBottom:36 }}>
+          <div style={{ width:64, height:64, background:"linear-gradient(135deg,#1e3a8a,#3b82f6)", borderRadius:20, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 18px", fontSize:28, boxShadow:"0 6px 24px rgba(59,130,246,0.4)" }}>📊</div>
+          <h1 style={{ color:"#e2e8f0", margin:0, fontSize:26, fontWeight:800, letterSpacing:"-0.5px" }}>JIYA Back Office</h1>
+          <p style={{ color:"#8892a4", margin:"8px 0 0", fontSize:13 }}>Authorized Personnel Only</p>
         </div>
 
         {lockoutUntil && Date.now() < lockoutUntil && (
-          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "12px 16px", marginBottom: 16, color: "#dc2626", fontSize: 13, textAlign: "center" }}>
+          <div style={{ background:"#f8717122", border:"1px solid #f8717144", borderRadius:10, padding:"12px 16px", marginBottom:16, color:"#f87171", fontSize:13, textAlign:"center" }}>
             🔒 Account temporarily locked. Please wait.
           </div>
         )}
 
-        {["User ID", "Password"].map((label, i) => (
-          <div key={i} style={{ marginBottom: 16 }}>
-            <label style={{ color: "#4a5568", fontSize: 12, fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase" }}>{label}</label>
+        {["User ID","Password"].map((label, i) => (
+          <div key={i} style={{ marginBottom:16 }}>
+            <label style={{ color:"#8892a4", fontSize:11, fontWeight:600, letterSpacing:1, textTransform:"uppercase" }}>{label}</label>
             <input
-              type={i === 1 ? "password" : "text"}
-              value={i === 0 ? loginForm.user : loginForm.pass}
-              onChange={(e) => setLoginForm((f) => ({ ...f, [i === 0 ? "user" : "pass"]: e.target.value, error: "" }))}
-              onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-              style={{ width: "100%", marginTop: 6, padding: "13px 16px", background: "#f8fafc", border: "1.5px solid #e2e8f0", borderRadius: 12, color: "#1a202c", fontSize: 15, outline: "none", boxSizing: "border-box", transition: "border-color 0.2s" }}
-              placeholder={i === 0 ? "Enter your User ID" : "Enter your password"}
-              autoComplete={i === 1 ? "current-password" : "username"}
+              type={i===1?"password":"text"}
+              value={i===0?loginForm.user:loginForm.pass}
+              onChange={(e)=>setLoginForm((f)=>({...f,[i===0?"user":"pass"]:e.target.value,error:""}))}
+              onKeyDown={(e)=>e.key==="Enter"&&handleLogin()}
+              style={{ width:"100%", marginTop:6, padding:"13px 16px", background:"#0f1117", border:"1.5px solid #2d3748", borderRadius:12, color:"#e2e8f0", fontSize:15, outline:"none", boxSizing:"border-box", transition:"border-color 0.2s" }}
+              placeholder={i===0?"Enter your User ID":"Enter your password"}
+              autoComplete={i===1?"current-password":"username"}
             />
           </div>
         ))}
+
         {loginForm.error && (
-          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 14px", marginBottom: 14, color: "#dc2626", fontSize: 13 }}>
+          <div style={{ background:"#f8717122", border:"1px solid #f8717144", borderRadius:8, padding:"10px 14px", marginBottom:14, color:"#f87171", fontSize:13 }}>
             ⚠️ {loginForm.error}
           </div>
         )}
-        <button onClick={handleLogin} style={{ width: "100%", padding: "15px", background: "linear-gradient(135deg, #3b82f6, #6366f1)", border: "none", borderRadius: 14, color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 16px rgba(59,130,246,0.3)", letterSpacing: 0.3 }}>
+
+        <button onClick={handleLogin} style={{ width:"100%", padding:"15px", background:"linear-gradient(135deg,#1e3a8a,#3b82f6)", border:"none", borderRadius:14, color:"#fff", fontSize:16, fontWeight:700, cursor:"pointer", boxShadow:"0 4px 20px rgba(59,130,246,0.35)", letterSpacing:0.3, marginTop:4 }}>
           Sign In →
         </button>
-        <p style={{ color: "#cbd5e0", fontSize: 11, textAlign: "center", marginTop: 24 }}>
+        <p style={{ color:"#4a5568", fontSize:11, textAlign:"center", marginTop:24 }}>
           This is a secured system. Unauthorized access is prohibited.
         </p>
       </div>
     </div>
   );
 
-  // ── Colors & Styles (Light Theme) ──
+  // ── Colors & Styles (Slate Pro Dark Theme) ──
   const C = {
-    bg:      "#f4f6f9",      // page background
-    sidebar: "#ffffff",      // sidebar white
-    card:    "#ffffff",      // card white
-    border:  "#e2e8f0",      // soft border
-    text:    "#1a202c",      // dark text
-    muted:   "#718096",      // grey text
-    accent:  "#3b82f6",      // blue
-    green:   "#16a34a",      // profit green
-    red:     "#dc2626",      // loss red
-    yellow:  "#d97706",      // warning amber
-    purple:  "#7c3aed",      // purple
+    bg:      "#0f1117",      // deep dark background
+    sidebar: "#161b27",      // sidebar — slightly lighter
+    card:    "#1e2535",      // card surface
+    border:  "#2d3748",      // subtle border
+    text:    "#e2e8f0",      // soft white text
+    muted:   "#8892a4",      // secondary text
+    accent:  "#3b82f6",      // blue accent
+    green:   "#10b981",      // emerald green — profit
+    red:     "#f87171",      // soft red — loss
+    yellow:  "#fbbf24",      // warm amber
+    purple:  "#a78bfa",      // light purple
+    blue:    "#60a5fa",      // light blue
   };
-  const card = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "20px 24px", boxShadow: "0 1px 4px rgba(0,0,0,0.06)" };
+  const card = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "20px 24px", boxShadow: "0 4px 16px rgba(0,0,0,0.3)" };
   const btn = (color = C.accent) => ({ background: color, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", cursor: "pointer", fontSize: 13, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6 });
-  const input = { width: "100%", background: "#f8fafc", border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px", color: C.text, fontSize: 14, outline: "none", boxSizing: "border-box" };
-  const badge = (color) => ({ background: color + "18", color: color, padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600 });
+  const input = { width: "100%", background: "#0f1117", border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px", color: C.text, fontSize: 14, outline: "none", boxSizing: "border-box" };
+  const badge = (color) => ({ background: color + "22", color: color, padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600 });
 
   // ── Sidebar ──
   const adminPages = [
@@ -3301,7 +3309,7 @@ export default function BackOffice() {
         </div>
               {isAdmin && (
                 <select value={pnlClientFilter} onChange={e => setPnlClientFilter(e.target.value)}
-                  style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
+                  style={{ background:"#0f1117", border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
                   <option value="all">All Clients</option>
                   {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
                 </select>
@@ -3333,15 +3341,15 @@ export default function BackOffice() {
               ))}
               {pnlDateMode === "month" && (
                 <input type="month" value={pnlMonth} onChange={e => setPnlMonth(e.target.value)}
-                  style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none", fontWeight:600 }}/>
+                  style={{ background:"#0f1117", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none", fontWeight:600 }}/>
               )}
               {pnlDateMode === "range" && (
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                   <input type="date" value={pnlDateFrom} onChange={e => setPnlDateFrom(e.target.value)}
-                    style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
+                    style={{ background:"#0f1117", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
                   <span style={{ color:C.muted }}>to</span>
                   <input type="date" value={pnlDateTo} onChange={e => setPnlDateTo(e.target.value)}
-                    style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
+                    style={{ background:"#0f1117", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
                 </div>
               )}
             </div>
@@ -3535,7 +3543,7 @@ export default function BackOffice() {
         <div style={{ marginBottom:8 }}>
           <div style={{ color:C.muted, fontSize:11, marginBottom:3 }}>{label}</div>
           <input type="number" step="any" value={val} onChange={onChange}
-            style={{ width:"100%", background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8,
+            style={{ width:"100%", background:"#0f1117", border:`1px solid ${C.border}`, borderRadius:8,
               padding:"6px 10px", fontSize:12, color: color===C.text ? "#1a202c" : color, outline:"none", boxSizing:"border-box" }}
             disabled={!chargesEdit} />
         </div>
@@ -3808,7 +3816,7 @@ export default function BackOffice() {
                 </div>
 
                 {/* Original message */}
-                <div style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:10, padding:"12px 16px", marginBottom:12 }}>
+                <div style={{ background:"#0f1117", border:`1px solid ${C.border}`, borderRadius:10, padding:"12px 16px", marginBottom:12 }}>
                   <div style={{ color:C.muted, fontSize:11, fontWeight:600, marginBottom:6, textTransform:"uppercase", letterSpacing:0.5 }}>Description</div>
                   <div style={{ color:C.text, fontSize:13, lineHeight:1.6 }}>{t.message}</div>
                   {t.attachments && t.attachments.length > 0 && (
@@ -3851,7 +3859,7 @@ export default function BackOffice() {
                     <input value={replyText} onChange={e => setReplyText(e.target.value)}
                       placeholder="Type your reply..."
                       onKeyDown={e => e.key==="Enter" && replyTicket(t.id)}
-                      style={{ ...input, flex:1, background:"#f8fafc" }} />
+                      style={{ ...input, flex:1, background:"#0f1117" }} />
                     <button style={btn(C.accent)} onClick={() => replyTicket(t.id)}>
                       <Icon name="reply" size={14}/> Reply
                     </button>
@@ -3912,12 +3920,12 @@ export default function BackOffice() {
           <div style={{ ...card, padding:"14px 20px", marginBottom:16, display:"flex", gap:12, flexWrap:"wrap", alignItems:"center" }}>
             <span style={{ color:C.muted, fontSize:12, fontWeight:600 }}>FILTER BY:</span>
             <select value={auditClientFilter} onChange={e=>setAuditClientFilter_(e.target.value)}
-              style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
+              style={{ background:"#0f1117", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
               <option value="all">All Clients</option>
               {visibleClients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
             </select>
             <select value={auditActionFilter} onChange={e=>setAuditActionFilter_(e.target.value)}
-              style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
+              style={{ background:"#0f1117", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
               <option value="all">All Actions</option>
               <option value="ADDED">Added</option>
               <option value="EDITED">Edited</option>
@@ -3937,7 +3945,7 @@ export default function BackOffice() {
             <div style={{ ...card, padding:0, overflow:"hidden" }}>
               <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
                 <thead>
-                  <tr style={{ background:"#f8fafc" }}>
+                  <tr style={{ background:"#0f1117" }}>
                     {["Date/Time","Admin","Action","Client","Details"].map(h=>(
                       <th key={h} style={{ textAlign:"left", padding:"10px 16px", color:C.muted, fontSize:11,
                         fontWeight:600, textTransform:"uppercase", letterSpacing:0.5, borderBottom:`1px solid ${C.border}` }}>{h}</th>
@@ -4167,7 +4175,7 @@ export default function BackOffice() {
       );
     }
     const overlay = { position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 };
-    const box = { background: "#fff", border: `1px solid ${C.border}`, borderRadius: 16, padding: 32, width: 480, maxWidth: "90vw", boxShadow: "0 20px 60px rgba(0,0,0,0.15)" };
+    const box = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: 32, width: 480, maxWidth: "90vw", boxShadow: "0 20px 60px rgba(0,0,0,0.15)" };
     const field = (label, key, obj, setObj, type = "text", opts = null) => (
       <div style={{ marginBottom: 14 }}>
         <label style={{ color: C.muted, fontSize: 12, display: "block", marginBottom: 5 }}>{label}</label>
@@ -4363,7 +4371,7 @@ export default function BackOffice() {
               </div>
             ) : (
               <input type="file" accept=".csv,.txt" onChange={handleFileUpload}
-                style={{ color: C.text, fontSize: 13, background: "#f8fafc", border: `1px solid ${C.border}`,
+                style={{ color: C.text, fontSize: 13, background: "#0f1117", border: `1px solid ${C.border}`,
                   borderRadius: 8, padding: "10px 14px", width: "100%", boxSizing: "border-box", cursor: "pointer" }} />
             )}
           </div>
@@ -4464,7 +4472,7 @@ export default function BackOffice() {
               File name format: <b style={{color:C.text}}>BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv</b>
             </div>
             <input type="file" accept=".csv" onChange={handleBhavUpload}
-              style={{ color:C.text, fontSize:13, background:"#f8fafc", border:`1px solid ${C.border}`,
+              style={{ color:C.text, fontSize:13, background:"#0f1117", border:`1px solid ${C.border}`,
                 borderRadius:8, padding:"10px 14px", width:"100%", boxSizing:"border-box", cursor:"pointer" }} />
           </div>
 
@@ -4614,7 +4622,7 @@ export default function BackOffice() {
               {["Trade Discrepancy","Margin Query","Account Statement","P&L Issue","Withdrawal/Deposit","Technical Issue","Bhavcopy/Settlement","Other"].map(type => (
                 <button key={type} onClick={() => setNewTicket(s=>({...s,issueType:type}))}
                   style={{ padding:"10px 12px", borderRadius:8, border:`1.5px solid ${newTicket.issueType===type?C.accent:C.border}`,
-                    background: newTicket.issueType===type?C.accent+"10":"#f8fafc",
+                    background: newTicket.issueType===type?C.accent+"10":"#0f1117",
                     color: newTicket.issueType===type?C.accent:C.muted,
                     fontWeight: newTicket.issueType===type?700:400, fontSize:13, cursor:"pointer", textAlign:"left" }}>
                   {type}
@@ -4635,7 +4643,7 @@ export default function BackOffice() {
           {/* File attachment name (simulated — no actual file upload in browser artifact) */}
           <div style={{ marginBottom:20 }}>
             <label style={{ color:C.muted, fontSize:12, fontWeight:600, display:"block", marginBottom:6, textTransform:"uppercase", letterSpacing:0.5 }}>Attach Files (optional)</label>
-            <div style={{ border:`2px dashed ${C.border}`, borderRadius:10, padding:"16px", textAlign:"center", background:"#f8fafc", cursor:"pointer" }}
+            <div style={{ border:`2px dashed ${C.border}`, borderRadius:10, padding:"16px", textAlign:"center", background:"#0f1117", cursor:"pointer" }}
               onClick={() => {
                 const name = prompt("Enter file name to attach (e.g. screenshot.png):");
                 if (name) setNewTicket(s=>({...s,attachments:[...(s.attachments||[]),name]}));
@@ -4723,7 +4731,7 @@ export default function BackOffice() {
 
         /* ── Skeleton shimmer ── */
         .skeleton {
-          background: linear-gradient(90deg,#f1f5f9 25%,#e2e8f0 50%,#f1f5f9 75%);
+          background: linear-gradient(90deg,#1e2535 25%,#2d3748 50%,#1e2535 75%);
           background-size: 400px 100%;
           animation: skeleton-shine 1.4s ease-in-out infinite;
           border-radius: 6px;
@@ -4775,7 +4783,7 @@ export default function BackOffice() {
           .jiya-sidebar { display: none !important; }
         }
         table { width: 100%; }
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; } ::-webkit-scrollbar-track { background: #161b27; } ::-webkit-scrollbar-thumb { background: #2d3748; border-radius: 3px; } ::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
