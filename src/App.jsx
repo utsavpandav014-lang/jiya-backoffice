@@ -1198,11 +1198,11 @@ export default function BackOffice() {
     return () => clearInterval(keepAlive);
   }, []);
 
-  // ── Reload when user comes back to tab ──
+  // ── Silent background refresh when user returns to tab ──
   useEffect(() => {
     const handleVisibility = () => {
       if (document.visibilityState === "visible" && SUPABASE_CONFIGURED) {
-        loadAllData();
+        loadAllData(true); // silent = no loading screen
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);
@@ -1231,8 +1231,8 @@ export default function BackOffice() {
     lockMonth();
   }, [state.lockedMonths]);
 
-  const loadAllData = async () => {
-    setDbLoading(true);
+  const loadAllData = async (silent = false) => {
+    if (!silent) setDbLoading(true);
     setDbError(null);
     try {
       // ── Paginated fetch — loads ALL rows regardless of count ──
@@ -2709,26 +2709,25 @@ export default function BackOffice() {
                   const clientLines = clientsToShow.map((cl, ci) => ({
                     name: (cl.name||cl.id).split(" ")[0],
                     color: CHART_COLORS[ci % CHART_COLORS.length],
-                    pts: months6.map(m => {
-                      const mT = allTrades.filter(t => t.clientId===cl.id && (t.date||"").slice(0,7)===m);
-                      let bv=0,sv=0;
-                      mT.forEach(t => { const v=(t.price||0)*(t.qty||0); if(t.side==="BUY") bv+=v; else sv+=v; });
-                      return sv - bv;
-                    })
+                    pts: months6.map(m => clientNetPnlForMonth(cl.id, m))
                   }));
 
                   const allPts = clientLines.flatMap(c=>c.pts);
-                  const maxV   = Math.max(...allPts.map(Math.abs), 1);
+                  const maxV   = Math.max(...allPts, 1);
+                  const minV   = Math.min(...allPts, 0);
+                  const range  = Math.max(maxV - minV, 1);
                   const H=140, W=560, pad=8;
                   const xStep = (W-pad*2)/(months6.length-1);
-                  const toY   = v => (H/2) - (v/maxV)*(H/2-12);
+                  // toY: higher value = lower Y (SVG coordinates)
+                  // positive = above center, negative = below center
+                  const toY = v => pad + 12 + ((maxV - v) / range) * (H - 24);
                   const monthLabels = months6.map(m => new Date(m+"-01").toLocaleString("default",{month:"short"}));
 
                   return (
                     <div>
                       <svg width="100%" height={H+28} viewBox={`0 0 ${W} ${H+28}`} style={{display:"block"}}>
                         {/* Zero line */}
-                        <line x1={pad} y1={H/2} x2={W-pad} y2={H/2} stroke={C.border} strokeWidth="1" strokeDasharray="4,3"/>
+                        <line x1={pad} y1={toY(0)} x2={W-pad} y2={toY(0)} stroke={C.border} strokeWidth="1" strokeDasharray="4,3"/>
                         {/* Grid */}
                         {[0.4,0.8].map(r=>[
                           <line key={"u"+r} x1={pad} y1={H/2-r*H/2} x2={W-pad} y2={H/2-r*H/2} stroke={C.border} strokeWidth="0.5" strokeOpacity="0.5"/>,
