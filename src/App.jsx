@@ -1146,9 +1146,20 @@ export default function BackOffice() {
     }
   };
 
-  // ── Auto-reconnect Angel One on page load if creds saved ──
+  // ── Auto-reconnect Angel One on page load ──
   useEffect(() => {
-    if (angelCreds.clientId && angelCreds.password && angelCreds.totpSecret && angelCreds.apiKey) {
+    const savedJwt = localStorage.getItem("angel_jwt");
+    if (savedJwt && angelCreds.apiKey) {
+      // Use stored JWT directly — no TOTP needed
+      setAngelToken(savedJwt);
+      setAngelStatus("connected");
+      angelTokenRef.current = { jwtToken: savedJwt };
+      startLTPPolling(savedJwt, angelCreds.apiKey);
+      scheduleAutoBhavcopy(savedJwt, angelCreds.apiKey);
+      // Also load instrument master in background
+      setTimeout(() => loadInstrumentMaster(), 2000);
+    } else if (angelCreds.clientId && angelCreds.password && angelCreds.totpSecret && angelCreds.apiKey) {
+      // No saved JWT — do full login
       connectAngel(angelCreds);
     }
   }, []); // eslint-disable-line
