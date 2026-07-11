@@ -698,6 +698,8 @@ function useCountUp(target, duration = 900) {
 
 export default function BackOffice() {
   const [state, setState] = useState(INITIAL_STATE);
+  // Keep tradesRef always up to date so polling closures have fresh data
+  useEffect(() => { tradesRef.current = state.trades || []; }, [state.trades]);
   const [dbLoading, setDbLoading] = useState(SUPABASE_CONFIGURED); // show loading if DB configured
   const [dbError, setDbError] = useState(null);
   const [syncStatus, setSyncStatus] = useState("idle"); // "idle"|"saving"|"saved"|"error"
@@ -843,7 +845,8 @@ export default function BackOffice() {
   // ── Angel One: Poll LTP for open positions ──────────────────
   const contractTokenMapRef = useRef({});
   const angelTokenRef    = useRef({ jwtToken: (() => { try { return localStorage.getItem("angel_jwt") || null; } catch(e) { return null; } })() });
-  const instrMasterRef   = useRef({}); // { "NIFTY28JUL2623800PE": { token:"12345", exchange:"NFO" } }
+  const instrMasterRef   = useRef({});
+  const tradesRef        = useRef([]); // always holds latest state.trades
 
   // Load instrument master from Angel One (no auth needed)
   const loadInstrumentMaster = async () => {
@@ -955,8 +958,8 @@ export default function BackOffice() {
         const inMarket = (h > 9 || (h === 9 && m >= 14)) && (h < 15 || (h === 15 && m < 31));
         // Allow after hours for testing too - just fetch latest available price
         
-        // Get all unique open position contracts
-        const { openPositions: allOpen } = applyFIFO(state.trades);
+        // Get all unique open position contracts from latest trades
+        const { openPositions: allOpen } = applyFIFO(tradesRef.current);
         if (!allOpen.length) return;
 
         // Build token map for unknown contracts via instrument master
@@ -1059,7 +1062,7 @@ export default function BackOffice() {
       await loadInstrumentMaster();
 
       // Get all unique open position contracts
-      const { openPositions } = applyFIFO(state.trades);
+      const { openPositions } = applyFIFO(tradesRef.current);
       if (!openPositions.length) {
         notify("No open positions — nothing to fetch");
         return;
@@ -1130,7 +1133,7 @@ export default function BackOffice() {
       setAngelMTMStatus("live");
 
       // Debug: compare stored keys vs open position contract names
-      const { openPositions: dbgOpen } = applyFIFO(state.trades);
+      const { openPositions: dbgOpen } = applyFIFO(tradesRef.current);
       const dbgContracts = [...new Set(dbgOpen.map(p => p.contract))];
       const dbgKeys = Object.keys(newMTM);
       console.log("angelLiveMTM keys:", dbgKeys);
