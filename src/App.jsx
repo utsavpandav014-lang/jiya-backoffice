@@ -3288,7 +3288,13 @@ export default function BackOffice() {
             const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
             const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
             const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
-            const grandNet      = grandRealized - grandExpenses - grandSoftware - grandInterest;
+            // Live MTM on open positions
+            const grandMTM = open.reduce((s, pos) => {
+              const close = getBhavClose(pos.contract);
+              if (close === null) return s;
+              return s + (pos.side === "SELL" ? (pos.avgPrice - close) : (close - pos.avgPrice)) * pos.netQty;
+            }, 0);
+            const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
@@ -3300,13 +3306,14 @@ export default function BackOffice() {
                 )}
 
                 {/* Grand summary cards */}
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(6,1fr)", gap:12, marginBottom:24 }}>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
                   {[
                     { label:"Realized P&L",     val:grandRealized,  color:grandRealized>=0?C.green:C.red },
                     { label:"Expenses",          val:-grandExpenses, color:C.yellow },
                     { label:"Software Charges",  val:-grandSoftware, color:C.purple },
                     { label:"Interest",          val:-grandInterest, color:C.red },
                     { label:"Net P&L",           val:grandNet,       color:grandNet>=0?C.green:C.red, big:true },
+                    { label:"Live MTM",          val:grandMTM,       color:grandMTM>=0?C.green:C.red },
                     { label:"Open Positions",    val:open.length,    color:C.accent, count:true },
                   ].map(s => (
                     <div key={s.label} style={{ background:C.bg, borderRadius:10, padding:"14px 16px",
@@ -3336,6 +3343,16 @@ export default function BackOffice() {
                   <span>=</span>
                   <span style={{ color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</span>
                   <span style={{ color:C.muted }}>(Net P&L)</span>
+                  {grandMTM !== 0 && (
+                    <>
+                      <span style={{ color:C.muted, marginLeft:8 }}>+</span>
+                      <span style={{ color:grandMTM>=0?C.green:C.red, fontWeight:600 }}>₹{grandMTM.toFixed(2)}</span>
+                      <span style={{ color:C.muted }}>(Live MTM)</span>
+                      <span>=</span>
+                      <span style={{ color:(grandNet+grandMTM)>=0?C.green:C.red, fontWeight:800, fontSize:15 }}>₹{(grandNet+grandMTM).toFixed(2)}</span>
+                      <span style={{ color:C.muted }}>(Total incl. Open)</span>
+                    </>
+                  )}
                 </div>
 
                 {/* Month-by-month breakdown */}
