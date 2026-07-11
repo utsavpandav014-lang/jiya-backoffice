@@ -1619,7 +1619,58 @@ export default function BackOffice() {
   const logout = () => { setAuth(null); setPage("dashboard"); setLoginForm({ user: "", pass: "", error: "" }); };
 
   // ── FIFO ──
-  const { openPositions, closedPositions } = applyFIFO(state.trades);
+  const { openPositions: rawOpen, closedPositions: rawClosed } = applyFIFO(state.trades);
+
+  // ── Auto-expiry: square off expired positions at closing/zero price ──────────
+  const today = new Date();
+  today.setHours(0,0,0,0);
+
+  const syntheticTrades = [];
+  rawOpen.forEach(pos => {
+    // Parse expiry from contract name
+    // Format: "SENSEX 81000 CE 09JUL2026" or "NIFTY FUT 28JUL2026"
+    const parts   = pos.contract.trim().split(/\s+/);
+    const expiryStr = parts[parts.length - 1]; // last part is always expiry
+    if (!expiryStr || expiryStr.length < 9) return;
+
+    // Parse "09JUL2026" → Date
+    const months = {JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
+    const day   = parseInt(expiryStr.slice(0,2));
+    const mon   = months[expiryStr.slice(2,5).toUpperCase()];
+    const year  = parseInt(expiryStr.slice(5));
+    if (isNaN(day) || mon === undefined || isNaN(year)) return;
+
+    const expiryDate = new Date(year, mon, day);
+    expiryDate.setHours(0,0,0,0);
+
+    // If expiry has passed → square off at closing price (or 0 for options)
+    if (expiryDate < today) {
+      const closePrice = getBhavClose(pos.contract) ?? 0;
+      const closeSide  = pos.side === "SELL" ? "BUY" : "SELL";
+      const expiryDateStr = `${year}-${String(mon+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      syntheticTrades.push({
+        id:       `EXPIRY_${pos.clientId}_${pos.contract}_AUTO`,
+        clientId: pos.clientId,
+        contract: pos.contract,
+        side:     closeSide,
+        qty:      pos.netQty,
+        price:    closePrice,
+        date:     expiryDateStr,
+        time:     "15:30:00",
+        source:   "expiry_auto",
+        _isExpiry: true,
+      });
+    }
+  });
+
+  // Re-run FIFO if we have synthetic trades
+  const allTradesWithExpiry = syntheticTrades.length > 0
+    ? [...state.trades, ...syntheticTrades]
+    : state.trades;
+
+  const { openPositions, closedPositions } = syntheticTrades.length > 0
+    ? applyFIFO(allTradesWithExpiry)
+    : { openPositions: rawOpen, closedPositions: rawClosed };
 
   // ── Helpers ──
   const clientTrades = (cid) => state.trades.filter((t) => t.clientId === cid);
@@ -2402,7 +2453,14 @@ export default function BackOffice() {
         const expenses = getMonthlyCharges(clientId, yearMonth);
         const software  = getMonthlyInterest(clientId, yearMonth + "_SW");
         const interest  = getMonthlyInterest(clientId, yearMonth);
-        return realized - expenses - software - interest;
+        // Include live MTM for open positions
+        const openForClient = clientOpenPos(clientId);
+        const liveMTM = openForClient.reduce((s, pos) => {
+          const close = getBhavClose(pos.contract);
+          if (close === null) return s;
+          return s + (pos.side === "SELL" ? (pos.avgPrice - close) : (close - pos.avgPrice)) * pos.netQty;
+        }, 0);
+        return realized - expenses - software - interest + liveMTM;
       };
 
       // This Month Net P&L — sum across all visible clients (matches P&L page logic)
@@ -3308,13 +3366,13 @@ export default function BackOffice() {
                 {/* Grand summary cards */}
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
                   {[
-                    { label:"Realized P&L",     val:grandRealized,  color:grandRealized>=0?C.green:C.red },
-                    { label:"Expenses",          val:-grandExpenses, color:C.yellow },
-                    { label:"Software Charges",  val:-grandSoftware, color:C.purple },
-                    { label:"Interest",          val:-grandInterest, color:C.red },
-                    { label:"Net P&L",           val:grandNet,       color:grandNet>=0?C.green:C.red, big:true },
-                    { label:"Live MTM",          val:grandMTM,       color:grandMTM>=0?C.green:C.red },
-                    { label:"Open Positions",    val:open.length,    color:C.accent, count:true },
+                    { label:"Realized P&L",     val:grandRealized,         color:grandRealized>=0?C.green:C.red },
+                    { label:"Expenses",          val:-grandExpenses,        color:C.yellow },
+                    { label:"Software Charges",  val:-grandSoftware,        color:C.purple },
+                    { label:"Interest",          val:-grandInterest,        color:C.red },
+                    { label:"Live MTM",          val:grandMTM,              color:grandMTM>=0?C.green:C.red },
+                    { label:"Net P&L",           val:grandNet+grandMTM,     color:(grandNet+grandMTM)>=0?C.green:C.red, big:true },
+                    { label:"Open Positions",    val:open.length,           color:C.accent, count:true },
                   ].map(s => (
                     <div key={s.label} style={{ background:C.bg, borderRadius:10, padding:"14px 16px",
                       border:`1px solid ${s.big ? s.color+"66" : C.border}`,
@@ -3341,18 +3399,11 @@ export default function BackOffice() {
                   <span style={{ color:C.red, fontWeight:600 }}>₹{grandInterest.toFixed(2)}</span>
                   <span>(Interest)</span>
                   <span>=</span>
-                  <span style={{ color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</span>
+                  <span style={{ color:grandMTM>=0?C.green:C.red, fontWeight:600 }}>₹{grandMTM.toFixed(2)}</span>
+                  <span>(Live MTM)</span>
+                  <span>=</span>
+                  <span style={{ color:(grandNet+grandMTM)>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{(grandNet+grandMTM).toFixed(2)}</span>
                   <span style={{ color:C.muted }}>(Net P&L)</span>
-                  {grandMTM !== 0 && (
-                    <>
-                      <span style={{ color:C.muted, marginLeft:8 }}>+</span>
-                      <span style={{ color:grandMTM>=0?C.green:C.red, fontWeight:600 }}>₹{grandMTM.toFixed(2)}</span>
-                      <span style={{ color:C.muted }}>(Live MTM)</span>
-                      <span>=</span>
-                      <span style={{ color:(grandNet+grandMTM)>=0?C.green:C.red, fontWeight:800, fontSize:15 }}>₹{(grandNet+grandMTM).toFixed(2)}</span>
-                      <span style={{ color:C.muted }}>(Total incl. Open)</span>
-                    </>
-                  )}
                 </div>
 
                 {/* Month-by-month breakdown */}
