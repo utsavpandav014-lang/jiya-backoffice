@@ -193,11 +193,17 @@ export default async function handler(req, res) {
 
     // LTP
     if (action === 'ltp') {
-      const r = await fetch(
-        'https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/',
-        { method: 'POST', headers: ANGEL_H(apiKey, jwtToken), body: JSON.stringify({ mode: 'LTP', exchangeTokens: payload.exchangeTokens }) }
-      );
-      return res.status(200).json(await r.json());
+      try {
+        const r = await fetch(
+          'https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/',
+          { method: 'POST', headers: ANGEL_H(apiKey, jwtToken), body: JSON.stringify({ mode: 'LTP', exchangeTokens: payload.exchangeTokens }) }
+        );
+        const text = await r.text();
+        if (text.trim().startsWith('<')) return res.status(200).json({ status: false, message: 'Session expired', data: { fetched: [] } });
+        return res.status(200).json(JSON.parse(text));
+      } catch(e) {
+        return res.status(200).json({ status: false, message: e.message, data: { fetched: [] } });
+      }
     }
 
     // CLOSING PRICES - fetch historical EOD prices for open positions
