@@ -82,7 +82,7 @@ export default async function handler(req, res) {
       }
 
       const r = await fetch(
-        'https://apiconnect.angelbroking.com/rest/auth/angelbroking/user/v1/loginByPassword',
+        'https://apiconnect.angelone.in/rest/auth/angelbroking/user/v1/loginByPassword',
         { method: 'POST', headers: ANGEL_H(apiKey), body: JSON.stringify({ clientcode: clientId, password, totp: totpCode }) }
       );
       const text = await r.text();
@@ -116,7 +116,7 @@ export default async function handler(req, res) {
 
       const doSearch = async (jwt) => {
         const r = await fetch(
-          'https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/searchscrip',
+          'https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/searchscrip',
           {
             method: 'POST',
             headers: ANGEL_H(apiKey, jwt),
@@ -159,7 +159,7 @@ export default async function handler(req, res) {
             } catch(e) {}
           }
           const relogin = await fetch(
-            'https://apiconnect.angelbroking.com/rest/auth/angelbroking/user/v1/loginByPassword',
+            'https://apiconnect.angelone.in/rest/auth/angelbroking/user/v1/loginByPassword',
             {
               method: 'POST',
               headers: ANGEL_H(apiKey),
@@ -189,7 +189,7 @@ export default async function handler(req, res) {
     // LTP
     if (action === 'ltp') {
       const r = await fetch(
-        'https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/quote/',
+        'https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/',
         { method: 'POST', headers: ANGEL_H(apiKey, jwtToken), body: JSON.stringify({ mode: 'LTP', exchangeTokens: payload.exchangeTokens }) }
       );
       return res.status(200).json(await r.json());
@@ -210,7 +210,7 @@ export default async function handler(req, res) {
       for (const pos of positions) {
         try {
           const r = await fetch(
-            'https://apiconnect.angelbroking.com/rest/secure/angelbroking/historical/v1/getCandleData',
+            'https://apiconnect.angelone.in/rest/secure/angelbroking/historical/v1/getCandleData',
             {
               method: 'POST', headers: ANGEL_H(apiKey, jwtToken),
               body: JSON.stringify({
