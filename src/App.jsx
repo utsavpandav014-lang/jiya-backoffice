@@ -1079,13 +1079,42 @@ export default function BackOffice() {
         if (!mapped) {
           const result = contractToAngelSymbol(contract);
           if (result) {
-            const entry = instrMasterRef.current[result.symbol];
+            // Try primary format
+            let entry = instrMasterRef.current[result.symbol];
+            // Try alternate formats for SENSEX/BFO contracts
+            if (!entry) {
+              // Try without leading zero in day: SENSEX9JUL2681000CE
+              const alt1 = result.symbol.replace(/^([A-Z]+)0(\d)/, '$1$2');
+              entry = instrMasterRef.current[alt1];
+              if (entry) console.log(`Mapped via alt1: ${contract} → ${alt1}`);
+            }
+            if (!entry) {
+              // Try with decimal strike: SENSEX09JUL2681000.00CE
+              const parts = contract.trim().split(/\s+/);
+              const strike = parts[1] ? parseFloat(parts[1]) : 0;
+              const alt2 = result.symbol.replace(Math.round(strike).toString(), strike.toFixed(2).replace('.',''));
+              entry = instrMasterRef.current[alt2];
+              if (entry) console.log(`Mapped via alt2: ${contract} → ${alt2}`);
+            }
             if (entry) {
               mapped = { token: entry.token, exchange: result.exchange };
               contractTokenMapRef.current[contract] = mapped;
-              console.log(`Mapped ${contract} → ${result.symbol} → token ${entry.token}`);
+              console.log(`Mapped ${contract} → token ${entry.token}`);
             } else {
-              console.log(`Not in master: ${contract} → tried ${result.symbol}`);
+              // Last resort: search by name field containing symbol
+              const sym = contract.split(" ")[0].toUpperCase();
+              const parts2 = contract.trim().split(/\s+/);
+              const strike2 = parts2[1] ? Math.round(parseFloat(parts2[1])).toString() : "";
+              const optType2 = parts2[2] || "";
+              const allKeys = Object.keys(instrMasterRef.current);
+              const found = allKeys.find(k => k.startsWith(sym) && k.includes(strike2) && k.endsWith(optType2));
+              if (found) {
+                mapped = { token: instrMasterRef.current[found].token, exchange: result.exchange };
+                contractTokenMapRef.current[contract] = mapped;
+                console.log(`Mapped via search: ${contract} → ${found} → token ${mapped.token}`);
+              } else {
+                console.log(`Not in master: ${contract} → tried ${result.symbol}`);
+              }
             }
           }
         }
