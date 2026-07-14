@@ -11,11 +11,15 @@ export default async function handler(req, res) {
   const { action, payload, apiKey, jwtToken } = req.body;
 
   const ANGEL_H = (key, jwt) => ({
-    'Content-Type': 'application/json', 'Accept': 'application/json',
-    'X-UserType': 'USER', 'X-SourceID': 'WEB',
-    'X-ClientLocalIP': '192.168.1.1', 'X-ClientPublicIP': '106.193.147.98',
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'X-UserType': 'USER',
+    'X-SourceID': 'WEB',
+    'X-ClientLocalIP': '192.168.1.1',
+    'X-ClientPublicIP': '106.193.147.98',
     'X-MACAddress': 'fe80::216e:6507:4b90:3719',
     'X-PrivateKey': key,
+    'X-Api-Key': key,  // Angel One sometimes uses this header name
     ...(jwt ? { 'Authorization': `Bearer ${jwt}` } : {}),
   });
 
@@ -87,7 +91,8 @@ export default async function handler(req, res) {
       );
       const text = await r.text();
       let json;
-      try { json = JSON.parse(text); } catch(e) { return res.status(200).json({ status: false, message: 'Angel One returned invalid response: ' + text.slice(0,100) }); }
+      try { json = JSON.parse(text); } catch(e) { return res.status(200).json({ status: false, message: 'Angel One returned invalid response: ' + text.slice(0,200) }); }
+      console.log('Angel One login response:', JSON.stringify(json).slice(0, 300));
       return res.status(200).json(json);
     }
 
