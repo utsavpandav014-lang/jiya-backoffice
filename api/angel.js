@@ -85,18 +85,23 @@ export default async function handler(req, res) {
         'https://apiconnect.angelbroking.com/rest/auth/angelbroking/user/v1/loginByPassword',
         { method: 'POST', headers: ANGEL_H(apiKey), body: JSON.stringify({ clientcode: clientId, password, totp: totpCode }) }
       );
-      return res.status(200).json(await r.json());
+      const text = await r.text();
+      let json;
+      try { json = JSON.parse(text); } catch(e) { return res.status(200).json({ status: false, message: 'Angel One returned invalid response: ' + text.slice(0,100) }); }
+      return res.status(200).json(json);
     }
 
     // INSTRUMENT MASTER — fetch Angel One scrip master (no auth needed)
     if (action === 'instrument_master') {
       try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
         const r = await fetch(
           'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json',
-          { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }
+          { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }, signal: controller.signal }
         );
+        clearTimeout(timeout);
         const data = await r.json();
-        // Filter to only NFO + BFO to reduce size
         const filtered = data.filter(x => x.exch_seg === 'NFO' || x.exch_seg === 'BFO');
         return res.status(200).json({ status: true, data: filtered });
       } catch(e) {
