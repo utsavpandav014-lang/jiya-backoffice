@@ -778,7 +778,9 @@ export default function BackOffice() {
   });
   const [angelFeedToken, setAngelFeedToken] = useState(null);
   const [angelLivePrice, setAngelLivePrice] = useState({}); // { "NIFTY_23000_CE_13APR2026": 45.50, ... }
-  const [angelLiveMTM,   setAngelLiveMTM]   = useState({}); // { "NIFTY 23000 CE 13APR2026": { ltp, token, exchange } }
+  const [angelLiveMTM, setAngelLiveMTM] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("angel_live_mtm") || "{}"); } catch(e) { return {}; }
+  });
   const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
 
@@ -1010,6 +1012,7 @@ export default function BackOffice() {
           });
           setAngelLiveMTM(newMTM);
           setAngelMTMStatus("live");
+          try { localStorage.setItem("angel_live_mtm", JSON.stringify(newMTM)); } catch(e) {}
 
 
         }
@@ -1160,6 +1163,7 @@ export default function BackOffice() {
       // Update live MTM state — this automatically updates P&L via getBhavClose
       setAngelLiveMTM(newMTM);
       setAngelMTMStatus("live");
+      try { localStorage.setItem("angel_live_mtm", JSON.stringify(newMTM)); } catch(e) {}
 
       // Debug: compare stored keys vs open position contract names
       const { openPositions: dbgOpen } = applyFIFO(tradesRef.current);
