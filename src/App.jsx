@@ -779,7 +779,11 @@ export default function BackOffice() {
   const [angelFeedToken, setAngelFeedToken] = useState(null);
   const [angelLivePrice, setAngelLivePrice] = useState({}); // { "NIFTY_23000_CE_13APR2026": 45.50, ... }
   const [angelLiveMTM, setAngelLiveMTM] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("angel_live_mtm") || "{}"); } catch(e) { return {}; }
+    try {
+      const saved = JSON.parse(localStorage.getItem("angel_live_mtm") || "{}");
+      console.log("Loaded angelLiveMTM from localStorage:", Object.keys(saved).length, "contracts");
+      return saved;
+    } catch(e) { return {}; }
   });
   const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
