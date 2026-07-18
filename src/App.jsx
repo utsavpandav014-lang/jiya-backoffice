@@ -1677,58 +1677,7 @@ export default function BackOffice() {
   const logout = () => { setAuth(null); setPage("dashboard"); setLoginForm({ user: "", pass: "", error: "" }); };
 
   // ── FIFO ──
-  const { openPositions: rawOpen, closedPositions: rawClosed } = applyFIFO(state.trades);
-
-  // ── Auto-expiry: square off expired positions at closing/zero price ──────────
-  const today = new Date();
-  today.setHours(0,0,0,0);
-
-  const syntheticTrades = [];
-  rawOpen.forEach(pos => {
-    // Parse expiry from contract name
-    // Format: "SENSEX 81000 CE 09JUL2026" or "NIFTY FUT 28JUL2026"
-    const parts   = pos.contract.trim().split(/\s+/);
-    const expiryStr = parts[parts.length - 1]; // last part is always expiry
-    if (!expiryStr || expiryStr.length < 9) return;
-
-    // Parse "09JUL2026" → Date
-    const months = {JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
-    const day   = parseInt(expiryStr.slice(0,2));
-    const mon   = months[expiryStr.slice(2,5).toUpperCase()];
-    const year  = parseInt(expiryStr.slice(5));
-    if (isNaN(day) || mon === undefined || isNaN(year)) return;
-
-    const expiryDate = new Date(year, mon, day);
-    expiryDate.setHours(0,0,0,0);
-
-    // If expiry has passed → square off at closing price (or 0 for options)
-    if (expiryDate < today) {
-      const closePrice = getBhavClose(pos.contract) ?? 0;
-      const closeSide  = pos.side === "SELL" ? "BUY" : "SELL";
-      const expiryDateStr = `${year}-${String(mon+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-      syntheticTrades.push({
-        id:       `EXPIRY_${pos.clientId}_${pos.contract}_AUTO`,
-        clientId: pos.clientId,
-        contract: pos.contract,
-        side:     closeSide,
-        qty:      pos.netQty,
-        price:    closePrice,
-        date:     expiryDateStr,
-        time:     "15:30:00",
-        source:   "expiry_auto",
-        _isExpiry: true,
-      });
-    }
-  });
-
-  // Re-run FIFO if we have synthetic trades
-  const allTradesWithExpiry = syntheticTrades.length > 0
-    ? [...state.trades, ...syntheticTrades]
-    : state.trades;
-
-  const { openPositions, closedPositions } = syntheticTrades.length > 0
-    ? applyFIFO(allTradesWithExpiry)
-    : { openPositions: rawOpen, closedPositions: rawClosed };
+  const { openPositions, closedPositions } = applyFIFO(state.trades);
 
   // ── Helpers ──
   const clientTrades = (cid) => state.trades.filter((t) => t.clientId === cid);
