@@ -709,6 +709,7 @@ export default function BackOffice() {
       }
     });
     scripNameMapRef.current = map;
+    console.log("scripNameMap built:", Object.keys(map).length, "contracts. Sample:", Object.entries(map).slice(0,3));
   }, [state.trades]);
   const [dbLoading, setDbLoading] = useState(SUPABASE_CONFIGURED); // show loading if DB configured
   const [dbError, setDbError] = useState(null);
@@ -867,7 +868,9 @@ export default function BackOffice() {
 
   // Load instrument master from Angel One (no auth needed)
   const loadInstrumentMaster = async () => {
-    if (Object.keys(instrMasterRef.current).length > 0) return; // already loaded
+    // Always reload to get fresh data with correct keys
+    const lastLoad = instrMasterRef.current._loadedAt || 0;
+    if (Date.now() - lastLoad < 30 * 60 * 1000 && Object.keys(instrMasterRef.current).length > 1) return;
     try {
       const r = await fetch(ANGEL_PROXY, {
         method: "POST",
@@ -884,6 +887,8 @@ export default function BackOffice() {
           if (x.name)          map[x.name.toUpperCase()]          = { token: x.token, exchange: x.exch_seg };
         });
         instrMasterRef.current = map;
+        instrMasterRef.current._loadedAt = Date.now();
+        contractTokenMapRef.current = {}; // clear stale token cache
         console.log("Instrument master loaded:", data.data.length, "instruments,", Object.keys(map).length, "keys");
       }
     } catch(e) {
