@@ -3417,32 +3417,35 @@ export default function BackOffice() {
             }, 0);
             const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
-            // ── Daily P&L calculations ─────────────────────────────
+            // ── Daily P&L boxes ────────────────────────────────────
             const todayStr = new Date().toISOString().slice(0,10);
-            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
 
-            // BOX 1: Historical P&L — all closed positions BEFORE today
-            const historicalClosed = clientClosedPos(client.id).filter(cp =>
-              cp.trades.every(t => (t.date||"") < todayStr)
-            );
-            const historicalRealized  = historicalClosed.reduce((a,c) => a + c.totalPnl, 0);
-            const historicalMonths    = [...new Set(
-              state.trades.filter(t => t.clientId===client.id && (t.date||"") < todayStr)
-              .map(t=>(t.date||"").slice(0,7))
-            )];
-            const historicalExpenses  = historicalMonths.reduce((a,m) => a + getMonthlyCharges(client.id,m), 0);
-            const historicalSoftware  = historicalMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
-            const historicalInterest  = historicalMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
-            const historicalNet       = historicalRealized - historicalExpenses - historicalSoftware - historicalInterest;
+            // BOX 1: P&L from ALL trades before today (Excel uploads)
+            // Uses same FIFO but only on historical trades
+            const histTrades  = state.trades.filter(t => t.clientId === client.id && (t.date||"") < todayStr);
+            const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(histTrades);
+            const box1Realized = histClosed.reduce((a,c) => a + c.totalPnl, 0);
+            const histMonths   = [...new Set(histTrades.map(t => (t.date||"").slice(0,7)))];
+            const box1Expenses = histMonths.reduce((a,m) => a + getMonthlyCharges(client.id,m), 0);
+            const box1Software = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
+            const box1Interest = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
+            const box1Net      = box1Realized - box1Expenses - box1Software - box1Interest;
 
-            // BOX 2: Today's live P&L — open positions MTM (carry-forward + today's trades)
-            const todayMTM = grandMTM; // already computed above = all open positions live MTM
-            // Today's closed P&L (positions closed today)
-            const todayClosed = clientClosedPos(client.id).filter(cp =>
-              cp.trades.some(t => (t.date||"") === todayStr)
-            );
-            const todayClosedPnl = todayClosed.reduce((a,c) => a + c.totalPnl, 0);
-            const todayTotal     = todayClosedPnl + todayMTM;
+            // BOX 2: Today's P&L (captured from ODIN — date = today)
+            // Closed positions from today's trades + Live MTM on today's open positions
+            const todayTrades  = state.trades.filter(t => t.clientId === client.id && (t.date||"") === todayStr);
+            const { openPositions: todayOpen, closedPositions: todayClosed2 } = applyFIFO([...histTrades, ...todayTrades]);
+            // Closed TODAY = positions where last trade is today
+            const todayClosedPnl = todayClosed2
+              .filter(cp => cp.trades.some(t => (t.date||"") === todayStr))
+              .reduce((a,c) => a + c.totalPnl, 0);
+            // Live MTM on currently open positions (all open, including carry-forward)
+            const box2MTM  = open.reduce((s, pos) => {
+              const ltp = getBhavClose(pos.contract);
+              if (ltp === null) return s;
+              return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
+            }, 0);
+            const box2Total = todayClosedPnl + box2MTM;
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
@@ -3462,8 +3465,8 @@ export default function BackOffice() {
                     <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase",
                       letterSpacing:1, marginBottom:6 }}>P&L (Till Yesterday)</div>
                     <div style={{ fontSize:28, fontWeight:800,
-                      color:historicalNet>=0?C.green:C.red, marginBottom:4 }}>
-                      {historicalNet>=0?"+":""}₹{Math.abs(historicalNet).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                      color:box1Net>=0?C.green:C.red, marginBottom:4 }}>
+                      {box1Net>=0?"+":""}₹{Math.abs(box1Net).toLocaleString("en-IN",{maximumFractionDigits:0})}
                     </div>
                     <div style={{ fontSize:11, color:C.muted }}>
                       Realized − Expenses − Charges
@@ -3478,8 +3481,8 @@ export default function BackOffice() {
                     ];
                     return (
                       <div style={{ background:C.bg, borderRadius:12, padding:"18px 20px",
-                        border:`2px solid ${todayTotal>=0?C.green+"44":C.red+"44"}`,
-                        boxShadow:`0 0 16px ${todayTotal>=0?C.green+"18":C.red+"18"}`,
+                        border:`2px solid ${box2Total>=0?C.green+"44":C.red+"44"}`,
+                        boxShadow:`0 0 16px ${box2Total>=0?C.green+"18":C.red+"18"}`,
                         cursor:"pointer" }}
                         onClick={() => setExpanded(!expanded)}>
                         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
@@ -3491,11 +3494,11 @@ export default function BackOffice() {
                                 <span style={{color:C.muted}}>○</span>}
                             </div>
                             <div style={{ fontSize:28, fontWeight:800,
-                              color:todayTotal>=0?C.green:C.red, marginBottom:4 }}>
-                              {todayTotal>=0?"+":""}₹{Math.abs(todayTotal).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                              color:box2Total>=0?C.green:C.red, marginBottom:4 }}>
+                              {box2Total>=0?"+":""}₹{Math.abs(box2Total).toLocaleString("en-IN",{maximumFractionDigits:0})}
                             </div>
                             <div style={{ fontSize:11, color:C.muted }}>
-                              {open.length} open pos · click to {expanded?"hide":"expand"}
+                              {open.length} open positions · click to {expanded?"hide":"expand"}
                             </div>
                           </div>
                           <span style={{ color:C.muted, fontSize:18 }}>{expanded?"▲":"▼"}</span>
@@ -3553,8 +3556,8 @@ export default function BackOffice() {
                               borderTop:`1px solid ${C.border}`,
                               fontWeight:700, fontSize:13 }}>
                               <span style={{color:C.muted}}>Today Total</span>
-                              <span style={{color:todayTotal>=0?C.green:C.red}}>
-                                {todayTotal>=0?"+":""}₹{Math.abs(todayTotal).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                              <span style={{color:box2Total>=0?C.green:C.red}}>
+                                {box2Total>=0?"+":""}₹{Math.abs(box2Total).toLocaleString("en-IN",{maximumFractionDigits:0})}
                               </span>
                             </div>
                           </div>
