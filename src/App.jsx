@@ -1283,6 +1283,22 @@ export default function BackOffice() {
     return () => clearInterval(keepAlive);
   }, []);
 
+  // ── Live trades polling 9:00 AM to 3:35 PM ──────────────────
+  useEffect(() => {
+    if (!SUPABASE_CONFIGURED) return;
+    const pollTrades = async () => {
+      const now = new Date();
+      const h = now.getHours(), m = now.getMinutes();
+      const inMarket = (h > 9 || (h === 9 && m >= 0)) && (h < 15 || (h === 15 && m <= 35));
+      if (!inMarket) return;
+      // Silent reload — only trades and positions, no loading screen
+      await loadAllData(true);
+    };
+    // Poll every 10 seconds during market hours
+    const interval = setInterval(pollTrades, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
   // ── Silent background refresh when user returns to tab ──
   useEffect(() => {
     const handleVisibility = () => {
