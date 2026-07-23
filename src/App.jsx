@@ -895,7 +895,20 @@ export default function BackOffice() {
       const optType = (parts[2] || "").toUpperCase();
       const expiry  = parts[3] || "";
       const exp6    = expiry.slice(0,5) + expiry.slice(7,9);
-      return { symbol: name + exp6 + Math.round(strike) + optType, exchange: isBSE ? "BFO" : "NFO" };
+
+      // Primary format: SENSEX23JUL2676900PE
+      const primary = name + exp6 + Math.round(strike) + optType;
+
+      // BFO Weekly alternate format: SENSEX23726900PE (day + month number, no year)
+      // e.g. 23JUL2026 → 237 (day=23, month=7)
+      const MONTHS_MAP = {JAN:"1",FEB:"2",MAR:"3",APR:"4",MAY:"5",JUN:"6",
+                          JUL:"7",AUG:"8",SEP:"9",OCT:"10",NOV:"11",DEC:"12"};
+      const monStr  = expiry.slice(2,5).toUpperCase();
+      const monNum  = MONTHS_MAP[monStr] || "";
+      const dayNum  = expiry.slice(0,2).replace(/^0/,""); // remove leading zero
+      const altWeekly = name + dayNum + monNum + Math.round(strike) + optType;
+
+      return { symbol: primary, altSymbol: altWeekly, exchange: isBSE ? "BFO" : "NFO" };
     }
   };
 
@@ -1086,42 +1099,43 @@ export default function BackOffice() {
         if (!mapped) {
           const result = contractToAngelSymbol(contract);
           if (result) {
-            // Try primary format
+            // Try primary format first
             let entry = instrMasterRef.current[result.symbol];
-            // Try alternate formats for SENSEX/BFO contracts
-            if (!entry) {
-              // Try without leading zero in day: SENSEX9JUL2681000CE
-              const alt1 = result.symbol.replace(/^([A-Z]+)0(\d)/, '$1$2');
-              entry = instrMasterRef.current[alt1];
-              if (entry) console.log(`Mapped via alt1: ${contract} → ${alt1}`);
+            // Try alternate weekly format (e.g. SENSEX237 format for BFO weeklies)
+            if (!entry && result.altSymbol) {
+              entry = instrMasterRef.current[result.altSymbol];
+              if (entry) console.log(`Mapped via alt: ${contract} → ${result.altSymbol}`);
             }
+            // Try partial key search — must match strike, optType AND expiry date
             if (!entry) {
-              // Try with decimal strike: SENSEX09JUL2681000.00CE
-              const parts = contract.trim().split(/\s+/);
-              const strike = parts[1] ? parseFloat(parts[1]) : 0;
-              const alt2 = result.symbol.replace(Math.round(strike).toString(), strike.toFixed(2).replace('.',''));
-              entry = instrMasterRef.current[alt2];
-              if (entry) console.log(`Mapped via alt2: ${contract} → ${alt2}`);
+              const sym = contract.split(" ")[0].toUpperCase();
+              const parts2 = contract.trim().split(/\s+/);
+              const strike2  = parts2[1] ? Math.round(parseFloat(parts2[1])).toString() : "";
+              const optType2 = parts2[2] || "";
+              const expiry2  = parts2[3] || ""; // e.g. "23JUL2026"
+              // Extract day+month from expiry for matching: "23JUL2026" → "23JUL" or "237"
+              const expDay   = expiry2.slice(0,2); // "23"
+              const expMon   = expiry2.slice(2,5); // "JUL"
+              const expYr2   = expiry2.slice(7,9); // "26"
+              const allKeys  = Object.keys(instrMasterRef.current);
+              const found = allKeys.find(k =>
+                k.startsWith(sym) &&
+                k.includes(strike2) &&
+                k.endsWith(optType2) &&
+                // Must contain expiry info — either "23JUL26" or "237" format
+                (k.includes(expDay + expMon + expYr2) || k.includes(expDay + expMon.charAt(0)))
+              );
+              if (found) {
+                entry = instrMasterRef.current[found];
+                console.log(`Mapped via search: ${contract} → ${found}`);
+              }
             }
             if (entry) {
               mapped = { token: entry.token, exchange: result.exchange };
               contractTokenMapRef.current[contract] = mapped;
-              console.log(`Mapped ${contract} → token ${entry.token}`);
+              console.log(`Token ${entry.token} → ${contract}`);
             } else {
-              // Last resort: search by name field containing symbol
-              const sym = contract.split(" ")[0].toUpperCase();
-              const parts2 = contract.trim().split(/\s+/);
-              const strike2 = parts2[1] ? Math.round(parseFloat(parts2[1])).toString() : "";
-              const optType2 = parts2[2] || "";
-              const allKeys = Object.keys(instrMasterRef.current);
-              const found = allKeys.find(k => k.startsWith(sym) && k.includes(strike2) && k.endsWith(optType2));
-              if (found) {
-                mapped = { token: instrMasterRef.current[found].token, exchange: result.exchange };
-                contractTokenMapRef.current[contract] = mapped;
-                console.log(`Mapped via search: ${contract} → ${found} → token ${mapped.token}`);
-              } else {
-                console.log(`Not in master: ${contract} → tried ${result.symbol}`);
-              }
+              console.log(`Not in master: ${contract} → tried ${result.symbol}${result.altSymbol?" / "+result.altSymbol:""}`);
             }
           }
         }
