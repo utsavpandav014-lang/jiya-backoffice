@@ -878,10 +878,13 @@ export default function BackOffice() {
       if (data.status && data.data?.length) {
         const map = {};
         data.data.forEach(x => {
-          map[x.symbol.toUpperCase()] = { token: x.token, exchange: x.exch_seg };
+          // Index by ALL possible name fields to maximize match chances
+          if (x.symbol)        map[x.symbol.toUpperCase()]        = { token: x.token, exchange: x.exch_seg };
+          if (x.tradingsymbol) map[x.tradingsymbol.toUpperCase()] = { token: x.token, exchange: x.exch_seg };
+          if (x.name)          map[x.name.toUpperCase()]          = { token: x.token, exchange: x.exch_seg };
         });
         instrMasterRef.current = map;
-        console.log("Instrument master loaded:", Object.keys(map).length, "contracts");
+        console.log("Instrument master loaded:", data.data.length, "instruments,", Object.keys(map).length, "keys");
       }
     } catch(e) {
       console.log("Instrument master load error:", e.message);
@@ -1170,6 +1173,35 @@ export default function BackOffice() {
               console.log(`MTM set: ${contract} = ₹${item.ltp}`);
             }
           });
+        }
+      }
+
+      // Fallback: fetch unmatched contracts individually via scripName
+      const unmatched = uniqueContracts.filter(c => !newMTM[c]);
+      if (unmatched.length > 0) {
+        console.log("Fallback fetch for unmatched:", unmatched);
+        for (const contract of unmatched) {
+          const scripName = scripNameMapRef.current[contract];
+          if (!scripName) continue;
+          try {
+            const isBSE = ["SENSEX","BANKEX"].includes(contract.split(" ")[0].toUpperCase());
+            const exchange = isBSE ? "BFO" : "NFO";
+            const r = await fetch(ANGEL_PROXY, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "ltp_single", apiKey, jwtToken,
+                payload: { exchange, tradingsymbol: scripName, symboltoken: "" }
+              })
+            });
+            const d = await r.json();
+            if (d.status && d.data?.ltp) {
+              newMTM[contract] = { ltp: parseFloat(d.data.ltp), token: d.data.symboltoken || scripName };
+              fetched++;
+              console.log(`Fallback MTM: ${contract} = ₹${d.data.ltp}`);
+            }
+            await new Promise(r => setTimeout(r, 100));
+          } catch(e) { console.log("Fallback error:", contract, e.message); }
         }
       }
 
