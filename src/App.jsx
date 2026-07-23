@@ -900,29 +900,32 @@ export default function BackOffice() {
     const name    = parts[0].toUpperCase();
     const isBSE   = ["SENSEX","BANKEX","SENSEX50"].includes(name);
     const isFut   = contract.toUpperCase().includes("FUT");
+
+    const MONTH_NUM = {JAN:"1",FEB:"2",MAR:"3",APR:"4",MAY:"5",JUN:"6",
+                       JUL:"7",AUG:"8",SEP:"9",OCT:"10",NOV:"11",DEC:"12"};
+
     if (isFut) {
-      const expiry = parts[2] || parts[1];
-      const exp6   = expiry.slice(0,5) + expiry.slice(7,9);
-      return { symbol: name + exp6 + "FUT", exchange: isBSE ? "BFO" : "NFO" };
+      const expiry = parts[2] || parts[1]; // "28JUL2026"
+      const dd  = expiry.slice(0,2);       // "28"
+      const mon = expiry.slice(2,5);       // "JUL"
+      const yy  = expiry.slice(7,9);       // "26"
+      const m   = MONTH_NUM[mon] || "0";
+      // Angel One futures format: SYMBOL + YY + M + DD + FUT
+      // e.g. ITC28JUL26FUT → ITC26728FUT
+      const symbol = `${name}${yy}${m}${dd}FUT`;
+      return { symbol, exchange: isBSE ? "BFO" : "NFO" };
     } else {
-      const strike  = parseFloat(parts[1] || 0);
+      const strike  = Math.round(parseFloat(parts[1] || 0));
       const optType = (parts[2] || "").toUpperCase();
-      const expiry  = parts[3] || "";
-      const exp6    = expiry.slice(0,5) + expiry.slice(7,9);
-
-      // Primary format: SENSEX23JUL2676900PE
-      const primary = name + exp6 + Math.round(strike) + optType;
-
-      // BFO Weekly alternate format: SENSEX23726900PE (day + month number, no year)
-      // e.g. 23JUL2026 → 237 (day=23, month=7)
-      const MONTHS_MAP = {JAN:"1",FEB:"2",MAR:"3",APR:"4",MAY:"5",JUN:"6",
-                          JUL:"7",AUG:"8",SEP:"9",OCT:"10",NOV:"11",DEC:"12"};
-      const monStr  = expiry.slice(2,5).toUpperCase();
-      const monNum  = MONTHS_MAP[monStr] || "";
-      const dayNum  = expiry.slice(0,2).replace(/^0/,""); // remove leading zero
-      const altWeekly = name + dayNum + monNum + Math.round(strike) + optType;
-
-      return { symbol: primary, altSymbol: altWeekly, exchange: isBSE ? "BFO" : "NFO" };
+      const expiry  = parts[3] || ""; // "23JUL2026"
+      const dd  = expiry.slice(0,2);  // "23"
+      const mon = expiry.slice(2,5);  // "JUL"
+      const yy  = expiry.slice(7,9);  // "26"
+      const m   = MONTH_NUM[mon] || "0";
+      // Angel One options format: SYMBOL + YY + M + DD + STRIKE + OPTTYPE
+      // e.g. SENSEX 76900 PE 23JUL2026 → SENSEX2672376900PE
+      const symbol = `${name}${yy}${m}${dd}${strike}${optType}`;
+      return { symbol, exchange: isBSE ? "BFO" : "NFO" };
     }
   };
 
@@ -1121,18 +1124,17 @@ export default function BackOffice() {
               console.log(`Mapped via scripName: ${contract} → ${scripName} → token ${entry.token}`);
             }
           }
-          // Priority 2: Build symbol from contract name parts
+          // Priority 2: Build symbol from contract name parts (correct Angel One format)
           if (!mapped) {
             const result = contractToAngelSymbol(contract);
             if (result) {
-              let entry = instrMasterRef.current[result.symbol];
-              if (!entry && result.altSymbol) entry = instrMasterRef.current[result.altSymbol];
+              const entry = instrMasterRef.current[result.symbol];
               if (entry) {
                 mapped = { token: entry.token, exchange: result.exchange };
                 contractTokenMapRef.current[contract] = mapped;
-                console.log(`Mapped via symbol: ${contract} → token ${entry.token}`);
+                console.log(`Mapped via symbol: ${contract} → ${result.symbol} → token ${entry.token}`);
               } else {
-                console.log(`Not found: ${contract} (scripName: ${scripName||"none"}, tried: ${result.symbol})`);
+                console.log(`Not found: ${contract} → tried ${result.symbol}`);
               }
             }
           }
