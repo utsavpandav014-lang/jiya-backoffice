@@ -96,6 +96,29 @@ export default async function handler(req, res) {
       return res.status(200).json(json);
     }
 
+    // DEBUG — sample BFO keys from instrument master
+    if (action === 'sample_master') {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const r = await fetch(
+          'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json',
+          { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }, signal: controller.signal }
+        );
+        clearTimeout(timeout);
+        const data = await r.json();
+        // Find BFO SENSEX PE entries
+        const sample = data.filter(x =>
+          x.exch_seg === 'BFO' &&
+          x.symbol && x.symbol.includes('SENSEX') &&
+          x.symbol.includes('PE')
+        ).slice(0, 20).map(x => ({ symbol: x.symbol, token: x.token, expiry: x.expiry }));
+        return res.status(200).json({ status: true, data: sample });
+      } catch(e) {
+        return res.status(200).json({ status: false, message: e.message });
+      }
+    }
+
     // INSTRUMENT MASTER — fetch Angel One scrip master (no auth needed)
     if (action === 'instrument_master') {
       try {
