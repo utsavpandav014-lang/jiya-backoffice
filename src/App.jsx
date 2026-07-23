@@ -1106,32 +1106,15 @@ export default function BackOffice() {
               entry = instrMasterRef.current[result.altSymbol];
               if (entry) console.log(`Mapped via alt: ${contract} → ${result.altSymbol}`);
             }
-            // Try partial key search — must match strike, optType AND expiry date
             if (!entry) {
               const sym = contract.split(" ")[0].toUpperCase();
               const parts2 = contract.trim().split(/\s+/);
               const strike2  = parts2[1] ? Math.round(parseFloat(parts2[1])).toString() : "";
               const optType2 = parts2[2] || "";
-              const expiry2  = parts2[3] || "";
-              const expDay   = expiry2.slice(0,2);
-              const expMon   = expiry2.slice(2,5);
-              const expYr2   = expiry2.slice(7,9);
               const allKeys  = Object.keys(instrMasterRef.current);
-              // Show what keys exist for this symbol+strike+optType (debug)
+              // Show ALL keys matching symbol+strike+optType regardless of expiry
               const candidates = allKeys.filter(k => k.startsWith(sym) && k.includes(strike2) && k.endsWith(optType2));
-              if (candidates.length > 0) {
-                console.log(`Candidates for ${contract}:`, candidates);
-              }
-              const found = allKeys.find(k =>
-                k.startsWith(sym) &&
-                k.includes(strike2) &&
-                k.endsWith(optType2) &&
-                (k.includes(expDay + expMon + expYr2) || k.includes(expDay + expMon.charAt(0)))
-              );
-              if (found) {
-                entry = instrMasterRef.current[found];
-                console.log(`Mapped via search: ${contract} → ${found}`);
-              }
+              console.log(`ALL candidates for ${contract} (${sym}+${strike2}+${optType2}):`, candidates.slice(0,10));
             }
             if (entry) {
               mapped = { token: entry.token, exchange: result.exchange };
