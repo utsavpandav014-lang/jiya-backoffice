@@ -1391,6 +1391,7 @@ export default function BackOffice() {
   // ── Charges State ──
   const [pnlClientFilter, setPnlClientFilter] = useState("all");
   const [pnlDateMode, setPnlDateMode] = useState("month"); // "all" | "month" | "range"
+  const [todayPnlExpanded, setTodayPnlExpanded] = useState({}); // { clientId: bool }
   const [chartClientFilter, setChartClientFilter] = useState("all"); // for 6-month chart
   const [pnlMonth, setPnlMonth] = useState(new Date().toISOString().slice(0,7));
   const [pnlDateFrom, setPnlDateFrom] = useState("");
@@ -3368,6 +3369,33 @@ export default function BackOffice() {
             }, 0);
             const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
+            // ── Daily P&L calculations ─────────────────────────────
+            const todayStr = new Date().toISOString().slice(0,10);
+            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
+
+            // BOX 1: Historical P&L — all closed positions BEFORE today
+            const historicalClosed = clientClosedPos(client.id).filter(cp =>
+              cp.trades.every(t => (t.date||"") < todayStr)
+            );
+            const historicalRealized  = historicalClosed.reduce((a,c) => a + c.totalPnl, 0);
+            const historicalMonths    = [...new Set(
+              state.trades.filter(t => t.clientId===client.id && (t.date||"") < todayStr)
+              .map(t=>(t.date||"").slice(0,7))
+            )];
+            const historicalExpenses  = historicalMonths.reduce((a,m) => a + getMonthlyCharges(client.id,m), 0);
+            const historicalSoftware  = historicalMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
+            const historicalInterest  = historicalMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
+            const historicalNet       = historicalRealized - historicalExpenses - historicalSoftware - historicalInterest;
+
+            // BOX 2: Today's live P&L — open positions MTM (carry-forward + today's trades)
+            const todayMTM = grandMTM; // already computed above = all open positions live MTM
+            // Today's closed P&L (positions closed today)
+            const todayClosed = clientClosedPos(client.id).filter(cp =>
+              cp.trades.some(t => (t.date||"") === todayStr)
+            );
+            const todayClosedPnl = todayClosed.reduce((a,c) => a + c.totalPnl, 0);
+            const todayTotal     = todayClosedPnl + todayMTM;
+
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
                 {/* Client name */}
@@ -3376,6 +3404,119 @@ export default function BackOffice() {
                     {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
                   </div>
                 )}
+
+                {/* ── TWO DAILY P&L BOXES ── */}
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:20 }}>
+
+                  {/* BOX 1 — Historical P&L (frozen, no live prices) */}
+                  <div style={{ background:C.bg, borderRadius:12, padding:"18px 20px",
+                    border:`1px solid ${C.border}` }}>
+                    <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase",
+                      letterSpacing:1, marginBottom:6 }}>P&L (Till Yesterday)</div>
+                    <div style={{ fontSize:28, fontWeight:800,
+                      color:historicalNet>=0?C.green:C.red, marginBottom:4 }}>
+                      {historicalNet>=0?"+":""}₹{Math.abs(historicalNet).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                    </div>
+                    <div style={{ fontSize:11, color:C.muted }}>
+                      Realized − Expenses − Charges
+                    </div>
+                  </div>
+
+                  {/* BOX 2 — Today's Live P&L (expandable) */}
+                  {(()=>{
+                    const [expanded, setExpanded] = [
+                      todayPnlExpanded[client.id],
+                      (v) => setTodayPnlExpanded(prev => ({...prev, [client.id]: v}))
+                    ];
+                    return (
+                      <div style={{ background:C.bg, borderRadius:12, padding:"18px 20px",
+                        border:`2px solid ${todayTotal>=0?C.green+"44":C.red+"44"}`,
+                        boxShadow:`0 0 16px ${todayTotal>=0?C.green+"18":C.red+"18"}`,
+                        cursor:"pointer" }}
+                        onClick={() => setExpanded(!expanded)}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+                          <div>
+                            <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase",
+                              letterSpacing:1, marginBottom:6 }}>
+                              Today's P&L {angelMTMStatus==="live" ?
+                                <span style={{color:C.green}}>● Live</span> :
+                                <span style={{color:C.muted}}>○</span>}
+                            </div>
+                            <div style={{ fontSize:28, fontWeight:800,
+                              color:todayTotal>=0?C.green:C.red, marginBottom:4 }}>
+                              {todayTotal>=0?"+":""}₹{Math.abs(todayTotal).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                            </div>
+                            <div style={{ fontSize:11, color:C.muted }}>
+                              {open.length} open pos · click to {expanded?"hide":"expand"}
+                            </div>
+                          </div>
+                          <span style={{ color:C.muted, fontSize:18 }}>{expanded?"▲":"▼"}</span>
+                        </div>
+
+                        {/* Expanded: per-position breakdown */}
+                        {expanded && (
+                          <div style={{ marginTop:14, borderTop:`1px solid ${C.border}`, paddingTop:12 }}
+                            onClick={e=>e.stopPropagation()}>
+                            {open.length === 0 ? (
+                              <div style={{color:C.muted,fontSize:12}}>No open positions</div>
+                            ) : open.map((pos,i) => {
+                              const ltp  = getBhavClose(pos.contract);
+                              const mtm  = ltp !== null
+                                ? (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty
+                                : null;
+                              return (
+                                <div key={i} style={{ display:"flex", justifyContent:"space-between",
+                                  alignItems:"center", padding:"7px 0",
+                                  borderBottom:`1px solid ${C.border}22`,
+                                  fontSize:12 }}>
+                                  <div>
+                                    <div style={{color:C.text,fontWeight:600}}>{pos.contract}</div>
+                                    <div style={{color:C.muted,fontSize:11}}>
+                                      {pos.side} {pos.netQty} @ ₹{pos.avgPrice.toFixed(2)}
+                                      {ltp !== null && ` → LTP ₹${ltp.toFixed(2)}`}
+                                    </div>
+                                  </div>
+                                  <div style={{
+                                    fontWeight:700, fontSize:13,
+                                    color: mtm===null ? C.muted : mtm>=0 ? C.green : C.red
+                                  }}>
+                                    {mtm===null ? "—" : `${mtm>=0?"+":""}₹${Math.abs(mtm).toLocaleString("en-IN",{maximumFractionDigits:0})}`}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                            {/* Today's closed positions */}
+                            {todayClosed.length > 0 && (
+                              <div style={{marginTop:8, paddingTop:8, borderTop:`1px solid ${C.border}`}}>
+                                <div style={{color:C.muted,fontSize:11,marginBottom:6}}>CLOSED TODAY</div>
+                                {todayClosed.map((cp,i) => (
+                                  <div key={i} style={{ display:"flex", justifyContent:"space-between",
+                                    padding:"5px 0", fontSize:12 }}>
+                                    <span style={{color:C.text}}>{cp.contract}</span>
+                                    <span style={{color:cp.totalPnl>=0?C.green:C.red,fontWeight:600}}>
+                                      {cp.totalPnl>=0?"+":""}₹{Math.abs(cp.totalPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            <div style={{ display:"flex", justifyContent:"space-between",
+                              marginTop:10, paddingTop:8,
+                              borderTop:`1px solid ${C.border}`,
+                              fontWeight:700, fontSize:13 }}>
+                              <span style={{color:C.muted}}>Today Total</span>
+                              <span style={{color:todayTotal>=0?C.green:C.red}}>
+                                {todayTotal>=0?"+":""}₹{Math.abs(todayTotal).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                </div>
+                {/* ── END DAILY P&L BOXES ── */}
 
                 {/* Grand summary cards */}
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
