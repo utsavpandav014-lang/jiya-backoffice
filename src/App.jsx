@@ -1112,17 +1112,20 @@ export default function BackOffice() {
               const parts2 = contract.trim().split(/\s+/);
               const strike2  = parts2[1] ? Math.round(parseFloat(parts2[1])).toString() : "";
               const optType2 = parts2[2] || "";
-              const expiry2  = parts2[3] || ""; // e.g. "23JUL2026"
-              // Extract day+month from expiry for matching: "23JUL2026" → "23JUL" or "237"
-              const expDay   = expiry2.slice(0,2); // "23"
-              const expMon   = expiry2.slice(2,5); // "JUL"
-              const expYr2   = expiry2.slice(7,9); // "26"
+              const expiry2  = parts2[3] || "";
+              const expDay   = expiry2.slice(0,2);
+              const expMon   = expiry2.slice(2,5);
+              const expYr2   = expiry2.slice(7,9);
               const allKeys  = Object.keys(instrMasterRef.current);
+              // Show what keys exist for this symbol+strike+optType (debug)
+              const candidates = allKeys.filter(k => k.startsWith(sym) && k.includes(strike2) && k.endsWith(optType2));
+              if (candidates.length > 0) {
+                console.log(`Candidates for ${contract}:`, candidates);
+              }
               const found = allKeys.find(k =>
                 k.startsWith(sym) &&
                 k.includes(strike2) &&
                 k.endsWith(optType2) &&
-                // Must contain expiry info — either "23JUL26" or "237" format
                 (k.includes(expDay + expMon + expYr2) || k.includes(expDay + expMon.charAt(0)))
               );
               if (found) {
