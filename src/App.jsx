@@ -698,8 +698,18 @@ function useCountUp(target, duration = 900) {
 
 export default function BackOffice() {
   const [state, setState] = useState(INITIAL_STATE);
-  // Keep tradesRef always up to date so polling closures have fresh data
-  useEffect(() => { tradesRef.current = state.trades || []; }, [state.trades]);
+  // Keep tradesRef and scripNameMapRef always up to date
+  useEffect(() => {
+    tradesRef.current = state.trades || [];
+    // Build scripName map: contract → Angel One symbol (from scriptName field)
+    const map = {};
+    (state.trades || []).forEach(t => {
+      if (t.contract && t.scriptName && !map[t.contract]) {
+        map[t.contract] = t.scriptName.trim().toUpperCase();
+      }
+    });
+    scripNameMapRef.current = map;
+  }, [state.trades]);
   const [dbLoading, setDbLoading] = useState(SUPABASE_CONFIGURED); // show loading if DB configured
   const [dbError, setDbError] = useState(null);
   const [syncStatus, setSyncStatus] = useState("idle"); // "idle"|"saving"|"saved"|"error"
@@ -853,6 +863,7 @@ export default function BackOffice() {
   const angelTokenRef    = useRef({ jwtToken: (() => { try { return localStorage.getItem("angel_jwt") || null; } catch(e) { return null; } })() });
   const instrMasterRef   = useRef({});
   const tradesRef        = useRef([]); // always holds latest state.trades
+  const scripNameMapRef  = useRef({}); // { "NIFTY 23950 CE 28JUL2026": "NIFTY26JUL23950CE" }
 
   // Load instrument master from Angel One (no auth needed)
   const loadInstrumentMaster = async () => {
@@ -1097,31 +1108,29 @@ export default function BackOffice() {
         // Check existing token map first
         let mapped = contractTokenMapRef.current[contract];
         if (!mapped) {
-          const result = contractToAngelSymbol(contract);
-          if (result) {
-            // Try primary format first
-            let entry = instrMasterRef.current[result.symbol];
-            // Try alternate weekly format (e.g. SENSEX237 format for BFO weeklies)
-            if (!entry && result.altSymbol) {
-              entry = instrMasterRef.current[result.altSymbol];
-              if (entry) console.log(`Mapped via alt: ${contract} → ${result.altSymbol}`);
-            }
-            if (!entry) {
-              const sym = contract.split(" ")[0].toUpperCase();
-              const parts2 = contract.trim().split(/\s+/);
-              const strike2  = parts2[1] ? Math.round(parseFloat(parts2[1])).toString() : "";
-              const optType2 = parts2[2] || "";
-              const allKeys  = Object.keys(instrMasterRef.current);
-              // Show ALL keys matching symbol+strike+optType regardless of expiry
-              const candidates = allKeys.filter(k => k.startsWith(sym) && k.includes(strike2) && k.endsWith(optType2));
-              console.log(`ALL candidates for ${contract} (${sym}+${strike2}+${optType2}):`, candidates.slice(0,10));
-            }
+          // Priority 1: Use scripName from trades (exact Angel One symbol, most accurate)
+          const scripName = scripNameMapRef.current[contract];
+          if (scripName) {
+            const entry = instrMasterRef.current[scripName];
             if (entry) {
-              mapped = { token: entry.token, exchange: result.exchange };
+              mapped = { token: entry.token, exchange: entry.exchange };
               contractTokenMapRef.current[contract] = mapped;
-              console.log(`Token ${entry.token} → ${contract}`);
-            } else {
-              console.log(`Not in master: ${contract} → tried ${result.symbol}${result.altSymbol?" / "+result.altSymbol:""}`);
+              console.log(`Mapped via scripName: ${contract} → ${scripName} → token ${entry.token}`);
+            }
+          }
+          // Priority 2: Build symbol from contract name parts
+          if (!mapped) {
+            const result = contractToAngelSymbol(contract);
+            if (result) {
+              let entry = instrMasterRef.current[result.symbol];
+              if (!entry && result.altSymbol) entry = instrMasterRef.current[result.altSymbol];
+              if (entry) {
+                mapped = { token: entry.token, exchange: result.exchange };
+                contractTokenMapRef.current[contract] = mapped;
+                console.log(`Mapped via symbol: ${contract} → token ${entry.token}`);
+              } else {
+                console.log(`Not found: ${contract} (scripName: ${scripName||"none"}, tried: ${result.symbol})`);
+              }
             }
           }
         }
