@@ -215,7 +215,27 @@ export default async function handler(req, res) {
     }
 
     // LTP
-    if (action === 'ltp') {
+    // SINGLE LTP — more reliable for individual contracts
+    if (action === 'ltp_single') {
+      const { exchange, tradingsymbol, symboltoken } = payload;
+      try {
+        const r = await fetch(
+          'https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getLtpData',
+          {
+            method: 'POST',
+            headers: ANGEL_H(apiKey, jwtToken),
+            body: JSON.stringify({ exchange, tradingsymbol, symboltoken })
+          }
+        );
+        const text = await r.text();
+        if (text.trim().startsWith('<')) return res.status(200).json({ status: false, message: 'Session expired' });
+        return res.status(200).json(JSON.parse(text));
+      } catch(e) {
+        return res.status(200).json({ status: false, message: e.message });
+      }
+    }
+
+    // LTP (batch)
       try {
         const r = await fetch(
           'https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/',
