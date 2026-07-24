@@ -550,7 +550,7 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
-function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices }) {
+function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices, saveClosingSnapshot }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
     password:    angelCreds.password    || "",
@@ -600,6 +600,10 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
             <button onClick={fetchPrices}
               style={{...btn(C.green),fontSize:12}}>
               📋 Fetch Live Prices Now
+            </button>
+            <button onClick={saveClosingSnapshot}
+              style={{...btn(C.accent),fontSize:12}}>
+              📸 Save Closing Snapshot
             </button>
           </div>
         )}
@@ -795,6 +799,13 @@ export default function BackOffice() {
       console.log("Loaded angelLiveMTM from localStorage:", Object.keys(saved).length, "contracts");
       return saved;
     } catch(e) { return {}; }
+  });
+  const [closingSnapshot, setClosingSnapshot] = useState(() => {
+    // { "2026-07-23": { "ITC FUT 28JUL2026": 283.10, ... } }
+    try { return JSON.parse(localStorage.getItem("closing_snapshot") || "{}"); } catch(e) { return {}; }
+  });
+  const [snapshotSavedDate, setSnapshotSavedDate] = useState(() => {
+    try { return localStorage.getItem("snapshot_saved_date") || ""; } catch(e) { return ""; }
   });
   const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
@@ -1066,12 +1077,58 @@ export default function BackOffice() {
     return () => clearInterval(interval);
   }, [state.trades, angelLiveMTM]);
 
+  // ── Save Closing Snapshot at 5:00 PM IST ──────────────────────
+  const saveClosingSnapshot = useCallback(() => {
+    const today = new Date().toISOString().slice(0,10);
+    if (snapshotSavedDate === today) return; // already saved today
+
+    const mtm = angelLiveMTM;
+    if (Object.keys(mtm).length === 0) return; // no prices yet
+
+    // Build snapshot: { contract: closePrice }
+    const snapshot = {};
+    Object.entries(mtm).forEach(([contract, data]) => {
+      if (data?.ltp) snapshot[contract] = data.ltp;
+    });
+
+    if (Object.keys(snapshot).length === 0) return;
+
+    // Save to localStorage
+    const allSnapshots = { ...closingSnapshot, [today]: snapshot };
+    // Keep only last 7 days
+    const keys = Object.keys(allSnapshots).sort().slice(-7);
+    const trimmed = {};
+    keys.forEach(k => { trimmed[k] = allSnapshots[k]; });
+
+    setClosingSnapshot(trimmed);
+    setSnapshotSavedDate(today);
+    try {
+      localStorage.setItem("closing_snapshot", JSON.stringify(trimmed));
+      localStorage.setItem("snapshot_saved_date", today);
+    } catch(e) {}
+    notify("📸 5 PM closing snapshot saved — " + Object.keys(snapshot).length + " contracts");
+
+    // Also save to Supabase for persistence across devices
+    const rows = Object.entries(snapshot).map(([contract, price]) => ({
+      id: `SNAP_${today}_${contract.replace(/\s+/g,"_")}`,
+      date: today, contract, closePrice: price, savedAt: new Date().toISOString()
+    }));
+    withSync(() =>
+      sb.upsert("closing_snapshot", rows[0]) // upsert one by one
+    );
+  }, [angelLiveMTM, closingSnapshot, snapshotSavedDate]);
+
   // ── Angel One: Auto Closing Prices at 7:00 PM ──
   const scheduleAutoBhavcopy = useCallback((jwtToken, apiKey) => {
     const checkTime = () => {
       const now = new Date();
+      const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
       if (now.getHours() === 19 && now.getMinutes() === 0 && now.getSeconds() < 10) {
         fetchAutoBhavcopy(jwtToken, apiKey);
+      }
+      // 5:00 PM IST = 11:30 UTC, but we use local time
+      if (h === 17 && m === 0 && s < 10) {
+        saveClosingSnapshot();
       }
     };
     const interval = setInterval(checkTime, 5000);
@@ -3433,35 +3490,67 @@ export default function BackOffice() {
             }, 0);
             const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
-            // ── Daily P&L boxes ────────────────────────────────────
-            const todayStr = new Date().toISOString().slice(0,10);
+            // ── 3-Box P&L System ───────────────────────────────────
+            const todayStr     = new Date().toISOString().slice(0,10);
+            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
+            const ySnap        = closingSnapshot[yesterdayStr] || {}; // yesterday's closing prices
 
-            // BOX 1: P&L from ALL trades before today (Excel uploads)
-            // Uses same FIFO but only on historical trades
-            const histTrades  = state.trades.filter(t => t.clientId === client.id && (t.date||"") < todayStr);
+            // ── BOX A: P&L Till Yesterday (FROZEN) ──────────────────
+            // = Booked P&L (closed positions before today)
+            // + MTM of open positions at YESTERDAY'S CLOSING PRICE
+            // - All expenses/interest/software
+            const histTrades   = state.trades.filter(t => t.clientId === client.id && (t.date||"") < todayStr);
             const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(histTrades);
-            const box1Realized = histClosed.reduce((a,c) => a + c.totalPnl, 0);
-            const histMonths   = [...new Set(histTrades.map(t => (t.date||"").slice(0,7)))];
-            const box1Expenses = histMonths.reduce((a,m) => a + getMonthlyCharges(client.id,m), 0);
-            const box1Software = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
-            const box1Interest = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
-            const box1Net      = box1Realized - box1Expenses - box1Software - box1Interest;
+            const boxARealized = histClosed.reduce((a,c) => a + c.totalPnl, 0);
+            const histMonths   = [...new Set(histTrades.map(t => (t.date||"").slice(0,7)).filter(Boolean))];
+            const boxAExpenses = histMonths.reduce((a,m) => a + getMonthlyCharges(client.id,m), 0);
+            const boxASoftware = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
+            const boxAInterest = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
+            // Open positions MTM at yesterday's closing price
+            const boxAOpenMTM  = histOpen.reduce((s, pos) => {
+              const closeP = ySnap[pos.contract] || getBhavClose(pos.contract);
+              if (!closeP) return s;
+              return s + (pos.side === "SELL" ? (pos.avgPrice - closeP) : (closeP - pos.avgPrice)) * pos.netQty;
+            }, 0);
+            const boxA = boxARealized + boxAOpenMTM - boxAExpenses - boxASoftware - boxAInterest;
 
-            // BOX 2: Today's P&L (captured from ODIN — date = today)
-            // Closed positions from today's trades + Live MTM on today's open positions
-            const todayTrades  = state.trades.filter(t => t.clientId === client.id && (t.date||"") === todayStr);
-            const { openPositions: todayOpen, closedPositions: todayClosed2 } = applyFIFO([...histTrades, ...todayTrades]);
-            // Closed TODAY = positions where last trade is today
-            const todayClosedPnl = todayClosed2
-              .filter(cp => cp.trades.some(t => (t.date||"") === todayStr))
+            // ── BOX B: Today's Intraday P&L (LIVE) ──────────────────
+            // = Delta on carry-forward positions (today LTP - yesterday close)
+            // + Booked P&L on positions opened & closed today
+            // + Live MTM on positions opened today (not yet closed)
+            const carryForwardMTM = histOpen.reduce((s, pos) => {
+              const todayLTP  = getBhavClose(pos.contract);
+              const yestClose = ySnap[pos.contract];
+              if (!todayLTP || !yestClose) return s;
+              // Delta only: today price - yesterday price
+              const delta = pos.side === "SELL"
+                ? (yestClose - todayLTP)   // short: profit if today < yesterday
+                : (todayLTP  - yestClose); // long:  profit if today > yesterday
+              return s + delta * pos.netQty;
+            }, 0);
+            // Positions opened AND closed today
+            const todayTrades    = state.trades.filter(t => t.clientId === client.id && (t.date||"") === todayStr);
+            const allTrades      = [...histTrades, ...todayTrades];
+            const { openPositions: allOpen2, closedPositions: allClosed2 } = applyFIFO(allTrades);
+            const todayBooked    = allClosed2
+              .filter(cp => cp.trades.some(t => (t.date||"") === todayStr) && cp.trades.every(t => (t.date||"") >= todayStr))
               .reduce((a,c) => a + c.totalPnl, 0);
-            // Live MTM on currently open positions (all open, including carry-forward)
-            const box2MTM  = open.reduce((s, pos) => {
+            // New positions opened today, not yet closed - live MTM from zero
+            const todayNewOpen   = allOpen2.filter(pos =>
+              pos.trades && pos.trades.every(t => (t.date||"") === todayStr)
+            );
+            const todayNewMTM    = todayNewOpen.reduce((s, pos) => {
               const ltp = getBhavClose(pos.contract);
-              if (ltp === null) return s;
+              if (!ltp) return s;
               return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
             }, 0);
-            const box2Total = todayClosedPnl + box2MTM;
+            const boxB = carryForwardMTM + todayBooked + todayNewMTM;
+
+            // ── BOX C: Total (A + B) ─────────────────────────────────
+            const boxC = boxA + boxB;
+
+            // For expanded view - show all open positions with their MTM
+            const box2MTM = grandMTM; // reuse for expanded position list
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
@@ -3472,24 +3561,24 @@ export default function BackOffice() {
                   </div>
                 )}
 
-                {/* ── TWO DAILY P&L BOXES ── */}
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:20 }}>
+                {/* ── THREE P&L BOXES: A + B = C ── */}
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12, marginBottom:20 }}>
 
-                  {/* BOX 1 — Historical P&L (frozen, no live prices) */}
-                  <div style={{ background:C.bg, borderRadius:12, padding:"18px 20px",
+                  {/* BOX A — P&L Till Yesterday (FROZEN) */}
+                  <div style={{ background:C.bg, borderRadius:12, padding:"16px 18px",
                     border:`1px solid ${C.border}` }}>
-                    <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase",
-                      letterSpacing:1, marginBottom:6 }}>P&L (Till Yesterday)</div>
-                    <div style={{ fontSize:28, fontWeight:800,
-                      color:box1Net>=0?C.green:C.red, marginBottom:4 }}>
-                      {box1Net>=0?"+":""}₹{Math.abs(box1Net).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                    <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase",
+                      letterSpacing:1, marginBottom:5 }}>A — Till Yesterday</div>
+                    <div style={{ fontSize:24, fontWeight:800,
+                      color:boxA>=0?C.green:C.red, marginBottom:3 }}>
+                      {boxA>=0?"+":""}₹{Math.abs(boxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
                     </div>
-                    <div style={{ fontSize:11, color:C.muted }}>
-                      Realized − Expenses − Charges
+                    <div style={{ fontSize:10, color:C.muted }}>
+                      Booked + yesterday's close MTM
                     </div>
                   </div>
 
-                  {/* BOX 2 — Today's Live P&L (expandable) */}
+                  {/* BOX B — Today's Intraday P&L (LIVE, expandable) */}
                   {(()=>{
                     const [expanded, setExpanded] = [
                       todayPnlExpanded[client.id],
@@ -3497,24 +3586,24 @@ export default function BackOffice() {
                     ];
                     return (
                       <div style={{ background:C.bg, borderRadius:12, padding:"18px 20px",
-                        border:`2px solid ${box2Total>=0?C.green+"44":C.red+"44"}`,
-                        boxShadow:`0 0 16px ${box2Total>=0?C.green+"18":C.red+"18"}`,
+                        border:`2px solid ${boxB>=0?C.green+"44":C.red+"44"}`,
+                        boxShadow:`0 0 16px ${boxB>=0?C.green+"18":C.red+"18"}`,
                         cursor:"pointer" }}
                         onClick={() => setExpanded(!expanded)}>
                         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
                           <div>
                             <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase",
                               letterSpacing:1, marginBottom:6 }}>
-                              Today's P&L {angelMTMStatus==="live" ?
+                              B — Today's Intraday {angelMTMStatus==="live" ?
                                 <span style={{color:C.green}}>● Live</span> :
                                 <span style={{color:C.muted}}>○</span>}
                             </div>
                             <div style={{ fontSize:28, fontWeight:800,
                               color:box2Total>=0?C.green:C.red, marginBottom:4 }}>
-                              {box2Total>=0?"+":""}₹{Math.abs(box2Total).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                              {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
                             </div>
                             <div style={{ fontSize:11, color:C.muted }}>
-                              {open.length} open positions · click to {expanded?"hide":"expand"}
+                              {allOpen2?.length||open.length} pos · click to {expanded?"hide":"expand"}
                             </div>
                           </div>
                           <span style={{ color:C.muted, fontSize:18 }}>{expanded?"▲":"▼"}</span>
@@ -3572,8 +3661,8 @@ export default function BackOffice() {
                               borderTop:`1px solid ${C.border}`,
                               fontWeight:700, fontSize:13 }}>
                               <span style={{color:C.muted}}>Today Total</span>
-                              <span style={{color:box2Total>=0?C.green:C.red}}>
-                                {box2Total>=0?"+":""}₹{Math.abs(box2Total).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                              <span style={{color:boxB>=0?C.green:C.red}}>
+                                {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
                               </span>
                             </div>
                           </div>
@@ -3582,8 +3671,22 @@ export default function BackOffice() {
                     );
                   })()}
 
+                  {/* BOX C — Total Live P&L (A + B) */}
+                  <div style={{ background:C.bg, borderRadius:12, padding:"16px 18px",
+                    border:`2px solid ${boxC>=0?C.green+"66":C.red+"66"}`,
+                    boxShadow:`0 0 20px ${boxC>=0?C.green+"22":C.red+"22"}` }}>
+                    <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase",
+                      letterSpacing:1, marginBottom:5 }}>C = A + B (Total Live)</div>
+                    <div style={{ fontSize:24, fontWeight:800,
+                      color:boxC>=0?C.green:C.red, marginBottom:3 }}>
+                      {boxC>=0?"+":""}₹{Math.abs(boxC).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                    </div>
+                    <div style={{ fontSize:10, color:C.muted }}>
+                      Full month P&L including live
+                    </div>
+                  </div>
                 </div>
-                {/* ── END DAILY P&L BOXES ── */}
+                {/* ── END 3-BOX P&L ── */}
 
                 {/* Grand summary cards */}
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
@@ -4173,7 +4276,7 @@ export default function BackOffice() {
 
 
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
-      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} />;
+      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} saveClosingSnapshot={saveClosingSnapshot} />;
     }
 
     // ── Super Admin: Manage Admins ──
