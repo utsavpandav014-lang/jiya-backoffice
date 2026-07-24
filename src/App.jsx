@@ -3535,12 +3535,13 @@ export default function BackOffice() {
             const todayTrades    = state.trades.filter(t => t.clientId === client.id && (t.date||"") === todayStr);
             const allTrades      = [...histTrades, ...todayTrades];
             const { openPositions: allOpen2, closedPositions: allClosed2 } = applyFIFO(allTrades);
-            const todayBooked    = allClosed2
-              .filter(cp => cp.trades.some(t => (t.date||"") === todayStr) && cp.trades.every(t => (t.date||"") >= todayStr))
+            // todayBooked: positions closed today (all their trades are from today)
+            const todayBooked = allClosed2
+              .filter(cp => (cp.trades||[]).some(t => (t.date||"") === todayStr) && (cp.trades||[]).every(t => (t.date||"") >= todayStr))
               .reduce((a,c) => a + c.totalPnl, 0);
-            // New positions opened today, not yet closed - live MTM from zero
-            const todayNewOpen   = allOpen2.filter(pos =>
-              pos.trades && pos.trades.every(t => (t.date||"") === todayStr)
+            // New positions opened today only, not yet closed
+            const todayNewOpen = allOpen2.filter(pos =>
+              (pos.trades||[]).length > 0 && (pos.trades||[]).every(t => (t.date||"") === todayStr)
             );
             const todayNewMTM    = todayNewOpen.reduce((s, pos) => {
               const ltp = getBhavClose(pos.contract);
