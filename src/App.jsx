@@ -1280,9 +1280,9 @@ export default function BackOffice() {
       const dbgKeys = Object.keys(newMTM);
       console.log("angelLiveMTM keys:", dbgKeys);
       console.log("FIFO contract names:", dbgContracts);
-      const matched = dbgContracts.filter(c => newMTM[c]);
-      const unmatched = dbgContracts.filter(c => !newMTM[c]);
-      console.log("Matched:", matched.length, "Unmatched:", unmatched);
+      const dbgMatched   = dbgContracts.filter(c => newMTM[c]);
+      const dbgUnmatched = dbgContracts.filter(c => !newMTM[c]);
+      console.log("Matched:", dbgMatched.length, "Unmatched:", dbgUnmatched);
 
       notify(`✅ Closing prices updated for ${fetched}/${uniqueContracts.length} contracts`);
 
@@ -3507,8 +3507,11 @@ export default function BackOffice() {
             const boxASoftware = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
             const boxAInterest = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
             // Open positions MTM at yesterday's closing price
+            // If no snapshot yet → use current live price (same as grandMTM)
             const boxAOpenMTM  = histOpen.reduce((s, pos) => {
-              const closeP = ySnap[pos.contract] || getBhavClose(pos.contract);
+              const closeP = ySnap[pos.contract]
+                ? ySnap[pos.contract]
+                : getBhavClose(pos.contract); // fallback to live if no snapshot
               if (!closeP) return s;
               return s + (pos.side === "SELL" ? (pos.avgPrice - closeP) : (closeP - pos.avgPrice)) * pos.netQty;
             }, 0);
@@ -3544,7 +3547,12 @@ export default function BackOffice() {
               if (!ltp) return s;
               return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
             }, 0);
-            const boxB = carryForwardMTM + todayBooked + todayNewMTM;
+            // If no today's trades AND no yesterday snapshot → boxB = 0 (nothing to compare)
+            const hasYesterdaySnapshot = Object.keys(ySnap).length > 0;
+            const hasTodayTrades = todayTrades.length > 0;
+            const boxB = (hasYesterdaySnapshot || hasTodayTrades)
+              ? carryForwardMTM + todayBooked + todayNewMTM
+              : 0;
 
             // ── BOX C: Total (A + B) ─────────────────────────────────
             const boxC = boxA + boxB;
