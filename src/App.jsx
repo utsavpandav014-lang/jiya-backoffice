@@ -879,31 +879,46 @@ export default function BackOffice() {
 
   // Load instrument master from Angel One (no auth needed)
   const loadInstrumentMaster = async () => {
-    // Always reload to get fresh data with correct keys
-    const lastLoad = instrMasterRef.current._loadedAt || 0;
-    if (Date.now() - lastLoad < 30 * 60 * 1000 && Object.keys(instrMasterRef.current).length > 1) return;
+    const lastLoad    = instrMasterRef.current._loadedAt    || 0;
+    const lastFailed  = instrMasterRef.current._failedAt    || 0;
+    const alreadyLoaded = Object.keys(instrMasterRef.current).length > 1;
+
+    // Don't retry within 5 minutes of a failure
+    if (lastFailed && Date.now() - lastFailed < 5 * 60 * 1000) return;
+    // Don't reload if loaded within last 30 minutes
+    if (alreadyLoaded && Date.now() - lastLoad < 30 * 60 * 1000) return;
+
     try {
       const r = await fetch(ANGEL_PROXY, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "instrument_master", apiKey: angelCreds.apiKey })
       });
+      if (!r.ok) {
+        instrMasterRef.current._failedAt = Date.now();
+        console.log("Instrument master HTTP error:", r.status);
+        return;
+      }
       const data = await r.json();
       if (data.status && data.data?.length) {
         const map = {};
         data.data.forEach(x => {
-          // Index by ALL possible name fields to maximize match chances
           if (x.symbol)        map[x.symbol.toUpperCase()]        = { token: x.token, exchange: x.exch_seg };
           if (x.tradingsymbol) map[x.tradingsymbol.toUpperCase()] = { token: x.token, exchange: x.exch_seg };
           if (x.name)          map[x.name.toUpperCase()]          = { token: x.token, exchange: x.exch_seg };
         });
-        instrMasterRef.current = map;
-        instrMasterRef.current._loadedAt = Date.now();
-        contractTokenMapRef.current = {}; // clear stale token cache
-        console.log("Instrument master loaded:", data.data.length, "instruments,", Object.keys(map).length, "keys");
+        instrMasterRef.current      = map;
+        instrMasterRef.current._loadedAt  = Date.now();
+        instrMasterRef.current._failedAt  = 0;
+        contractTokenMapRef.current = {};
+        console.log("Instrument master loaded:", data.data.length, "instruments");
+      } else {
+        instrMasterRef.current._failedAt = Date.now();
       }
     } catch(e) {
+      instrMasterRef.current._failedAt = Date.now();
       console.log("Instrument master load error:", e.message);
+      // Don't rethrow — let polling continue without it
     }
   };
 
