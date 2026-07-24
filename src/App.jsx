@@ -384,7 +384,7 @@ function calcMTM(positions) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, input }) {
+function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, input, auth, onLogout }) {
   const [adminPwd,    setAdminPwd]    = useState("");
   const [clientSel,   setClientSel]   = useState("");
   const [clientPwd,   setClientPwd]   = useState("");
@@ -403,48 +403,26 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
     try {
       const isSuper = auth?.role === "superadmin";
       if (isSuper) {
-        // JIYA superadmin — save to a special record in admins table
-        const record = {
-          id: "JIYA_SUPERADMIN",
-          username: "JIYA",
-          password: adminPwd,
-          name: "JIYA",
-          plan: "superadmin",
-          createdBy: "JIYA",
-          updatedAt: new Date().toISOString(),
-        };
-        await withSync(() => sb.upsert("admins", record));
-        // Save to localStorage so next login check works
+        // Save to localStorage so login check picks it up
         try { localStorage.setItem("jiya_super_password", adminPwd); } catch(e) {}
+        // Also save to admins table
+        await withSync(() => sb.upsert("admins", {
+          id: "JIYA_SUPERADMIN", username: "JIYA",
+          password: adminPwd, name: "JIYA", plan: "superadmin", createdBy: "JIYA",
+        }));
       } else {
-        // Mini admin — update their record in admins table
+        // Mini admin — update admins table
         const myAdmin = (state.admins||[]).find(a => a.id === auth?.adminId);
         if (!myAdmin) { notify("Admin record not found", "error"); setSaving(false); return; }
-        const updated = { ...myAdmin, password: adminPwd, updatedAt: new Date().toISOString() };
+        const updated = { ...myAdmin, password: adminPwd };
+        // Remove any fields not in schema
+        delete updated.updatedAt;
         await withSync(() => sb.upsert("admins", updated));
         setState(s => ({ ...s, admins: s.admins.map(a => a.id === myAdmin.id ? updated : a) }));
       }
-
-      // Force logout all sessions by saving a global timestamp
-      const logoutSignal = Date.now().toString();
-      try {
-        await withSync(() => sb.upsert("admins", {
-          id: `LOGOUT_SIGNAL_${auth?.adminId || "JIYA"}`,
-          username: `__logout_${auth?.adminId || "JIYA"}`,
-          password: logoutSignal,
-          name: "logout_signal",
-          plan: "basic",
-        }));
-      } catch(e) {}
-
       setAdminPwd("");
-      notify("✅ Password changed! Please login again with new password.");
-      // Log out current session after 2 seconds
-      setTimeout(() => {
-        setAuth(null);
-        setPage("dashboard");
-        try { sessionStorage.clear(); } catch(e) {}
-      }, 2000);
+      notify("✅ Password changed! Logging out in 2 seconds...");
+      setTimeout(() => { if (onLogout) onLogout(); }, 2000);
     } catch(e) {
       notify("❌ Failed: " + e.message, "error");
     }
@@ -685,7 +663,7 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
       </div>
 
       {/* ── Password Management ── */}
-      <PasswordManager state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} />
+      <PasswordManager state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} auth={auth} onLogout={logout} />
 
       {/* What gets automated */}
       {angelStatus === "connected" && (
