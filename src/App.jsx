@@ -3611,7 +3611,7 @@ export default function BackOffice() {
                                 <span style={{color:C.muted}}>○</span>}
                             </div>
                             <div style={{ fontSize:28, fontWeight:800,
-                              color:box2Total>=0?C.green:C.red, marginBottom:4 }}>
+                              color:boxB>=0?C.green:C.red, marginBottom:4 }}>
                               {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
                             </div>
                             <div style={{ fontSize:11, color:C.muted }}>
