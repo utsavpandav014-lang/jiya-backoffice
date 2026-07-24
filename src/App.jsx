@@ -1080,12 +1080,11 @@ export default function BackOffice() {
   // ── Save Closing Snapshot at 5:00 PM IST ──────────────────────
   const saveClosingSnapshot = useCallback(() => {
     const today = new Date().toISOString().slice(0,10);
-    if (snapshotSavedDate === today) return; // already saved today
+    if (snapshotSavedDate === today) return;
 
     const mtm = angelLiveMTM;
-    if (Object.keys(mtm).length === 0) return; // no prices yet
+    if (Object.keys(mtm).length === 0) return;
 
-    // Build snapshot: { contract: closePrice }
     const snapshot = {};
     Object.entries(mtm).forEach(([contract, data]) => {
       if (data?.ltp) snapshot[contract] = data.ltp;
@@ -1093,9 +1092,7 @@ export default function BackOffice() {
 
     if (Object.keys(snapshot).length === 0) return;
 
-    // Save to localStorage
     const allSnapshots = { ...closingSnapshot, [today]: snapshot };
-    // Keep only last 7 days
     const keys = Object.keys(allSnapshots).sort().slice(-7);
     const trimmed = {};
     keys.forEach(k => { trimmed[k] = allSnapshots[k]; });
@@ -1106,16 +1103,7 @@ export default function BackOffice() {
       localStorage.setItem("closing_snapshot", JSON.stringify(trimmed));
       localStorage.setItem("snapshot_saved_date", today);
     } catch(e) {}
-    notify("📸 5 PM closing snapshot saved — " + Object.keys(snapshot).length + " contracts");
-
-    // Also save to Supabase for persistence across devices
-    const rows = Object.entries(snapshot).map(([contract, price]) => ({
-      id: `SNAP_${today}_${contract.replace(/\s+/g,"_")}`,
-      date: today, contract, closePrice: price, savedAt: new Date().toISOString()
-    }));
-    withSync(() =>
-      sb.upsert("closing_snapshot", rows[0]) // upsert one by one
-    );
+    notify("📸 Closing snapshot saved — " + Object.keys(snapshot).length + " contracts");
   }, [angelLiveMTM, closingSnapshot, snapshotSavedDate]);
 
   // ── Angel One: Auto Closing Prices at 7:00 PM ──
