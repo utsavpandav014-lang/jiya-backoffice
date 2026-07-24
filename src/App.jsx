@@ -3650,14 +3650,15 @@ export default function BackOffice() {
                                 </div>
                               );
                             })}
-                            {/* Today's closed positions */}
-                            {todayClosed.length > 0 && (
-                              <div style={{marginTop:8, paddingTop:8, borderTop:`1px solid ${C.border}`}}>
-                                <div style={{color:C.muted,fontSize:11,marginBottom:6}}>CLOSED TODAY</div>
-                                {todayClosed.map((cp,i) => (
-                                  <div key={i} style={{ display:"flex", justifyContent:"space-between",
-                                    padding:"5px 0", fontSize:12 }}>
-                                    <span style={{color:C.text}}>{cp.contract}</span>
+                            <div style={{ display:"flex", justifyContent:"space-between",
+                              marginTop:10, paddingTop:8,
+                              borderTop:`1px solid ${C.border}`,
+                              fontWeight:700, fontSize:13 }}>
+                              <span style={{color:C.muted}}>Today's Total</span>
+                              <span style={{color:boxB>=0?C.green:C.red}}>
+                                {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                              </span>
+                            </div>
                                     <span style={{color:cp.totalPnl>=0?C.green:C.red,fontWeight:600}}>
                                       {cp.totalPnl>=0?"+":""}₹{Math.abs(cp.totalPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
                                     </span>
