@@ -3659,22 +3659,6 @@ export default function BackOffice() {
                                 {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
                               </span>
                             </div>
-                                    <span style={{color:cp.totalPnl>=0?C.green:C.red,fontWeight:600}}>
-                                      {cp.totalPnl>=0?"+":""}₹{Math.abs(cp.totalPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            <div style={{ display:"flex", justifyContent:"space-between",
-                              marginTop:10, paddingTop:8,
-                              borderTop:`1px solid ${C.border}`,
-                              fontWeight:700, fontSize:13 }}>
-                              <span style={{color:C.muted}}>Today Total</span>
-                              <span style={{color:boxB>=0?C.green:C.red}}>
-                                {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                              </span>
-                            </div>
                           </div>
                         )}
                       </div>
