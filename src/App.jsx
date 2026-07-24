@@ -550,7 +550,7 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
-function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices, saveClosingSnapshot }) {
+function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
     password:    angelCreds.password    || "",
@@ -601,10 +601,7 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
               style={{...btn(C.green),fontSize:12}}>
               📋 Fetch Live Prices Now
             </button>
-            <button onClick={saveClosingSnapshot}
-              style={{...btn(C.accent),fontSize:12}}>
-              📸 Save Closing Snapshot
-            </button>
+
           </div>
         )}
       </div>
@@ -3700,16 +3697,14 @@ export default function BackOffice() {
                 </div>
                 {/* ── END 3-BOX P&L ── */}
 
-                {/* Grand summary cards */}
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
+                {/* Grand summary cards — Row 2: Till Yesterday Breakdown */}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12, marginBottom:24 }}>
                   {[
-                    { label:"Realized P&L",     val:grandRealized,         color:grandRealized>=0?C.green:C.red },
-                    { label:"Expenses",          val:-grandExpenses,        color:C.yellow },
-                    { label:"Software Charges",  val:-grandSoftware,        color:C.purple },
-                    { label:"Interest",          val:-grandInterest,        color:C.red },
-                    { label:"Live MTM",          val:grandMTM,              color:grandMTM>=0?C.green:C.red },
-                    { label:"Net P&L",           val:grandNet+grandMTM,     color:(grandNet+grandMTM)>=0?C.green:C.red, big:true },
-                    { label:"Open Positions",    val:open.length,           color:C.accent, count:true },
+                    { label:"Realized P&L",    val:boxA + boxAExpenses + boxASoftware + boxAInterest, color:(boxA+boxAExpenses+boxASoftware+boxAInterest)>=0?C.green:C.red },
+                    { label:"Expenses",         val:-boxAExpenses,   color:C.yellow },
+                    { label:"Software Charges", val:-boxASoftware,   color:C.purple },
+                    { label:"Interest",         val:-boxAInterest,   color:C.red },
+                    { label:"Net P&L",          val:boxA,            color:boxA>=0?C.green:C.red, big:true },
                   ].map(s => (
                     <div key={s.label} style={{ background:C.bg, borderRadius:10, padding:"14px 16px",
                       border:`1px solid ${s.big ? s.color+"66" : C.border}`,
@@ -3724,23 +3719,20 @@ export default function BackOffice() {
 
                 {/* Formula line */}
                 <div style={{ background:C.bg, borderRadius:8, padding:"10px 16px", marginBottom:20, fontSize:13, color:C.muted, display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
-                  <span style={{ color:grandRealized>=0?C.green:C.red, fontWeight:600 }}>₹{grandRealized.toFixed(2)}</span>
+                  <span style={{ color:(boxA+boxAExpenses+boxASoftware+boxAInterest)>=0?C.green:C.red, fontWeight:600 }}>₹{(boxA+boxAExpenses+boxASoftware+boxAInterest).toFixed(2)}</span>
                   <span>(Realized)</span>
                   <span>−</span>
-                  <span style={{ color:C.yellow, fontWeight:600 }}>₹{grandExpenses.toFixed(2)}</span>
+                  <span style={{ color:C.yellow, fontWeight:600 }}>₹{boxAExpenses.toFixed(2)}</span>
                   <span>(Expenses)</span>
                   <span>−</span>
-                  <span style={{ color:C.purple, fontWeight:600 }}>₹{grandSoftware.toFixed(2)}</span>
+                  <span style={{ color:C.purple, fontWeight:600 }}>₹{boxASoftware.toFixed(2)}</span>
                   <span>(Software)</span>
                   <span>−</span>
-                  <span style={{ color:C.red, fontWeight:600 }}>₹{grandInterest.toFixed(2)}</span>
+                  <span style={{ color:C.red, fontWeight:600 }}>₹{boxAInterest.toFixed(2)}</span>
                   <span>(Interest)</span>
                   <span>=</span>
-                  <span style={{ color:grandMTM>=0?C.green:C.red, fontWeight:600 }}>₹{grandMTM.toFixed(2)}</span>
-                  <span>(Live MTM)</span>
-                  <span>=</span>
-                  <span style={{ color:(grandNet+grandMTM)>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{(grandNet+grandMTM).toFixed(2)}</span>
-                  <span style={{ color:C.muted }}>(Net P&L)</span>
+                  <span style={{ color:boxA>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{boxA.toFixed(2)}</span>
+                  <span style={{ color:C.muted }}>(Net P&L — Till Yesterday)</span>
                 </div>
 
                 {/* Month-by-month breakdown */}
@@ -3801,11 +3793,11 @@ export default function BackOffice() {
                       <tfoot>
                         <tr style={{ borderTop:`2px solid ${C.border}` }}>
                           <td style={{ padding:"10px 12px", color:C.muted, fontWeight:700, fontSize:12 }}>GRAND TOTAL</td>
-                          <td style={{ padding:"10px 12px", color:grandRealized>=0?C.green:C.red, fontWeight:700 }}>₹{grandRealized.toFixed(2)}</td>
-                          <td style={{ padding:"10px 12px", color:C.yellow, fontWeight:700 }}>− ₹{grandExpenses.toFixed(2)}</td>
-                          <td style={{ padding:"10px 12px", color:C.red, fontWeight:700 }}>− ₹{grandInterest.toFixed(2)}</td>
-                          <td style={{ padding:"10px 12px", color:C.purple, fontWeight:700 }}>₹{grandSoftware.toFixed(2)}</td>
-                          <td style={{ padding:"10px 12px", color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:(boxA+boxAExpenses+boxASoftware+boxAInterest)>=0?C.green:C.red, fontWeight:700 }}>₹{(boxA+boxAExpenses+boxASoftware+boxAInterest).toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.yellow, fontWeight:700 }}>− ₹{boxAExpenses.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.red, fontWeight:700 }}>− ₹{boxAInterest.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.purple, fontWeight:700 }}>₹{boxASoftware.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:boxA>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{boxA.toFixed(2)}</td>
                         </tr>
                       </tfoot>
                     </table>
@@ -4288,7 +4280,7 @@ export default function BackOffice() {
 
 
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
-      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} saveClosingSnapshot={saveClosingSnapshot} />;
+      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} />;
     }
 
     // ── Super Admin: Manage Admins ──
