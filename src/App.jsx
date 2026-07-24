@@ -560,7 +560,7 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
-function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices }) {
+function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices, logout }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
     password:    angelCreds.password    || "",
@@ -4279,7 +4279,7 @@ export default function BackOffice() {
 
 
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
-      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} />;
+      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} logout={logout} />;
     }
 
     // ── Super Admin: Manage Admins ──
