@@ -401,18 +401,50 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
     }
     setSaving(true);
     try {
-      // Admin is stored in clients with id === "JIYA" or role === "admin"
-      const adminClient = clients.find(c => c.id === "JIYA" || c.role === "admin") || { id: "JIYA", name: "Admin", role: "admin" };
-      const updated = { ...adminClient, password: adminPwd };
-      // Save to Supabase
-      await withSync(() => sb.upsert("clients", updated));
-      // Update local state
-      setState(s => ({
-        ...s,
-        clients: s.clients.map(c => c.id === adminClient.id ? updated : c)
-      }));
+      const isSuper = auth?.role === "superadmin";
+      if (isSuper) {
+        // JIYA superadmin — save to a special record in admins table
+        const record = {
+          id: "JIYA_SUPERADMIN",
+          username: "JIYA",
+          password: adminPwd,
+          name: "JIYA",
+          plan: "superadmin",
+          createdBy: "JIYA",
+          updatedAt: new Date().toISOString(),
+        };
+        await withSync(() => sb.upsert("admins", record));
+        // Save to localStorage so next login check works
+        try { localStorage.setItem("jiya_super_password", adminPwd); } catch(e) {}
+      } else {
+        // Mini admin — update their record in admins table
+        const myAdmin = (state.admins||[]).find(a => a.id === auth?.adminId);
+        if (!myAdmin) { notify("Admin record not found", "error"); setSaving(false); return; }
+        const updated = { ...myAdmin, password: adminPwd, updatedAt: new Date().toISOString() };
+        await withSync(() => sb.upsert("admins", updated));
+        setState(s => ({ ...s, admins: s.admins.map(a => a.id === myAdmin.id ? updated : a) }));
+      }
+
+      // Force logout all sessions by saving a global timestamp
+      const logoutSignal = Date.now().toString();
+      try {
+        await withSync(() => sb.upsert("admins", {
+          id: `LOGOUT_SIGNAL_${auth?.adminId || "JIYA"}`,
+          username: `__logout_${auth?.adminId || "JIYA"}`,
+          password: logoutSignal,
+          name: "logout_signal",
+          plan: "basic",
+        }));
+      } catch(e) {}
+
       setAdminPwd("");
-      notify("✅ Admin password changed successfully!");
+      notify("✅ Password changed! Please login again with new password.");
+      // Log out current session after 2 seconds
+      setTimeout(() => {
+        setAuth(null);
+        setPage("dashboard");
+        try { sessionStorage.clear(); } catch(e) {}
+      }, 2000);
     } catch(e) {
       notify("❌ Failed: " + e.message, "error");
     }
@@ -1746,8 +1778,12 @@ export default function BackOffice() {
     const userInput = loginForm.user.trim();
     const passInput = loginForm.pass;
 
-    // Constant-time comparison to prevent timing attacks
-    const isSuperAdmin = userInput === "JIYA" && passInput === "Jiya@3044";
+    // Check JIYA superadmin — use saved password if exists, else default
+    const savedSuperPwd = (() => { try { return localStorage.getItem("jiya_super_password") || "Jiya@3044"; } catch(e) { return "Jiya@3044"; } })();
+    // Also check admins table for updated password
+    const superAdminRecord = (state.admins||[]).find(a => a.id === "JIYA_SUPERADMIN");
+    const superPwd = superAdminRecord?.password || savedSuperPwd;
+    const isSuperAdmin = userInput === "JIYA" && passInput === superPwd;
 
     // Check sub-admin login
     const subAdmin = !isSuperAdmin
