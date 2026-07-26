@@ -4000,28 +4000,68 @@ export default function BackOffice() {
                 )}
 
                 {/* Closed contracts detail — filtered by current date selection */}
-                {filteredClosed.length > 0 && (
-                  <details>
-                    <summary style={{ color:C.muted, fontSize:12, cursor:"pointer", padding:"8px 0", userSelect:"none" }}>
-                      📋 View closed contracts ({filteredClosed.length})
-                    </summary>
-                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, marginTop:10 }}>
-                      <thead>
-                        <tr>{["Contract","Gross P&L"].map(h=>(
-                          <th key={h} style={{ textAlign:"left", padding:"6px 12px", color:C.muted, borderBottom:`1px solid ${C.border}` }}>{h}</th>
-                        ))}</tr>
-                      </thead>
-                      <tbody>
-                        {filteredClosed.map((c,i)=>(
-                          <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
-                            <td style={{ padding:"8px 12px", color:C.accent }}>{c.contract}</td>
-                            <td style={{ padding:"8px 12px", color:c.totalPnl>=0?C.green:C.red, fontWeight:600 }}>₹{c.totalPnl.toFixed(2)}</td>
+                {filteredClosed.length > 0 && (() => {
+                  const [pnlSearch, setPnlSearch] = React.useState("");
+                  const sl = pnlSearch.toLowerCase();
+                  const searchedClosed = sl
+                    ? filteredClosed.filter(c => c.contract.toLowerCase().includes(sl))
+                    : filteredClosed;
+                  const sumPnl = searchedClosed.reduce((a,c) => a + c.totalPnl, 0);
+                  return (
+                  <div>
+                    <details open>
+                      <summary style={{ color:C.muted, fontSize:12, cursor:"pointer", padding:"8px 0", userSelect:"none" }}>
+                        📋 Closed Contracts ({filteredClosed.length})
+                      </summary>
+                      {/* Search box */}
+                      <div style={{ display:"flex", gap:8, alignItems:"center", margin:"10px 0" }}>
+                        <div style={{ position:"relative", flex:1 }}>
+                          <span style={{ position:"absolute", left:8, top:"50%", transform:"translateY(-50%)", color:C.muted, fontSize:13 }}>🔍</span>
+                          <input
+                            type="text"
+                            placeholder="Search contracts... (e.g. NIFTY, 28JUL2026, PE)"
+                            value={pnlSearch}
+                            onChange={e => setPnlSearch(e.target.value)}
+                            style={{ ...input, paddingLeft:30, fontSize:12, padding:"6px 8px 6px 28px" }}
+                          />
+                        </div>
+                        {pnlSearch && (
+                          <button onClick={() => setPnlSearch("")}
+                            style={{ ...btn(C.muted), fontSize:11, padding:"6px 10px" }}>✕</button>
+                        )}
+                        {pnlSearch && (
+                          <span style={{ fontSize:11, color:C.muted }}>{searchedClosed.length}/{filteredClosed.length}</span>
+                        )}
+                      </div>
+                      <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, marginTop:4 }}>
+                        <thead>
+                          <tr>{["Contract","Gross P&L"].map(h=>(
+                            <th key={h} style={{ textAlign:"left", padding:"6px 12px", color:C.muted, borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                          ))}</tr>
+                        </thead>
+                        <tbody>
+                          {searchedClosed.map((c,i)=>(
+                            <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
+                              <td style={{ padding:"8px 12px", color:C.accent }}>{c.contract}</td>
+                              <td style={{ padding:"8px 12px", color:c.totalPnl>=0?C.green:C.red, fontWeight:600 }}>₹{c.totalPnl.toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr style={{ borderTop:`2px solid ${C.border}`, background:C.bg }}>
+                            <td style={{ padding:"8px 12px", fontWeight:700, color:C.muted, fontSize:11 }}>
+                              TOTAL {pnlSearch ? `(${searchedClosed.length} filtered)` : `(${filteredClosed.length})`}
+                            </td>
+                            <td style={{ padding:"8px 12px", fontWeight:800, color:sumPnl>=0?C.green:C.red }}>
+                              {sumPnl>=0?"+":""}₹{sumPnl.toFixed(2)}
+                            </td>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </details>
-                )}
+                        </tfoot>
+                      </table>
+                    </details>
+                  </div>
+                  );
+                })()}
 
                 {filteredClosed.length===0 && allMonths.length===0 && (
                   <div style={{ color:C.muted, fontSize:13 }}>No closed positions yet.</div>
