@@ -1207,6 +1207,25 @@ export default function BackOffice() {
                 console.log(`Mapped via symbol: ${contract} → ${result.symbol} → token ${entry.token}`);
               } else {
                 console.log(`Not found: ${contract} → tried ${result.symbol}`);
+                // Last resort: try ltp_single with scripName directly
+                if (scripName && angelToken && angelCreds.apiKey) {
+                  try {
+                    const isBSE2 = ["SENSEX","BANKEX"].includes(contract.split(" ")[0].toUpperCase());
+                    const r = await fetch(ANGEL_PROXY, {
+                      method: "POST", headers: {"Content-Type":"application/json"},
+                      body: JSON.stringify({
+                        action: "ltp_single", apiKey: angelCreds.apiKey, jwtToken: angelToken,
+                        payload: { exchange: isBSE2?"BFO":"NFO", tradingsymbol: scripName, symboltoken: "" }
+                      })
+                    });
+                    const d = await r.json();
+                    if (d.status && d.data?.ltp) {
+                      mapped = { token: d.data.symboltoken||scripName, exchange: isBSE2?"BFO":"NFO" };
+                      contractTokenMapRef.current[contract] = mapped;
+                      console.log(`Mapped via ltp_single: ${contract} → LTP ${d.data.ltp}`);
+                    }
+                  } catch(e) {}
+                }
               }
             }
           }
@@ -2662,7 +2681,9 @@ export default function BackOffice() {
           if (!ltp) return s;
           return s + (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty;
         }, 0);
-        const myBoxB = myBoxBMTM;
+        const myHasSnap = Object.keys(myYSnap).length > 0;
+        const myTodayTrades = myTrades.filter(t => (t.date||"") === myTodayStr);
+        const myBoxB = (myHasSnap || myTodayTrades.length > 0) ? myBoxBMTM : 0;
         const myBoxC = myBoxA + myBoxB;
 
         // Daily win rate
@@ -2710,7 +2731,7 @@ export default function BackOffice() {
             {/* ── 3 P&L Boxes: A + B = C ── */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:20}}>
               <div style={{...card,padding:"16px 20px"}}>
-                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>A — Till Yesterday</div>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>P&L Till Yesterday</div>
                 <div style={{fontSize:22,fontWeight:800,color:myBoxA>=0?C.green:C.red}}>
                   {myBoxA>=0?"+":""}₹{Math.abs(myBoxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
                 </div>
@@ -2720,7 +2741,7 @@ export default function BackOffice() {
                 border:`2px solid ${myBoxB>=0?C.green+"44":C.red+"44"}`,
                 boxShadow:`0 0 16px ${myBoxB>=0?C.green+"18":C.red+"18"}`}}>
                 <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>
-                  B — Today Live <span style={{color:angelMTMStatus==="live"?C.green:C.muted}}>{angelMTMStatus==="live"?"●":"○"}</span>
+                  Today's Live P&L <span style={{color:angelMTMStatus==="live"?C.green:C.muted}}>{angelMTMStatus==="live"?"●":"○"}</span>
                 </div>
                 <div style={{fontSize:22,fontWeight:800,color:myBoxB>=0?C.green:C.red}}>
                   {myBoxB>=0?"+":""}₹{Math.abs(myBoxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
@@ -2730,7 +2751,7 @@ export default function BackOffice() {
               <div style={{...card,padding:"16px 20px",
                 border:`2px solid ${myBoxC>=0?C.green+"66":C.red+"66"}`,
                 boxShadow:`0 0 20px ${myBoxC>=0?C.green+"22":C.red+"22"}`}}>
-                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>C = A + B Total</div>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>Total P&L</div>
                 <div style={{fontSize:22,fontWeight:800,color:myBoxC>=0?C.green:C.red}}>
                   {myBoxC>=0?"+":""}₹{Math.abs(myBoxC).toLocaleString("en-IN",{maximumFractionDigits:0})}
                 </div>
@@ -3766,7 +3787,7 @@ export default function BackOffice() {
                   <div style={{ background:C.bg, borderRadius:12, padding:"16px 18px",
                     border:`1px solid ${C.border}` }}>
                     <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase",
-                      letterSpacing:1, marginBottom:5 }}>A — Till Yesterday</div>
+                      letterSpacing:1, marginBottom:5 }}>P&L Till Yesterday</div>
                     <div style={{ fontSize:24, fontWeight:800,
                       color:boxA>=0?C.green:C.red, marginBottom:3 }}>
                       {boxA>=0?"+":""}₹{Math.abs(boxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
@@ -3792,7 +3813,7 @@ export default function BackOffice() {
                           <div>
                             <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase",
                               letterSpacing:1, marginBottom:6 }}>
-                              B — Today's Intraday {angelMTMStatus==="live" ?
+                              Today's P&L {angelMTMStatus==="live" ?
                                 <span style={{color:C.green}}>● Live</span> :
                                 <span style={{color:C.muted}}>○</span>}
                             </div>
@@ -3859,7 +3880,7 @@ export default function BackOffice() {
                     border:`2px solid ${boxC>=0?C.green+"66":C.red+"66"}`,
                     boxShadow:`0 0 20px ${boxC>=0?C.green+"22":C.red+"22"}` }}>
                     <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase",
-                      letterSpacing:1, marginBottom:5 }}>C = A + B (Total Live)</div>
+                      letterSpacing:1, marginBottom:5 }}>Total P&L</div>
                     <div style={{ fontSize:24, fontWeight:800,
                       color:boxC>=0?C.green:C.red, marginBottom:3 }}>
                       {boxC>=0?"+":""}₹{Math.abs(boxC).toLocaleString("en-IN",{maximumFractionDigits:0})}
