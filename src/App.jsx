@@ -1529,6 +1529,7 @@ export default function BackOffice() {
   const [pnlDateTo, setPnlDateTo] = useState("");
   const [addInterestForm, setAddInterestForm] = useState({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
   const [tradesClientFilter, setTradesClientFilter] = useState("all");
+  const [positionSearch, setPositionSearch] = useState(""); // smart search
   const [chargesEdit, setChargesEdit] = useState(null); // working copy for charges edit
 
   // Get charges config effective for a given date
@@ -2633,11 +2634,38 @@ export default function BackOffice() {
 
       // ── CLIENT DASHBOARD ─────────────────────────────────────
       if (auth?.role === "client") {
-        const myData   = clientPnlData.find(c => c.id === cid) || { realizedPnl: 0, mtmPnl: 0, openCount: 0 };
-        const myTrades = allTrades.filter(t => t.clientId === cid);
+        const myData    = clientPnlData.find(c => c.id === cid) || { realizedPnl: 0, mtmPnl: 0, openCount: 0 };
+        const myTrades  = allTrades.filter(t => t.clientId === cid);
+        const myOpen    = clientOpenPos(cid);
+        const myClosed  = clientClosedPos(cid);
         const myMonthPnl = clientNetPnlForMonth(cid, currentMonthStr);
 
-        // Daily win rate this month
+        // Box A/B/C for client
+        const myTodayStr   = new Date().toISOString().slice(0,10);
+        const myYestStr    = new Date(Date.now()-86400000).toISOString().slice(0,10);
+        const myYSnap      = closingSnapshot[myYestStr] || {};
+        const myHistTrades = myTrades.filter(t => (t.date||"") < myTodayStr);
+        const { openPositions: myHistOpen, closedPositions: myHistClosed } = applyFIFO(myHistTrades);
+        const myBoxARealized = myHistClosed.reduce((a,c) => a + c.totalPnl, 0);
+        const myHistMonths   = [...new Set(myHistTrades.map(t=>(t.date||"").slice(0,7)).filter(Boolean))];
+        const myBoxAExp  = myHistMonths.reduce((a,m) => a + getMonthlyCharges(cid,m), 0);
+        const myBoxASW   = myHistMonths.reduce((a,m) => a + getMonthlyInterest(cid,m+"_SW"), 0);
+        const myBoxAInt  = myHistMonths.reduce((a,m) => a + getMonthlyInterest(cid,m), 0);
+        const myBoxAMTM  = myHistOpen.reduce((s,pos) => {
+          const closeP = myYSnap[pos.contract] || getBhavClose(pos.contract);
+          if (!closeP) return s;
+          return s + (pos.side==="SELL" ? (pos.avgPrice-closeP) : (closeP-pos.avgPrice)) * pos.netQty;
+        }, 0);
+        const myBoxA = myBoxARealized + myBoxAMTM - myBoxAExp - myBoxASW - myBoxAInt;
+        const myBoxBMTM = myOpen.reduce((s,pos) => {
+          const ltp = getBhavClose(pos.contract);
+          if (!ltp) return s;
+          return s + (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty;
+        }, 0);
+        const myBoxB = myBoxBMTM;
+        const myBoxC = myBoxA + myBoxB;
+
+        // Daily win rate
         const dayMap2 = {};
         myTrades.filter(t=>(t.date||"").slice(0,7)===currentMonthStr).forEach(t=>{
           const d=t.date||""; if(!d) return;
@@ -2645,71 +2673,125 @@ export default function BackOffice() {
           const v=(t.price||0)*(t.qty||0);
           if(t.side==="BUY") dayMap2[d].buyVal+=v; else dayMap2[d].sellVal+=v;
         });
-        const tDays   = Object.values(dayMap2).filter(d=>d.buyVal>0||d.sellVal>0);
-        const pDays   = tDays.filter(d=>(d.sellVal-d.buyVal)>0).length;
-        const dayWR   = tDays.length>0 ? Math.round(pDays/tDays.length*100) : 0;
-        const myWrC   = winRate>=60?C.green:winRate>=40?C.yellow:C.red;
+        const tDays = Object.values(dayMap2).filter(d=>d.buyVal>0||d.sellVal>0);
+        const pDays = tDays.filter(d=>(d.sellVal-d.buyVal)>0).length;
+        const dayWR = tDays.length>0 ? Math.round(pDays/tDays.length*100) : 0;
+        const myWrC = dayWR>=60?C.green:dayWR>=40?C.yellow:C.red;
 
         return (
-          <div style={{maxWidth:960,margin:"0 auto"}}>
-            {/* Greeting header */}
-            <div style={{marginBottom:24,padding:"24px 28px",
-              background:`linear-gradient(135deg, ${C.accent}18 0%, ${C.accent}05 100%)`,
-              borderRadius:16,border:`1px solid ${C.accent}20`,
+          <div style={{maxWidth:1000,margin:"0 auto"}}>
+
+            {/* ── Hero greeting bar ── */}
+            <div style={{marginBottom:20,padding:"22px 28px",
+              background:`linear-gradient(135deg,#1e3a8a 0%,#1e40af 50%,${C.accent} 100%)`,
+              borderRadius:16,boxShadow:"0 8px 32px rgba(59,130,246,0.25)",
               display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
               <div>
-                <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:6}}>
+                <div style={{fontSize:11,color:"#93c5fd",fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:6}}>
                   {greeting}
                 </div>
-                <div style={{fontSize:22,fontWeight:800,color:C.text,marginBottom:2}}>
+                <div style={{fontSize:24,fontWeight:800,color:"#fff",marginBottom:2}}>
                   {currentClient?.name || "Client"}
                 </div>
-                <div style={{fontSize:12,color:C.muted}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div>
+                <div style={{fontSize:12,color:"#bfdbfe"}}>
+                  {new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}
+                </div>
               </div>
               <div style={{textAlign:"right"}}>
-                <div style={{fontSize:11,color:C.muted,marginBottom:4}}>This Month P&L</div>
-                <div style={{fontSize:28,fontWeight:800,color:myMonthPnl>=0?C.green:C.red}}>
-                  {myMonthPnl>=0?"+":""}₹{Math.abs(myMonthPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                <div style={{fontSize:10,color:"#93c5fd",letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>
+                  Total P&L {angelMTMStatus==="live"?"● Live":"○"}
+                </div>
+                <div style={{fontSize:32,fontWeight:900,color:myBoxC>=0?"#4ade80":"#f87171"}}>
+                  {myBoxC>=0?"+":""}₹{Math.abs(myBoxC).toLocaleString("en-IN",{maximumFractionDigits:0})}
                 </div>
               </div>
             </div>
 
-            {/* 3 stat cards */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:24}}>
-              {/* Realized P&L */}
-              <div style={{...card,padding:"20px 22px"}}>
-                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>All-Time Realized</div>
-                <div style={{fontSize:26,fontWeight:800,color:myData.realizedPnl>=0?C.green:C.red,lineHeight:1}}>
-                  {myData.realizedPnl>=0?"+":""}₹{Math.abs(myData.realizedPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+            {/* ── 3 P&L Boxes: A + B = C ── */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:20}}>
+              <div style={{...card,padding:"16px 20px"}}>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>A — Till Yesterday</div>
+                <div style={{fontSize:22,fontWeight:800,color:myBoxA>=0?C.green:C.red}}>
+                  {myBoxA>=0?"+":""}₹{Math.abs(myBoxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
                 </div>
-                <div style={{fontSize:11,color:C.muted,marginTop:6}}>Booked profits/losses</div>
+                <div style={{fontSize:10,color:C.muted,marginTop:4}}>Frozen at yesterday's close</div>
               </div>
-
-              {/* Win Rate */}
-              <div style={{...card,padding:"20px 22px",borderTop:`3px solid ${myWrC}`}}>
-                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Win Rate</div>
-                <div style={{display:"flex",alignItems:"baseline",gap:8}}>
-                  <div style={{fontSize:36,fontWeight:900,color:myWrC,lineHeight:1}}>{winRate}%</div>
-                  <div style={{fontSize:12,color:C.muted}}>12 months</div>
+              <div style={{...card,padding:"16px 20px",
+                border:`2px solid ${myBoxB>=0?C.green+"44":C.red+"44"}`,
+                boxShadow:`0 0 16px ${myBoxB>=0?C.green+"18":C.red+"18"}`}}>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>
+                  B — Today Live <span style={{color:angelMTMStatus==="live"?C.green:C.muted}}>{angelMTMStatus==="live"?"●":"○"}</span>
                 </div>
-                <div style={{marginTop:8,height:4,background:C.border,borderRadius:2,overflow:"hidden"}}>
-                  <div style={{height:"100%",width:winRate+"%",background:myWrC,borderRadius:2,transition:"width 1s"}}/>
+                <div style={{fontSize:22,fontWeight:800,color:myBoxB>=0?C.green:C.red}}>
+                  {myBoxB>=0?"+":""}₹{Math.abs(myBoxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
                 </div>
-                <div style={{fontSize:11,color:C.muted,marginTop:6}}>
-                  This month: <b style={{color:myWrC}}>{dayWR}%</b> daily ({pDays}/{tDays.length} days)
-                </div>
+                <div style={{fontSize:10,color:C.muted,marginTop:4}}>{myOpen.length} open positions</div>
               </div>
-
-              {/* Open Positions */}
-              <div style={{...card,padding:"20px 22px",cursor:"pointer"}}
-                onClick={()=>setPage("trades")}
-                onMouseEnter={e=>{e.currentTarget.style.boxShadow="0 4px 20px rgba(0,0,0,0.1)";e.currentTarget.style.transform="translateY(-2px)";}}
-                onMouseLeave={e=>{e.currentTarget.style.boxShadow="";e.currentTarget.style.transform="";}}>
-                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>Open Positions</div>
-                <div style={{fontSize:36,fontWeight:800,color:C.accent,lineHeight:1}}>{myData.openCount}</div>
-                <div style={{fontSize:11,color:C.muted,marginTop:6}}>Active contracts →</div>
+              <div style={{...card,padding:"16px 20px",
+                border:`2px solid ${myBoxC>=0?C.green+"66":C.red+"66"}`,
+                boxShadow:`0 0 20px ${myBoxC>=0?C.green+"22":C.red+"22"}`}}>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>C = A + B Total</div>
+                <div style={{fontSize:22,fontWeight:800,color:myBoxC>=0?C.green:C.red}}>
+                  {myBoxC>=0?"+":""}₹{Math.abs(myBoxC).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                </div>
+                <div style={{fontSize:10,color:C.muted,marginTop:4}}>Full month P&L</div>
               </div>
             </div>
+
+            {/* ── 4 KPI cards ── */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
+              {[
+                {label:"This Month Net",val:`${myMonthPnl>=0?"+":""}₹${Math.abs(myMonthPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}`,color:myMonthPnl>=0?C.green:C.red},
+                {label:"Open Positions",val:myOpen.length,color:C.accent,link:true},
+                {label:"Daily Win Rate",val:dayWR+"%",color:myWrC},
+                {label:"Closed Trades",val:myClosed.length,color:C.purple},
+              ].map((k,i)=>(
+                <div key={i} style={{...card,padding:"14px 16px",cursor:k.link?"pointer":"default"}}
+                  onClick={k.link?()=>setPage("trades"):undefined}>
+                  <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>{k.label}</div>
+                  <div style={{fontSize:20,fontWeight:800,color:k.color}}>{k.val}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* ── Live open positions mini-table ── */}
+            {myOpen.length > 0 && (
+              <div style={{...card,padding:0,overflow:"hidden",marginBottom:20}}>
+                <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div style={{fontWeight:700,color:C.text,fontSize:14}}>📈 Open Positions</div>
+                  <div style={{fontSize:11,color:angelMTMStatus==="live"?C.green:C.muted}}>
+                    {angelMTMStatus==="live"?"● Live prices":"○ Prices not connected"}
+                  </div>
+                </div>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                  <thead>
+                    <tr style={{background:C.bg}}>
+                      {["Contract","Side","Qty","Avg Price","LTP","MTM"].map(h=>(
+                        <th key={h} style={{padding:"9px 16px",color:C.muted,fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:0.5,textAlign:h==="Contract"||h==="Side"?"left":"right",borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {myOpen.map((pos,i)=>{
+                      const ltp = getBhavClose(pos.contract);
+                      const mtm = ltp !== null ? (pos.side==="SELL"?(pos.avgPrice-ltp):(ltp-pos.avgPrice))*pos.netQty : null;
+                      return (
+                        <tr key={i} style={{borderBottom:`1px solid ${C.border}22`}}>
+                          <td style={{padding:"10px 16px",color:C.accent,fontWeight:600}}>{pos.contract}</td>
+                          <td style={{padding:"10px 16px"}}><span style={{...badge(pos.side==="SELL"?C.red:C.green)}}>{pos.side}</span></td>
+                          <td style={{padding:"10px 16px",textAlign:"right",fontWeight:700}}>{pos.netQty}</td>
+                          <td style={{padding:"10px 16px",textAlign:"right"}}>₹{pos.avgPrice.toFixed(2)}</td>
+                          <td style={{padding:"10px 16px",textAlign:"right",color:C.accent}}>{ltp?`₹${ltp.toFixed(2)}`:"—"}</td>
+                          <td style={{padding:"10px 16px",textAlign:"right",fontWeight:700,color:mtm===null?C.muted:mtm>=0?C.green:C.red}}>
+                            {mtm===null?"—":`${mtm>=0?"+":""}₹${Math.abs(mtm).toLocaleString("en-IN",{maximumFractionDigits:0})}`}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
             {/* Quote */}
             <div style={{padding:"20px 24px",background:`linear-gradient(135deg,#1e3a5f,#1e3a8a)`,
@@ -3219,6 +3301,46 @@ export default function BackOffice() {
             ))}
           </div>
 
+          {/* Smart Search + Download */}
+          <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:16, flexWrap:"wrap" }}>
+            <div style={{ position:"relative", flex:1, minWidth:220 }}>
+              <span style={{ position:"absolute", left:10, top:"50%", transform:"translateY(-50%)", color:C.muted, fontSize:14 }}>🔍</span>
+              <input
+                type="text"
+                placeholder="Search contracts... (e.g. PATANJALI, 02JUL2026, PE, FUT)"
+                value={positionSearch}
+                onChange={e => setPositionSearch(e.target.value)}
+                style={{ ...input, paddingLeft:34, fontSize:13 }}
+              />
+            </div>
+            {positionSearch && (
+              <button onClick={() => setPositionSearch("")}
+                style={{ ...btn(C.muted), fontSize:12, padding:"8px 12px" }}>✕ Clear</button>
+            )}
+            <button onClick={() => {
+              // Download ALL positions as Excel (CSV)
+              const allOpen   = showClients.flatMap(c => clientOpenPos(c.id).map(p => ({...p, clientName: c.name})));
+              const allClosed = showClients.flatMap(c => clientClosedPos(c.id).map(p => ({...p, clientName: c.name})));
+              const rows = [
+                ["Type","Client","Contract","Side","Net Qty","Avg Price","Close Price","MTM P&L"],
+                ...allOpen.map(p => {
+                  const close = getBhavClose(p.contract);
+                  const mtm   = close !== null ? ((p.side==="SELL" ? (p.avgPrice-close) : (close-p.avgPrice)) * p.netQty).toFixed(2) : "";
+                  return ["OPEN", p.clientName||p.clientId, p.contract, p.side, p.netQty, p.avgPrice.toFixed(2), close?.toFixed(2)||"", mtm];
+                }),
+                ...allClosed.map(p => ["CLOSED", p.clientName||p.clientId, p.contract, "", "", "", "", p.totalPnl.toFixed(2)]),
+              ];
+              const csv = rows.map(r => r.map(v => '"'+v+'"').join(",")).join("\n");
+              const blob = new Blob([csv], { type:"text/csv" });
+              const url  = URL.createObjectURL(blob);
+              const a    = document.createElement("a");
+              a.href = url; a.download = `positions_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+              URL.revokeObjectURL(url);
+            }} style={{ ...btn(C.green), fontSize:12 }}>
+              ⬇ Download Excel
+            </button>
+          </div>
+
           {showClients.map(client => {
             const open   = clientOpenPos(client.id);
             const closed = clientClosedPos(client.id);
@@ -3242,9 +3364,22 @@ export default function BackOffice() {
                 )}
 
                 {/* Open Positions */}
-                {(positionFilter==="open" || positionFilter==="all") && open.length > 0 && (
+                {(positionFilter==="open" || positionFilter==="all") && open.length > 0 && (() => {
+                  const sl = positionSearch.toLowerCase();
+                  const filtOpen = sl ? open.filter(p =>
+                    p.contract.toLowerCase().includes(sl) || p.side.toLowerCase().includes(sl) || p.netQty.toString().includes(sl)
+                  ) : open;
+                  const sumMTM = filtOpen.reduce((s,p) => {
+                    const close = getBhavClose(p.contract);
+                    return s + (close !== null ? (p.side==="SELL" ? (p.avgPrice-close) : (close-p.avgPrice)) * p.netQty : 0);
+                  }, 0);
+                  const sumBooked = filtOpen.reduce((s,p) => s + (p.bookedPnl||0), 0);
+                  if (filtOpen.length === 0) return null;
+                  return (
                   <div style={{ ...card, marginBottom:12 }}>
-                    <div style={{ color:C.yellow, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>🟡 Open Positions</div>
+                    <div style={{ color:C.yellow, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>
+                      🟡 Open Positions {sl && `(${filtOpen.length}/${open.length})`}
+                    </div>
                     <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
                       <thead>
                         <tr>{["Contract","Net Qty","Side","Avg Price","Close Price","MTM P&L","Booked P&L"].map(h=>(
@@ -3252,7 +3387,7 @@ export default function BackOffice() {
                         ))}</tr>
                       </thead>
                       <tbody>
-                        {open.map((p,i) => {
+                        {filtOpen.map((p,i) => {
                           const close = getBhavClose(p.contract);
                           const mtm   = close !== null
                             ? (p.side==="SELL" ? (p.avgPrice-close) : (close-p.avgPrice)) * p.netQty
@@ -3278,14 +3413,40 @@ export default function BackOffice() {
                           );
                         })}
                       </tbody>
+                      {/* Sum row */}
+                      <tfoot>
+                        <tr style={{ borderTop:`2px solid ${C.border}`, background:C.sidebar }}>
+                          <td style={{ padding:"10px 12px", fontWeight:700, color:C.muted, fontSize:12 }}>TOTAL ({filtOpen.length})</td>
+                          <td colSpan={4}></td>
+                          <td style={{ padding:"10px 12px", fontWeight:800, color:sumMTM>=0?C.green:C.red }}>
+                            {sumMTM>=0?"+":""}₹{sumMTM.toFixed(2)}
+                          </td>
+                          <td style={{ padding:"10px 12px", fontWeight:800, color:sumBooked>=0?C.green:C.red }}>
+                            {sumBooked>=0?"+":""}₹{sumBooked.toFixed(2)}
+                          </td>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
-                )}
+                  );
+                })()}
 
                 {/* Closed Positions */}
-                {(positionFilter==="closed" || positionFilter==="all") && closed.length > 0 && (
+                {(positionFilter==="closed" || positionFilter==="all") && closed.length > 0 && (() => {
+                  const sl2 = positionSearch.toLowerCase();
+                  const filtClosed = sl2 ? closed.filter(cp => cp.contract.toLowerCase().includes(sl2)) : closed;
+                  if (filtClosed.length === 0) return null;
+                  const closedTrades = filtClosed.flatMap(c => c.trades||[]);
+                  const sumGross = filtClosed.reduce((s,cp) => s + (cp.totalPnl||0), 0);
+                  const sumNet   = closedTrades.reduce((s,t) => {
+                    const ch = getTradeCharges(t);
+                    return s + (t.pnl||0) - (ch.total||0);
+                  }, sumGross);
+                  return (
                   <div style={{ ...card, marginBottom:12 }}>
-                    <div style={{ color:C.green, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>✅ Closed Positions</div>
+                    <div style={{ color:C.green, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>
+                      ✅ Closed Positions {sl2 && `(${filtClosed.length}/${closed.length})`}
+                    </div>
                     <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
                       <thead>
                         <tr>{["Contract","Qty","Sell Price","Buy Price","Gross P&L","Charges","Net P&L"].map(h=>(
@@ -3293,7 +3454,7 @@ export default function BackOffice() {
                         ))}</tr>
                       </thead>
                       <tbody>
-                        {closed.flatMap(c=>c.trades).map((t,i) => {
+                        {filtClosed.flatMap(c=>c.trades||[]).map((t,i) => {
                           // Find trades for this closed trade to calc charges
                           const relatedTrades = clientTrades.filter(tr =>
                             tr.contract === t.contract && (tr.date === t.date || true)
@@ -3318,9 +3479,23 @@ export default function BackOffice() {
                           );
                         })}
                       </tbody>
+                      <tfoot>
+                        <tr style={{ borderTop:`2px solid ${C.border}`, background:C.sidebar }}>
+                          <td style={{ padding:"10px 12px", fontWeight:700, color:C.muted, fontSize:12 }}>TOTAL ({filtClosed.length})</td>
+                          <td colSpan={3}></td>
+                          <td style={{ padding:"10px 12px", fontWeight:800, color:sumGross>=0?C.green:C.red }}>
+                            {sumGross>=0?"+":""}₹{sumGross.toFixed(2)}
+                          </td>
+                          <td></td>
+                          <td style={{ padding:"10px 12px", fontWeight:800, color:sumNet>=0?C.green:C.red }}>
+                            {sumNet>=0?"+":""}₹{sumNet.toFixed(2)}
+                          </td>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
-                )}
+                  );
+                })()}
 
                 {/* Charges breakdown per trade — admin only */}
                 {isAdmin && (positionFilter==="closed" || positionFilter==="all") && clientTrades.length>0 && (
