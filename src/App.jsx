@@ -560,7 +560,7 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
-function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices, logout }) {
+function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices, logout, resetPriceCache }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
     password:    angelCreds.password    || "",
@@ -611,13 +611,8 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
               style={{...btn(C.green),fontSize:12}}>
               📋 Fetch Live Prices Now
             </button>
-            <button onClick={() => {
-              contractTokenMapRef.current = {};
-              instrMasterRef.current = {};
-              try { localStorage.removeItem("angel_live_mtm"); } catch(e) {}
-              setAngelLiveMTM({});
-              notify("🗑 Price cache cleared — fetching fresh prices...");
-              setTimeout(() => fetchAutoBhavcopy(angelToken, angelCreds.apiKey), 500);
+            <button onClick={()=>{
+              if(resetPriceCache) resetPriceCache();
             }} style={{...btn(C.yellow), fontSize:12}}>
               🔄 Reset & Refetch Prices
             </button>
@@ -3826,6 +3821,7 @@ export default function BackOffice() {
             const boxASoftware = allMonthsA.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
             const boxAInterest = allMonthsA.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
             // Open MTM: snapshot → bhavcopy ONLY — NEVER live prices in Box A
+            const ySnap = closingSnapshot[yesterdayStr] || {};
             const getYestClose = (contract) =>
               ySnap[contract] || bhavLookup[contract]?.closePrice || null;
             const boxAOpenMTM = histOpen.reduce((s, pos) => {
@@ -4602,7 +4598,7 @@ export default function BackOffice() {
 
 
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
-      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} logout={logout} />;
+      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} logout={logout} resetPriceCache={()=>{ contractTokenMapRef.current={...HARDCODED_TOKENS}; instrMasterRef.current={}; try{localStorage.removeItem("angel_live_mtm");}catch(e){} setAngelLiveMTM({}); notify("🗑 Cache cleared — fetching fresh..."); setTimeout(()=>fetchAutoBhavcopy(angelToken,angelCreds.apiKey),500); }} />;
     }
 
     // ── Super Admin: Manage Admins ──
