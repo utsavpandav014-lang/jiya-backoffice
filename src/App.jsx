@@ -3779,6 +3779,9 @@ export default function BackOffice() {
             // + Live MTM for positions opened today (not yet closed)
             // = 0 if no today's trades yet
 
+            // Run FIFO on all trades for display purposes (used in expanded view)
+            const { openPositions: allOpen2, closedPositions: allClosed2 } = applyFIFO([...histTrades, ...todayTrades]);
+
             let boxB = 0;
             if (todayTrades.length > 0 || hasSnap) {
               // Carry-forward delta: only if we have yesterday's snapshot
@@ -3788,9 +3791,6 @@ export default function BackOffice() {
                 if (!todayLTP || !yestClose) return s;
                 return s + (pos.side === "SELL" ? (yestClose - todayLTP) : (todayLTP - yestClose)) * pos.netQty;
               }, 0) : 0;
-
-              // Run FIFO on all trades (hist + today) to find today's activity
-              const { openPositions: allOpen2, closedPositions: allClosed2 } = applyFIFO([...histTrades, ...todayTrades]);
 
               // Today's booked: positions where ALL trades are from today (pure intraday)
               const todayBooked = allClosed2
