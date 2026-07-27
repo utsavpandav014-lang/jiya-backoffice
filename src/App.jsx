@@ -1548,7 +1548,8 @@ export default function BackOffice() {
   const [pnlDateTo, setPnlDateTo] = useState("");
   const [addInterestForm, setAddInterestForm] = useState({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
   const [tradesClientFilter, setTradesClientFilter] = useState("all");
-  const [positionSearch, setPositionSearch] = useState(""); // smart search
+  const [positionSearch, setPositionSearch] = useState("");
+  const [pnlClosedSearch, setPnlClosedSearch] = useState("");
   const [chargesEdit, setChargesEdit] = useState(null); // working copy for charges edit
 
   // Get charges config effective for a given date
@@ -4000,39 +4001,37 @@ export default function BackOffice() {
                 )}
 
                 {/* Closed contracts detail — filtered by current date selection */}
-                {filteredClosed.length > 0 && (() => {
-                  const [pnlSearch, setPnlSearch] = React.useState("");
-                  const sl = pnlSearch.toLowerCase();
+                {filteredClosed.length > 0 && (()=>{
+                  const sl = (pnlClosedSearch||"").toLowerCase();
                   const searchedClosed = sl
                     ? filteredClosed.filter(c => c.contract.toLowerCase().includes(sl))
                     : filteredClosed;
                   const sumPnl = searchedClosed.reduce((a,c) => a + c.totalPnl, 0);
                   return (
                   <div>
+                    <div style={{ display:"flex", gap:8, alignItems:"center", margin:"10px 0" }}>
+                      <div style={{ position:"relative", flex:1 }}>
+                        <span style={{ position:"absolute", left:8, top:"50%", transform:"translateY(-50%)", color:C.muted, fontSize:13 }}>🔍</span>
+                        <input
+                          type="text"
+                          placeholder="Search closed contracts... (e.g. NIFTY, 28JUL2026, PE)"
+                          value={pnlClosedSearch||""}
+                          onChange={e => setPnlClosedSearch(e.target.value)}
+                          style={{ ...input, paddingLeft:30, fontSize:12, padding:"6px 8px 6px 28px" }}
+                        />
+                      </div>
+                      {pnlClosedSearch && (
+                        <button onClick={() => setPnlClosedSearch("")}
+                          style={{ ...btn(C.muted), fontSize:11, padding:"6px 10px" }}>✕</button>
+                      )}
+                      {pnlClosedSearch && (
+                        <span style={{ fontSize:11, color:C.muted }}>{searchedClosed.length}/{filteredClosed.length}</span>
+                      )}
+                    </div>
                     <details open>
                       <summary style={{ color:C.muted, fontSize:12, cursor:"pointer", padding:"8px 0", userSelect:"none" }}>
                         📋 Closed Contracts ({filteredClosed.length})
                       </summary>
-                      {/* Search box */}
-                      <div style={{ display:"flex", gap:8, alignItems:"center", margin:"10px 0" }}>
-                        <div style={{ position:"relative", flex:1 }}>
-                          <span style={{ position:"absolute", left:8, top:"50%", transform:"translateY(-50%)", color:C.muted, fontSize:13 }}>🔍</span>
-                          <input
-                            type="text"
-                            placeholder="Search contracts... (e.g. NIFTY, 28JUL2026, PE)"
-                            value={pnlSearch}
-                            onChange={e => setPnlSearch(e.target.value)}
-                            style={{ ...input, paddingLeft:30, fontSize:12, padding:"6px 8px 6px 28px" }}
-                          />
-                        </div>
-                        {pnlSearch && (
-                          <button onClick={() => setPnlSearch("")}
-                            style={{ ...btn(C.muted), fontSize:11, padding:"6px 10px" }}>✕</button>
-                        )}
-                        {pnlSearch && (
-                          <span style={{ fontSize:11, color:C.muted }}>{searchedClosed.length}/{filteredClosed.length}</span>
-                        )}
-                      </div>
                       <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, marginTop:4 }}>
                         <thead>
                           <tr>{["Contract","Gross P&L"].map(h=>(
@@ -4050,7 +4049,7 @@ export default function BackOffice() {
                         <tfoot>
                           <tr style={{ borderTop:`2px solid ${C.border}`, background:C.bg }}>
                             <td style={{ padding:"8px 12px", fontWeight:700, color:C.muted, fontSize:11 }}>
-                              TOTAL {pnlSearch ? `(${searchedClosed.length} filtered)` : `(${filteredClosed.length})`}
+                              TOTAL {pnlClosedSearch ? `(${searchedClosed.length} filtered)` : `(${filteredClosed.length})`}
                             </td>
                             <td style={{ padding:"8px 12px", fontWeight:800, color:sumPnl>=0?C.green:C.red }}>
                               {sumPnl>=0?"+":""}₹{sumPnl.toFixed(2)}
