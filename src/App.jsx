@@ -896,45 +896,78 @@ export default function BackOffice() {
 
   // ── Angel One: Poll LTP for all open positions ──
   // ── Angel One: Poll LTP for open positions ──────────────────
-  // ── Hardcoded tokens for carry-forward open positions ──────
-  // These are exact Angel One numeric tokens from ODIN
-  const HARDCODED_TOKENS = {
-    "ITC FUT 28JUL2026":            { token: "61216",   exchange: "NFO" },
-    "OIL 380 PE 28JUL2026":         { token: "61261",   exchange: "NFO" },
-    "PATANJALI FUT 28JUL2026":      { token: "61264",   exchange: "NFO" },
-    "PATANJALI 380 PE 28JUL2026":   { token: "129790",  exchange: "NFO" },
-    "RVNL FUT 28JUL2026":           { token: "61285",   exchange: "NFO" },
-    "RVNL 200 PE 28JUL2026":        { token: "137656",  exchange: "NFO" },
-    "TRENT FUT 28JUL2026":          { token: "61310",   exchange: "NFO" },
-    "SUPREMEIND FUT 28JUL2026":     { token: "61297",   exchange: "NFO" },
-    "SWIGGY FUT 28JUL2026":         { token: "61299",   exchange: "NFO" },
-    "KAYNES FUT 28JUL2026":         { token: "61223",   exchange: "NFO" },
-    "PATANJALI 360 CE 28JUL2026":   { token: "133241",  exchange: "NFO" },
-    "ITC 265 PE 28JUL2026":         { token: "36963",   exchange: "NFO" },
-    "AXISBANK 1250 PE 28JUL2026":   { token: "73143",   exchange: "NFO" },
-    "AXISBANK 1240 PE 28JUL2026":   { token: "73683",   exchange: "NFO" },
-    "AXISBANK 1150 PE 28JUL2026":   { token: "73109",   exchange: "NFO" },
-    "PATANJALI 350 PE 28JUL2026":   { token: "133240",  exchange: "NFO" },
-    "PATANJALI 350 CE 28JUL2026":   { token: "133239",  exchange: "NFO" },
-    "SENSEX 73000 PE 23JUL2026":    { token: "1145177", exchange: "BFO" },
-    "BANDHANBNK 170 PE 28JUL2026":  { token: "74927",   exchange: "NFO" },
-    "BANDHANBNK 165 PE 28JUL2026":  { token: "74925",   exchange: "NFO" },
-    "AXISBANK 1260 CE 28JUL2026":   { token: "71684",   exchange: "NFO" },
-    "AXISBANK 1250 CE 28JUL2026":   { token: "73142",   exchange: "NFO" },
-    "AXISBANK 1340 CE 28JUL2026":   { token: "71692",   exchange: "NFO" },
-    "PATANJALI 405 CE 28JUL2026":   { token: "135564",  exchange: "NFO" },
-    "PATANJALI 355 PE 28JUL2026":   { token: "135430",  exchange: "NFO" },
-    "PATANJALI 355 CE 28JUL2026":   { token: "135429",  exchange: "NFO" },
-    "AXISBANK 1220 PE 28JUL2026":   { token: "71681",   exchange: "NFO" },
-    "AXISBANK 1240 CE 28JUL2026":   { token: "71682",   exchange: "NFO" },
-  };
-  const contractTokenMapRef = useRef({...HARDCODED_TOKENS}); // pre-loaded with known tokens
+  const contractTokenMapRef = useRef({}); // pre-loaded with known tokens
   const angelTokenRef    = useRef({ jwtToken: (() => { try { return localStorage.getItem("angel_jwt") || null; } catch(e) { return null; } })() });
   const instrMasterRef   = useRef({});
   const tradesRef        = useRef([]); // always holds latest state.trades
   const scripNameMapRef  = useRef({}); // { "NIFTY 23950 CE 28JUL2026": "NIFTY26JUL23950CE" }
 
   // Load instrument master from Angel One (no auth needed)
+  // Lookup correct Angel One tokens for open positions using instrument master
+  const lookupOpenPositionTokens = async () => {
+    if (!angelCreds.apiKey) return;
+    try {
+      const { openPositions } = applyFIFO(tradesRef.current);
+      if (!openPositions.length) return;
+
+      // Build list of symbols to look up (both primary and alt formats)
+      const MONTH_NUM = {JAN:"1",FEB:"2",MAR:"3",APR:"4",MAY:"5",JUN:"6",
+                         JUL:"7",AUG:"8",SEP:"9",OCT:"10",NOV:"11",DEC:"12"};
+      const symbolsToLookup = [];
+      const symbolToContract = {};
+
+      openPositions.forEach(pos => {
+        if (contractTokenMapRef.current[pos.contract]?.fromMaster) return; // already confirmed
+        const parts = pos.contract.trim().split(/\s+/);
+        const name = parts[0].toUpperCase();
+        const isFut = pos.contract.includes("FUT");
+        const expiry = isFut ? (parts[2]||parts[1]) : (parts[3]||"");
+        if (!expiry) return;
+        const dd = expiry.slice(0,2), mon = expiry.slice(2,5), yy = expiry.slice(7,9);
+        const m = MONTH_NUM[mon]||"0";
+        if (isFut) {
+          const s1 = `${name}${yy}${m}${dd}FUT`;
+          const s2 = `${name}${dd}${mon}${yy}FUT`;
+          symbolsToLookup.push(s1, s2);
+          symbolToContract[s1] = pos.contract;
+          symbolToContract[s2] = pos.contract;
+        } else {
+          const strike = Math.round(parseFloat(parts[1]||0));
+          const opt = (parts[2]||"").toUpperCase();
+          const s1 = `${name}${yy}${m}${dd}${strike}${opt}`;
+          const s2 = `${name}${dd}${mon}${yy}${strike}${opt}`;
+          symbolsToLookup.push(s1, s2);
+          symbolToContract[s1] = pos.contract;
+          symbolToContract[s2] = pos.contract;
+        }
+      });
+
+      if (!symbolsToLookup.length) return;
+      console.log("Looking up tokens for", symbolsToLookup.length, "symbols...");
+
+      const r = await fetch(ANGEL_PROXY, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "lookup_tokens", apiKey: angelCreds.apiKey, payload: { symbols: symbolsToLookup } })
+      });
+      const data = await r.json();
+      if (data.status && data.data) {
+        let found = 0;
+        Object.entries(data.data).forEach(([sym, info]) => {
+          const contract = symbolToContract[sym];
+          if (contract && !contractTokenMapRef.current[contract]?.fromMaster) {
+            contractTokenMapRef.current[contract] = { ...info, fromMaster: true };
+            found++;
+            console.log(`Token confirmed: ${contract} → ${sym} → ${info.token}`);
+          }
+        });
+        console.log(`Tokens confirmed for ${found} contracts from instrument master`);
+      }
+    } catch(e) {
+      console.log("Token lookup error:", e.message);
+    }
+  };
+
   const loadInstrumentMaster = async () => {
     const lastLoad    = instrMasterRef.current._loadedAt    || 0;
     const lastFailed  = instrMasterRef.current._failedAt    || 0;
@@ -1552,6 +1585,9 @@ export default function BackOffice() {
         const intradayRaw = await sb.select("intraday_trades", `?date=eq.${today}&order=time.asc`);
         setIntradayTrades(Array.isArray(intradayRaw) ? intradayRaw : []);
       } catch(e) { console.log("Intraday load error:", e.message); }
+
+      // Lookup correct tokens for open positions from instrument master
+      setTimeout(() => lookupOpenPositionTokens(), 3000);
 
       // Start live prices AFTER trades are loaded
       const savedJwt = localStorage.getItem("angel_jwt");
