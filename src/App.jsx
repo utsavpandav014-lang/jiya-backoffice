@@ -709,18 +709,30 @@ function useCountUp(target, duration = 900) {
 
 export default function BackOffice() {
   const [state, setState] = useState(INITIAL_STATE);
-  // Keep tradesRef and scripNameMapRef always up to date
+  // Keep tradesRef, scripNameMapRef, and tokenMapRef always up to date
   useEffect(() => {
     tradesRef.current = state.trades || [];
     // Build scripName map: contract → Angel One symbol (from scriptName field)
-    const map = {};
+    // Also build token map: contract → { token, exchange } from scripCode field
+    const nameMap = {};
+    const tokenMap = {};
     (state.trades || []).forEach(t => {
-      if (t.contract && t.scriptName && !map[t.contract]) {
-        map[t.contract] = t.scriptName.trim().toUpperCase();
+      if (t.contract && t.scriptName && !nameMap[t.contract]) {
+        nameMap[t.contract] = t.scriptName.trim().toUpperCase();
+      }
+      if (t.contract && t.scripCode && !tokenMap[t.contract]) {
+        const isBSE = ["SENSEX","BANKEX"].includes(t.contract.split(" ")[0]?.toUpperCase());
+        tokenMap[t.contract] = { token: t.scripCode.toString().trim(), exchange: isBSE ? "BFO" : "NFO" };
       }
     });
-    scripNameMapRef.current = map;
-    console.log("scripNameMap built:", Object.keys(map).length, "contracts. Sample:", Object.entries(map).slice(0,3));
+    scripNameMapRef.current = nameMap;
+    // Pre-populate contractTokenMapRef with known tokens from trades
+    Object.entries(tokenMap).forEach(([contract, info]) => {
+      if (!contractTokenMapRef.current[contract]) {
+        contractTokenMapRef.current[contract] = info;
+      }
+    });
+    console.log("Token map from trades:", Object.keys(tokenMap).length, "contracts");
   }, [state.trades]);
   const [dbLoading, setDbLoading] = useState(SUPABASE_CONFIGURED); // show loading if DB configured
   const [dbError, setDbError] = useState(null);
@@ -943,27 +955,27 @@ export default function BackOffice() {
                        JUL:"7",AUG:"8",SEP:"9",OCT:"10",NOV:"11",DEC:"12"};
 
     if (isFut) {
-      const expiry = parts[2] || parts[1]; // "28JUL2026"
-      const dd  = expiry.slice(0,2);       // "28"
-      const mon = expiry.slice(2,5);       // "JUL"
-      const yy  = expiry.slice(7,9);       // "26"
-      const m   = MONTH_NUM[mon] || "0";
-      // Angel One futures format: SYMBOL + YY + M + DD + FUT
-      // e.g. ITC28JUL26FUT → ITC26728FUT
-      const symbol = `${name}${yy}${m}${dd}FUT`;
-      return { symbol, exchange: isBSE ? "BFO" : "NFO" };
+      const expiry = parts[2] || parts[1];
+      const dd = expiry.slice(0,2), mon = expiry.slice(2,5), yy = expiry.slice(7,9);
+      const m  = MONTH_NUM[mon] || "0";
+      // Try both formats: BSE=YY+M+DD, NSE=DD+MON+YY
+      return {
+        symbol:    `${name}${yy}${m}${dd}FUT`,
+        altSymbol: `${name}${dd}${mon}${yy}FUT`,
+        exchange:  isBSE ? "BFO" : "NFO"
+      };
     } else {
       const strike  = Math.round(parseFloat(parts[1] || 0));
       const optType = (parts[2] || "").toUpperCase();
-      const expiry  = parts[3] || ""; // "23JUL2026"
-      const dd  = expiry.slice(0,2);  // "23"
-      const mon = expiry.slice(2,5);  // "JUL"
-      const yy  = expiry.slice(7,9);  // "26"
-      const m   = MONTH_NUM[mon] || "0";
-      // Angel One options format: SYMBOL + YY + M + DD + STRIKE + OPTTYPE
-      // e.g. SENSEX 76900 PE 23JUL2026 → SENSEX2672376900PE
-      const symbol = `${name}${yy}${m}${dd}${strike}${optType}`;
-      return { symbol, exchange: isBSE ? "BFO" : "NFO" };
+      const expiry  = parts[3] || "";
+      const dd = expiry.slice(0,2), mon = expiry.slice(2,5), yy = expiry.slice(7,9);
+      const m  = MONTH_NUM[mon] || "0";
+      // Try both formats: BSE=YY+M+DD+STRIKE, NSE=DD+MON+YY+STRIKE
+      return {
+        symbol:    `${name}${yy}${m}${dd}${strike}${optType}`,
+        altSymbol: `${name}${dd}${mon}${yy}${strike}${optType}`,
+        exchange:  isBSE ? "BFO" : "NFO"
+      };
     }
   };
 
@@ -1200,13 +1212,17 @@ export default function BackOffice() {
           if (!mapped) {
             const result = contractToAngelSymbol(contract);
             if (result) {
-              const entry = instrMasterRef.current[result.symbol];
+              let entry = instrMasterRef.current[result.symbol];
+              if (!entry && result.altSymbol) {
+                entry = instrMasterRef.current[result.altSymbol];
+                if (entry) console.log(`Mapped via alt: ${contract} → ${result.altSymbol}`);
+              }
               if (entry) {
                 mapped = { token: entry.token, exchange: result.exchange };
                 contractTokenMapRef.current[contract] = mapped;
-                console.log(`Mapped via symbol: ${contract} → ${result.symbol} → token ${entry.token}`);
+                console.log(`Mapped via symbol: ${contract} → token ${entry.token}`);
               } else {
-                console.log(`Not found: ${contract} → tried ${result.symbol}`);
+                console.log(`Not found: ${contract} → tried ${result.symbol} / ${result.altSymbol||"none"}`);
                 // Last resort: try ltp_single with scripName directly
                 if (scripName && angelToken && angelCreds.apiKey) {
                   try {
