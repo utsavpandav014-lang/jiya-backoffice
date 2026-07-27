@@ -3773,6 +3773,21 @@ export default function BackOffice() {
 
             const boxA = boxARealized + boxAOpenMTM - boxAExpenses - boxASoftware - boxAInterest;
 
+            // DEBUG: log calculation for specific client
+            if (client.id === "SNM3343A05") {
+              console.log("=== SNM3343A05 Box A Debug ===");
+              console.log("histTrades count:", histTrades.length);
+              console.log("histOpen count:", histOpen.length);
+              console.log("histClosed count:", histClosed.length);
+              console.log("boxARealized:", boxARealized);
+              console.log("boxAOpenMTM:", boxAOpenMTM);
+              console.log("boxAExpenses:", boxAExpenses);
+              console.log("boxA total:", boxA);
+              console.log("hasSnap:", hasSnap, "ySnap contracts:", Object.keys(ySnap).length);
+              console.log("Open positions:", histOpen.map(p => `${p.contract} ${p.side} ${p.netQty}@${p.avgPrice}`));
+              console.log("ySnap:", ySnap);
+            }
+
             // ── BOX B: Today's Intraday P&L ───────────────────────
             // = (Today's LTP - Yesterday's close) × qty for carry-forward positions
             // + Booked P&L for positions opened & closed today
