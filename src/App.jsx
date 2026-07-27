@@ -2676,31 +2676,50 @@ export default function BackOffice() {
         const myClosed  = clientClosedPos(cid);
         const myMonthPnl = clientNetPnlForMonth(cid, currentMonthStr);
 
-        // Box A/B/C for client
+        // Box A/B/C for client — same strict logic as admin P&L page
         const myTodayStr   = new Date().toISOString().slice(0,10);
         const myYestStr    = new Date(Date.now()-86400000).toISOString().slice(0,10);
         const myYSnap      = closingSnapshot[myYestStr] || {};
+        const myHasSnap    = Object.keys(myYSnap).length > 0;
         const myHistTrades = myTrades.filter(t => (t.date||"") < myTodayStr);
+        const myTodayTrades= myTrades.filter(t => (t.date||"") === myTodayStr);
         const { openPositions: myHistOpen, closedPositions: myHistClosed } = applyFIFO(myHistTrades);
+
+        // Box A: strictly yesterday's snapshot prices — no fallback to live
         const myBoxARealized = myHistClosed.reduce((a,c) => a + c.totalPnl, 0);
         const myHistMonths   = [...new Set(myHistTrades.map(t=>(t.date||"").slice(0,7)).filter(Boolean))];
         const myBoxAExp  = myHistMonths.reduce((a,m) => a + getMonthlyCharges(cid,m), 0);
         const myBoxASW   = myHistMonths.reduce((a,m) => a + getMonthlyInterest(cid,m+"_SW"), 0);
         const myBoxAInt  = myHistMonths.reduce((a,m) => a + getMonthlyInterest(cid,m), 0);
-        const myBoxAMTM  = myHistOpen.reduce((s,pos) => {
-          const closeP = myYSnap[pos.contract] || getBhavClose(pos.contract);
+        const myBoxAMTM  = myHasSnap ? myHistOpen.reduce((s,pos) => {
+          const closeP = myYSnap[pos.contract];
           if (!closeP) return s;
           return s + (pos.side==="SELL" ? (pos.avgPrice-closeP) : (closeP-pos.avgPrice)) * pos.netQty;
-        }, 0);
+        }, 0) : 0;
         const myBoxA = myBoxARealized + myBoxAMTM - myBoxAExp - myBoxASW - myBoxAInt;
-        const myBoxBMTM = myOpen.reduce((s,pos) => {
-          const ltp = getBhavClose(pos.contract);
-          if (!ltp) return s;
-          return s + (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty;
-        }, 0);
-        const myHasSnap = Object.keys(myYSnap).length > 0;
-        const myTodayTrades = myTrades.filter(t => (t.date||"") === myTodayStr);
-        const myBoxB = (myHasSnap || myTodayTrades.length > 0) ? myBoxBMTM : 0;
+
+        // Box B: today's intraday only
+        let myBoxB = 0;
+        if (myTodayTrades.length > 0 || myHasSnap) {
+          const myCarryMTM = myHasSnap ? myHistOpen.reduce((s,pos) => {
+            const ltp = getBhavClose(pos.contract);
+            const yc  = myYSnap[pos.contract];
+            if (!ltp || !yc) return s;
+            return s + (pos.side==="SELL" ? (yc-ltp) : (ltp-yc)) * pos.netQty;
+          }, 0) : 0;
+          const { openPositions: myAllOpen2, closedPositions: myAllClosed2 } = applyFIFO([...myHistTrades, ...myTodayTrades]);
+          const myTodayBooked = myAllClosed2
+            .filter(cp => (cp.trades||[]).every(t => (t.date||"") === myTodayStr))
+            .reduce((a,c) => a + c.totalPnl, 0);
+          const myTodayNewMTM = myAllOpen2
+            .filter(pos => (pos.trades||[]).every(t => (t.date||"") === myTodayStr))
+            .reduce((s,pos) => {
+              const ltp = getBhavClose(pos.contract);
+              if (!ltp) return s;
+              return s + (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty;
+            }, 0);
+          myBoxB = myCarryMTM + myTodayBooked + myTodayNewMTM;
+        }
         const myBoxC = myBoxA + myBoxB;
 
         // Daily win rate
@@ -3718,75 +3737,83 @@ export default function BackOffice() {
             const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
             // ── 3-Box P&L System ───────────────────────────────────
-            const todayStr     = new Date().toISOString().slice(0,10);
-            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
-            const ySnap        = closingSnapshot[yesterdayStr] || {}; // yesterday's closing prices
+            // RULE: Box A = P&L till yesterday (FROZEN, never changes during market hours)
+            //       Box B = Today's intraday P&L (LIVE)
+            //       Box C = A + B
+            const todayStr = new Date().toISOString().slice(0,10);
 
-            // ── BOX A: P&L Till Yesterday (FROZEN) ──────────────────
-            // = Booked P&L (closed positions before today)
-            // + MTM of open positions at YESTERDAY'S CLOSING PRICE
-            // - All expenses/interest/software
-            const histTrades   = state.trades.filter(t => t.clientId === client.id && (t.date||"") < todayStr);
+            // All trades split by date
+            const histTrades  = state.trades.filter(t => t.clientId === client.id && (t.date||"") < todayStr);
+            const todayTrades = state.trades.filter(t => t.clientId === client.id && (t.date||"") === todayStr);
+
+            // Run FIFO on historical trades only → what was the state at end of yesterday
             const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(histTrades);
+
+            // ── BOX A: P&L Till Yesterday ─────────────────────────
+            // = Realized (closed positions P&L from all historical trades)
+            // + Open position MTM at yesterday's 5PM snapshot price (STRICTLY - no fallback to live)
+            // - Expenses - Software - Interest
             const boxARealized = histClosed.reduce((a,c) => a + c.totalPnl, 0);
             const histMonths   = [...new Set(histTrades.map(t => (t.date||"").slice(0,7)).filter(Boolean))];
             const boxAExpenses = histMonths.reduce((a,m) => a + getMonthlyCharges(client.id,m), 0);
             const boxASoftware = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
             const boxAInterest = histMonths.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
-            // Open positions MTM at yesterday's closing price
-            // If no snapshot yet → use current live price (same as grandMTM)
-            const boxAOpenMTM  = histOpen.reduce((s, pos) => {
-              const closeP = ySnap[pos.contract]
-                ? ySnap[pos.contract]
-                : getBhavClose(pos.contract); // fallback to live if no snapshot
-              if (!closeP) return s;
+
+            // Get yesterday's snapshot (strict — no fallback to live prices)
+            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
+            const ySnap = closingSnapshot[yesterdayStr] || {};
+            const hasSnap = Object.keys(ySnap).length > 0;
+
+            // Open position MTM at yesterday's close — ONLY if snapshot exists
+            const boxAOpenMTM = hasSnap ? histOpen.reduce((s, pos) => {
+              const closeP = ySnap[pos.contract];
+              if (!closeP) return s; // no snapshot for this contract → skip (don't use live)
               return s + (pos.side === "SELL" ? (pos.avgPrice - closeP) : (closeP - pos.avgPrice)) * pos.netQty;
-            }, 0);
+            }, 0) : 0; // No snapshot at all → open MTM = 0 in Box A
+
             const boxA = boxARealized + boxAOpenMTM - boxAExpenses - boxASoftware - boxAInterest;
 
-            // ── BOX B: Today's Intraday P&L (LIVE) ──────────────────
-            // = Delta on carry-forward positions (today LTP - yesterday close)
-            // + Booked P&L on positions opened & closed today
-            // + Live MTM on positions opened today (not yet closed)
-            const carryForwardMTM = histOpen.reduce((s, pos) => {
-              const todayLTP  = getBhavClose(pos.contract);
-              const yestClose = ySnap[pos.contract];
-              if (!todayLTP || !yestClose) return s;
-              // Delta only: today price - yesterday price
-              const delta = pos.side === "SELL"
-                ? (yestClose - todayLTP)   // short: profit if today < yesterday
-                : (todayLTP  - yestClose); // long:  profit if today > yesterday
-              return s + delta * pos.netQty;
-            }, 0);
-            // Positions opened AND closed today
-            const todayTrades    = state.trades.filter(t => t.clientId === client.id && (t.date||"") === todayStr);
-            const allTrades      = [...histTrades, ...todayTrades];
-            const { openPositions: allOpen2, closedPositions: allClosed2 } = applyFIFO(allTrades);
-            // todayBooked: positions closed today (all their trades are from today)
-            const todayBooked = allClosed2
-              .filter(cp => (cp.trades||[]).some(t => (t.date||"") === todayStr) && (cp.trades||[]).every(t => (t.date||"") >= todayStr))
-              .reduce((a,c) => a + c.totalPnl, 0);
-            // New positions opened today only, not yet closed
-            const todayNewOpen = allOpen2.filter(pos =>
-              (pos.trades||[]).length > 0 && (pos.trades||[]).every(t => (t.date||"") === todayStr)
-            );
-            const todayNewMTM    = todayNewOpen.reduce((s, pos) => {
-              const ltp = getBhavClose(pos.contract);
-              if (!ltp) return s;
-              return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
-            }, 0);
-            // If no today's trades AND no yesterday snapshot → boxB = 0 (nothing to compare)
-            const hasYesterdaySnapshot = Object.keys(ySnap).length > 0;
-            const hasTodayTrades = todayTrades.length > 0;
-            const boxB = (hasYesterdaySnapshot || hasTodayTrades)
-              ? carryForwardMTM + todayBooked + todayNewMTM
-              : 0;
+            // ── BOX B: Today's Intraday P&L ───────────────────────
+            // = (Today's LTP - Yesterday's close) × qty for carry-forward positions
+            // + Booked P&L for positions opened & closed today
+            // + Live MTM for positions opened today (not yet closed)
+            // = 0 if no today's trades yet
 
-            // ── BOX C: Total (A + B) ─────────────────────────────────
+            let boxB = 0;
+            if (todayTrades.length > 0 || hasSnap) {
+              // Carry-forward delta: only if we have yesterday's snapshot
+              const carryMTM = hasSnap ? histOpen.reduce((s, pos) => {
+                const todayLTP  = getBhavClose(pos.contract);
+                const yestClose = ySnap[pos.contract];
+                if (!todayLTP || !yestClose) return s;
+                return s + (pos.side === "SELL" ? (yestClose - todayLTP) : (todayLTP - yestClose)) * pos.netQty;
+              }, 0) : 0;
+
+              // Run FIFO on all trades (hist + today) to find today's activity
+              const { openPositions: allOpen2, closedPositions: allClosed2 } = applyFIFO([...histTrades, ...todayTrades]);
+
+              // Today's booked: positions where ALL trades are from today (pure intraday)
+              const todayBooked = allClosed2
+                .filter(cp => (cp.trades||[]).length > 0 && (cp.trades||[]).every(t => (t.date||"") === todayStr))
+                .reduce((a,c) => a + c.totalPnl, 0);
+
+              // New positions opened today only → live MTM from entry price
+              const todayNewMTM = allOpen2
+                .filter(pos => (pos.trades||[]).length > 0 && (pos.trades||[]).every(t => (t.date||"") === todayStr))
+                .reduce((s, pos) => {
+                  const ltp = getBhavClose(pos.contract);
+                  if (!ltp) return s;
+                  return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
+                }, 0);
+
+              boxB = carryMTM + todayBooked + todayNewMTM;
+            }
+
+            // ── BOX C: Total ───────────────────────────────────────
             const boxC = boxA + boxB;
 
-            // For expanded view - show all open positions with their MTM
-            const box2MTM = grandMTM; // reuse for expanded position list
+            // For expanded view
+            const box2MTM = grandMTM;
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
