@@ -611,6 +611,16 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
               style={{...btn(C.green),fontSize:12}}>
               📋 Fetch Live Prices Now
             </button>
+            <button onClick={() => {
+              contractTokenMapRef.current = {};
+              instrMasterRef.current = {};
+              try { localStorage.removeItem("angel_live_mtm"); } catch(e) {}
+              setAngelLiveMTM({});
+              notify("🗑 Price cache cleared — fetching fresh prices...");
+              setTimeout(() => fetchAutoBhavcopy(angelToken, angelCreds.apiKey), 500);
+            }} style={{...btn(C.yellow), fontSize:12}}>
+              🔄 Reset & Refetch Prices
+            </button>
 
           </div>
         )}
@@ -891,7 +901,39 @@ export default function BackOffice() {
 
   // ── Angel One: Poll LTP for all open positions ──
   // ── Angel One: Poll LTP for open positions ──────────────────
-  const contractTokenMapRef = useRef({});
+  // ── Hardcoded tokens for carry-forward open positions ──────
+  // These are exact Angel One numeric tokens from ODIN
+  const HARDCODED_TOKENS = {
+    "ITC FUT 28JUL2026":            { token: "61216",   exchange: "NFO" },
+    "OIL 380 PE 28JUL2026":         { token: "61261",   exchange: "NFO" },
+    "PATANJALI FUT 28JUL2026":      { token: "61264",   exchange: "NFO" },
+    "PATANJALI 380 PE 28JUL2026":   { token: "129790",  exchange: "NFO" },
+    "RVNL FUT 28JUL2026":           { token: "61285",   exchange: "NFO" },
+    "RVNL 200 PE 28JUL2026":        { token: "137656",  exchange: "NFO" },
+    "TRENT FUT 28JUL2026":          { token: "61310",   exchange: "NFO" },
+    "SUPREMEIND FUT 28JUL2026":     { token: "61297",   exchange: "NFO" },
+    "SWIGGY FUT 28JUL2026":         { token: "61299",   exchange: "NFO" },
+    "KAYNES FUT 28JUL2026":         { token: "61223",   exchange: "NFO" },
+    "PATANJALI 360 CE 28JUL2026":   { token: "133241",  exchange: "NFO" },
+    "ITC 265 PE 28JUL2026":         { token: "36963",   exchange: "NFO" },
+    "AXISBANK 1250 PE 28JUL2026":   { token: "73143",   exchange: "NFO" },
+    "AXISBANK 1240 PE 28JUL2026":   { token: "73683",   exchange: "NFO" },
+    "AXISBANK 1150 PE 28JUL2026":   { token: "73109",   exchange: "NFO" },
+    "PATANJALI 350 PE 28JUL2026":   { token: "133240",  exchange: "NFO" },
+    "PATANJALI 350 CE 28JUL2026":   { token: "133239",  exchange: "NFO" },
+    "SENSEX 73000 PE 23JUL2026":    { token: "1145177", exchange: "BFO" },
+    "BANDHANBNK 170 PE 28JUL2026":  { token: "74927",   exchange: "NFO" },
+    "BANDHANBNK 165 PE 28JUL2026":  { token: "74925",   exchange: "NFO" },
+    "AXISBANK 1260 CE 28JUL2026":   { token: "71684",   exchange: "NFO" },
+    "AXISBANK 1250 CE 28JUL2026":   { token: "73142",   exchange: "NFO" },
+    "AXISBANK 1340 CE 28JUL2026":   { token: "71692",   exchange: "NFO" },
+    "PATANJALI 405 CE 28JUL2026":   { token: "135564",  exchange: "NFO" },
+    "PATANJALI 355 PE 28JUL2026":   { token: "135430",  exchange: "NFO" },
+    "PATANJALI 355 CE 28JUL2026":   { token: "135429",  exchange: "NFO" },
+    "AXISBANK 1220 PE 28JUL2026":   { token: "71681",   exchange: "NFO" },
+    "AXISBANK 1240 CE 28JUL2026":   { token: "71682",   exchange: "NFO" },
+  };
+  const contractTokenMapRef = useRef({...HARDCODED_TOKENS}); // pre-loaded with known tokens
   const angelTokenRef    = useRef({ jwtToken: (() => { try { return localStorage.getItem("angel_jwt") || null; } catch(e) { return null; } })() });
   const instrMasterRef   = useRef({});
   const tradesRef        = useRef([]); // always holds latest state.trades
@@ -1212,7 +1254,8 @@ export default function BackOffice() {
         // Check existing token map first
         let mapped = contractTokenMapRef.current[contract];
         if (!mapped) {
-          // Priority 1: Use scripName from trades (exact Angel One symbol, most accurate)
+          // Priority 1: Use scripName from trades → look up in instrument master
+          // scripName from ODIN is the EXACT Angel One trading symbol
           const scripName = scripNameMapRef.current[contract];
           if (scripName) {
             const entry = instrMasterRef.current[scripName];
@@ -1220,6 +1263,10 @@ export default function BackOffice() {
               mapped = { token: entry.token, exchange: entry.exchange };
               contractTokenMapRef.current[contract] = mapped;
               console.log(`Mapped via scripName: ${contract} → ${scripName} → token ${entry.token}`);
+            } else {
+              // scripName not in master (e.g. SUPREMEIND26JULFUT not found)
+              // Use ltp_single with scripName directly — no token needed
+              console.log(`scripName not in master: ${scripName} — will use ltp_single`);
             }
           }
           // Priority 2: Build symbol from contract name parts (correct Angel One format)
@@ -3778,10 +3825,9 @@ export default function BackOffice() {
             const boxAExpenses = allMonthsA.reduce((a,m) => a + getMonthlyCharges(client.id,m), 0);
             const boxASoftware = allMonthsA.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
             const boxAInterest = allMonthsA.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
-            // Open MTM: snapshot → bhavcopy → live (best available)
-            const ySnap = closingSnapshot[yesterdayStr] || {};
+            // Open MTM: snapshot → bhavcopy ONLY — NEVER live prices in Box A
             const getYestClose = (contract) =>
-              ySnap[contract] || bhavLookup[contract]?.closePrice || getBhavClose(contract);
+              ySnap[contract] || bhavLookup[contract]?.closePrice || null;
             const boxAOpenMTM = histOpen.reduce((s, pos) => {
               const closeP = getYestClose(pos.contract);
               if (!closeP) return s;
