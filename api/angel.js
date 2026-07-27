@@ -77,6 +77,29 @@ export default async function handler(req, res) {
     }
 
     // ── LTP (batch) ────────────────────────────────────────────
+    // LOOKUP TOKENS — find Angel One tokens for given symbols
+    if (action === 'lookup_tokens') {
+      const { symbols } = payload || {};
+      try {
+        const r = await fetchT(
+          'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json',
+          { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } },
+          8000
+        );
+        const data = await r.json();
+        const result = {};
+        data.forEach(x => {
+          const sym = (x.symbol||'').toUpperCase();
+          if (symbols.includes(sym)) {
+            result[sym] = { token: String(x.token), exchange: x.exch_seg };
+          }
+        });
+        return res.status(200).json({ status: true, data: result });
+      } catch(e) {
+        return res.status(200).json({ status: false, message: e.message, data: {} });
+      }
+    }
+
     if (action === 'ltp') {
       try {
         const r = await fetchT(
