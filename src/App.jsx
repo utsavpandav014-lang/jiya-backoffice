@@ -3831,9 +3831,12 @@ export default function BackOffice() {
             const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(m => m && monthInFilter(m)).sort().reverse();
 
             // For range/month filter also filter closed trades
-            const filteredClosed = closed.filter(cp =>
-              cp.trades.some(t => monthInFilter((t.date||"").slice(0,7)))
-            );
+            const filteredClosed = closed.filter(cp => {
+              // Use the date of the last trade in the contract (closing date)
+              const dates = cp.trades.map(t => (t.date||"").slice(0,7)).filter(Boolean).sort();
+              const lastMonth = dates[dates.length - 1]; // most recent trade month
+              return lastMonth ? monthInFilter(lastMonth) : false;
+            });
 
             // Grand totals
             const grandRealized = filteredClosed.reduce((a,c) => a + c.totalPnl, 0);
@@ -4163,7 +4166,7 @@ export default function BackOffice() {
                         <span style={{ fontSize:11, color:C.muted }}>{searchedClosed.length}/{filteredClosed.length}</span>
                       )}
                     </div>
-                    <details open>
+                    <details>
                       <summary style={{ color:C.muted, fontSize:12, cursor:"pointer", padding:"8px 0", userSelect:"none" }}>
                         📋 Closed Contracts ({filteredClosed.length})
                       </summary>
