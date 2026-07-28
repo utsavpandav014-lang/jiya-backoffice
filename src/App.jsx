@@ -269,6 +269,7 @@ const Icon = ({ name, size = 18 }) => {
 const SUPABASE_URL      = "https://jwfucitnaqkuyzizmuve.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
 const ANGEL_PROXY       = "/api/angel";
+const ADMIN_ID          = "JIYA";
 
 // Lightweight Supabase REST client (no npm needed)
 const sb = {
@@ -824,7 +825,8 @@ export default function BackOffice() {
       return saved;
     } catch(e) { return {}; }
   });
-  const [intradayTrades, setIntradayTrades] = useState([]); // Box B only — from intraday_trades table
+  const [intradayTrades, setIntradayTrades] = useState([]);
+  const [livePositions, setLivePositions] = useState([]); // from F6 — has LTP per contract // Box B only — from intraday_trades table
   const [closingSnapshot, setClosingSnapshot] = useState(() => {
     // { "2026-07-23": { "ITC FUT 28JUL2026": 283.10, ... } }
     try { return JSON.parse(localStorage.getItem("closing_snapshot") || "{}"); } catch(e) { return {}; }
@@ -1482,11 +1484,15 @@ export default function BackOffice() {
       const h = now.getHours(), m = now.getMinutes();
       const inMarket = (h > 9 || (h === 9 && m >= 0)) && (h < 15 || (h === 15 && m <= 35));
       if (!inMarket) return;
-      // Silent reload of intraday trades only (faster than full reload)
+      // Silent reload of intraday + live positions
       try {
         const today = new Date().toISOString().slice(0,10);
-        const intradayRaw = await sb.select("intraday_trades", `?date=eq.${today}&order=time.asc`);
+        const [intradayRaw, liveRaw] = await Promise.all([
+          sb.select("intraday_trades", `?date=eq.${today}&order=time.asc`),
+          sb.select("live_positions", `?adminId=eq.JIYA`),
+        ]);
         setIntradayTrades(Array.isArray(intradayRaw) ? intradayRaw : []);
+        setLivePositions(Array.isArray(liveRaw) ? liveRaw : []);
       } catch(e) {}
       // Full silent reload periodically
       await loadAllData(true);
@@ -1585,6 +1591,11 @@ export default function BackOffice() {
         const intradayRaw = await sb.select("intraday_trades", `?date=eq.${today}&order=time.asc`);
         setIntradayTrades(Array.isArray(intradayRaw) ? intradayRaw : []);
       } catch(e) { console.log("Intraday load error:", e.message); }
+      // Load live positions from F6 capture (has LTP)
+      try {
+        const liveRaw = await sb.select("live_positions", `?adminId=eq.${CONFIG.admin_id||"JIYA"}`);
+        setLivePositions(Array.isArray(liveRaw) ? liveRaw : []);
+      } catch(e) { console.log("Live positions load error:", e.message); }
 
       // Lookup correct tokens for open positions from instrument master
       setTimeout(() => lookupOpenPositionTokens(), 3000);
@@ -1781,20 +1792,16 @@ export default function BackOffice() {
 
   // Get closing price for a contract from bhavcopy
   // getBhavClose: checks Angel One live MTM first, then bhavcopy
-  const getBhavClose = (contract) => {
-    const direct = angelLiveMTM[contract]?.ltp;
-    if (direct) return direct;
-    const normalized = contract.replace(/(\d+)\.0+\s/g, (m, n) => n + ' ');
-    const norm = angelLiveMTM[normalized]?.ltp;
-    if (norm) return norm;
+  // getLTP: gets live price from F6 capture first, then bhavcopy
+  const getLTP = (contract) => {
+    // Priority 1: F6 live positions (ODIN market price — most accurate)
+    const lp = livePositions.find(p => p.contract === contract);
+    if (lp?.ltp > 0) return lp.ltp;
+    // Priority 2: Bhavcopy upload
     if (bhavLookup[contract]?.closePrice) return bhavLookup[contract].closePrice;
-    // Debug: log first miss to understand the problem
-    if (Object.keys(angelLiveMTM).length > 0 && !window._bhavDebugDone) {
-      window._bhavDebugDone = true;
-      console.log("getBhavClose miss. Contract:", JSON.stringify(contract), "Available keys:", Object.keys(angelLiveMTM).slice(0,3));
-    }
     return null;
   };
+  const getBhavClose = getLTP; // alias for backward compatibility
   const getBhavSettl = (contract) => bhavLookup[contract]?.settlPrice || null;
   const getBhavExpiry = (contract) => bhavLookup[contract]?.expiryRaw || null;
 
@@ -3869,22 +3876,30 @@ export default function BackOffice() {
 
             // ── BOX B: Uses ONLY intraday_trades table ─────────────
             const myIntraday = intradayTrades.filter(t => t.clientId === client.id);
-            // Carry-forward delta: live LTP vs yesterday's close for each open position
-            const carryMTM = histOpen.reduce((s, pos) => {
-              const todayLTP  = getBhavClose(pos.contract);
-              const yestClose = ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
-              if (!todayLTP || !yestClose) return s;
-              return s + (pos.side === "SELL" ? (yestClose - todayLTP) : (todayLTP - yestClose)) * pos.netQty;
-            }, 0);
-            // Intraday FIFO on today's ODIN trades
-            const { openPositions: intOpen, closedPositions: intClosed } = applyFIFO(myIntraday);
-            const intradayBooked = intClosed.reduce((a,c) => a + c.totalPnl, 0);
-            const intradayNewMTM = intOpen.reduce((s, pos) => {
-              const ltp = getBhavClose(pos.contract);
-              if (!ltp) return s;
-              return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
-            }, 0);
-            const boxB = myIntraday.length > 0 ? carryMTM + intradayBooked + intradayNewMTM : 0;
+
+            // Box B only makes sense if we have today's intraday trades
+            let boxB = 0;
+            if (myIntraday.length > 0) {
+              // Carry-forward: delta on positions held from before today
+              // Only calculate if we have yesterday's closing price (snapshot or bhavcopy)
+              const carryMTM = histOpen.reduce((s, pos) => {
+                const todayLTP  = getBhavClose(pos.contract);
+                const yestClose = ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
+                if (!todayLTP || !yestClose) return s; // skip if no yesterday close
+                return s + (pos.side === "SELL" ? (yestClose - todayLTP) : (todayLTP - yestClose)) * pos.netQty;
+              }, 0);
+
+              // Intraday FIFO on today's ODIN trades only
+              const { openPositions: intOpen, closedPositions: intClosed } = applyFIFO(myIntraday);
+              const intradayBooked = intClosed.reduce((a,c) => a + c.totalPnl, 0);
+              const intradayNewMTM = intOpen.reduce((s, pos) => {
+                const ltp = getBhavClose(pos.contract);
+                if (!ltp) return s;
+                return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
+              }, 0);
+
+              boxB = carryMTM + intradayBooked + intradayNewMTM;
+            }
 
             // ── BOX C: Total ───────────────────────────────────────
             const boxC = boxA + boxB;
