@@ -4014,7 +4014,11 @@ export default function BackOffice() {
 
             // allOpen2 for expanded view
             const allOpen2 = histOpen;
-            const box2MTM = grandMTM;
+            const box2MTM = histOpen.reduce((s, pos) => {
+              const close = getBhavClose(pos.contract);
+              if (close === null) return s;
+              return s + (pos.side === "SELL" ? (pos.avgPrice - close) : (close - pos.avgPrice)) * pos.netQty;
+            }, 0);
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
