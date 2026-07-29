@@ -3929,6 +3929,8 @@ export default function BackOffice() {
 
             // ── ALL trades for this client (used for FIFO — always full history) ──
             const allClientTrades = state.trades.filter(t => t.clientId === client.id);
+            const closed = clientClosedPos(client.id);
+            const open   = clientOpenPos(client.id);
 
             // ── MONTH-FILTERED trades (for P&L display) ──
             const filteredTrades = allClientTrades.filter(t => monthInFilter((t.date||"").slice(0,7)));
