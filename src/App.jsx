@@ -5475,19 +5475,20 @@ export default function BackOffice() {
           try {
             const data = new Uint8Array(ev.target.result);
             const workbook = XLSX.read(data, { type: "array" });
-            const sheet = workbook.Sheets[workbook.SheetNames[0]];
-            // Convert to tab-separated text — raw values, no formatting
-            const rows2d = XLSX.utils.sheet_to_json(sheet, { header:1, raw:true, defval:"" });
-            // Convert 2D array to tab-separated lines
-            const text = rows2d.map(r => r.join("\t")).join("\n");
+            const sheetName = workbook.SheetNames[0];
+            const sheet = workbook.Sheets[sheetName];
+            const rows2d = XLSX.utils.sheet_to_json(sheet, { header:1, raw:false, defval:"" });
+            console.log("SHEET:", sheetName, "ROWS:", rows2d.length);
+            console.log("ROW0:", JSON.stringify(rows2d[0]));
+            console.log("ROW1:", JSON.stringify(rows2d[1]));
+            console.log("ROW2:", JSON.stringify(rows2d[2]));
+            const text = rows2d.map(r => r.map(c => String(c||"")).join("\t")).join("\n");
             const rows = parseLTPFile(text);
+            console.log("PARSED:", rows.length, "rows");
             setLtpPreview(rows);
           } catch(err) {
-            // Fallback: try as plain text (TSV/CSV)
-            const decoder = new TextDecoder("utf-8");
-            const text = decoder.decode(new Uint8Array(ev.target.result));
-            const rows = parseLTPFile(text);
-            setLtpPreview(rows);
+            console.error("XLSX parse error:", err);
+            setLtpPreview([]);
           }
         };
         reader.readAsArrayBuffer(file);
