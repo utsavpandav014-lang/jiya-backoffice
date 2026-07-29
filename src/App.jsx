@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
+import * as XLSX from "xlsx";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -5442,13 +5443,28 @@ export default function BackOffice() {
         const file = e.target.files[0];
         if (!file) return;
         setLtpFile(file);
+
         const reader = new FileReader();
         reader.onload = (ev) => {
-          const text = ev.target.result;
-          const rows = parseLTPFile(text);
-          setLtpPreview(rows);
+          try {
+            const data = new Uint8Array(ev.target.result);
+            const workbook = XLSX.read(data, { type: "array" });
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+            // Convert to tab-separated text — raw values, no formatting
+            const rows2d = XLSX.utils.sheet_to_json(sheet, { header:1, raw:true, defval:"" });
+            // Convert 2D array to tab-separated lines
+            const text = rows2d.map(r => r.join("\t")).join("\n");
+            const rows = parseLTPFile(text);
+            setLtpPreview(rows);
+          } catch(err) {
+            // Fallback: try as plain text (TSV/CSV)
+            const decoder = new TextDecoder("utf-8");
+            const text = decoder.decode(new Uint8Array(ev.target.result));
+            const rows = parseLTPFile(text);
+            setLtpPreview(rows);
+          }
         };
-        reader.readAsText(file);
+        reader.readAsArrayBuffer(file);
       };
 
       const uploadLTP = async () => {
