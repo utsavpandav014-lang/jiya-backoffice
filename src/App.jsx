@@ -1793,12 +1793,25 @@ export default function BackOffice() {
   // Get closing price for a contract from bhavcopy
   // getBhavClose: checks Angel One live MTM first, then bhavcopy
   // getLTP: gets live price from F6 capture first, then bhavcopy
+  // Normalize contract string for fuzzy matching
+  const normContract = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
+
   const getLTP = (contract) => {
-    // Priority 1: F6 live positions (ODIN market price — most accurate)
-    const lp = livePositions.find(p => p.contract === contract);
+    const norm = normContract(contract);
+    // Priority 1: F6 live positions — exact match first, then fuzzy
+    let lp = livePositions.find(p => normContract(p.contract) === norm);
+    if (!lp) {
+      // Fuzzy: split into tokens and check all tokens present
+      const tokens = norm.split(" ").filter(Boolean);
+      lp = livePositions.find(p => {
+        const pNorm = normContract(p.contract);
+        return tokens.every(tk => pNorm.includes(tk));
+      });
+    }
     if (lp?.ltp > 0) return lp.ltp;
     // Priority 2: Bhavcopy upload
     if (bhavLookup[contract]?.closePrice) return bhavLookup[contract].closePrice;
+    if (bhavLookup[norm]?.closePrice) return bhavLookup[norm]?.closePrice;
     return null;
   };
   const getBhavClose = getLTP; // alias for backward compatibility
@@ -2793,8 +2806,16 @@ export default function BackOffice() {
         const myYestStr    = new Date(Date.now()-86400000).toISOString().slice(0,10);
         const myYSnap      = closingSnapshot[myYestStr] || {};
         const myHasSnap    = Object.keys(myYSnap).length > 0;
-        const myHistTrades = myTrades.filter(t => (t.date||"") < myTodayStr);
-        const myTodayTrades= myTrades.filter(t => (t.date||"") === myTodayStr);
+        const myHistTrades  = myTrades.filter(t => (t.date||"") < myTodayStr);
+        // ALL today's records (includes BASE_ price anchors)
+        const myTodayAll    = myTrades.filter(t => (t.date||"") === myTodayStr);
+        // BASE_ records = EOD price anchors — used for carryMTM price only, NEVER fed into FIFO
+        const myBasePosMap  = {};
+        myTodayAll.filter(t => (t.id||"").startsWith("BASE_")).forEach(t => {
+          myBasePosMap[t.contract] = t.price; // base price = yesterday's closing LTP
+        });
+        // Real trades only — exclude base positions from FIFO
+        const myTodayTrades = myTodayAll.filter(t => !(t.id||"").startsWith("BASE_"));
         const { openPositions: myHistOpen, closedPositions: myHistClosed } = applyFIFO(myHistTrades);
 
         // Box A: strictly yesterday's snapshot prices — no fallback to live
@@ -2813,22 +2834,27 @@ export default function BackOffice() {
         // Box B: today's intraday only
         let myBoxB = 0;
         if (myTodayTrades.length > 0 || myHasSnap) {
-          const myCarryMTM = myHasSnap ? myHistOpen.reduce((s,pos) => {
-            const ltp = getBhavClose(pos.contract);
-            const yc  = myYSnap[pos.contract];
-            if (!ltp || !yc) return s;
-            return s + (pos.side==="SELL" ? (yc-ltp) : (ltp-yc)) * pos.netQty;
-          }, 0) : 0;
+          // carryMTM: (live LTP - base price) × qty for each carry-forward position
+          // Base price = yesterday's 3:30 LTP from F6 (myBasePosMap) or snapshot fallback
+          const myCarryMTM = myHistOpen.reduce((s, pos) => {
+            const ltp  = getBhavClose(pos.contract);
+            const base = myBasePosMap[pos.contract] || myYSnap[pos.contract];
+            if (!ltp || !base) return s;
+            return s + (pos.side === "SELL" ? (base - ltp) : (ltp - base)) * pos.netQty;
+          }, 0);
+          // FIFO on hist + real today trades only (no BASE_ records)
           const { openPositions: myAllOpen2, closedPositions: myAllClosed2 } = applyFIFO([...myHistTrades, ...myTodayTrades]);
+          // Booked P&L from today's squaring trades
           const myTodayBooked = myAllClosed2
-            .filter(cp => (cp.trades||[]).every(t => (t.date||"") === myTodayStr))
-            .reduce((a,c) => a + c.totalPnl, 0);
+            .filter(cp => (cp.trades||[]).some(t => (t.date||"") === myTodayStr))
+            .reduce((a, c) => a + c.totalPnl, 0);
+          // MTM on new positions opened today
           const myTodayNewMTM = myAllOpen2
-            .filter(pos => (pos.trades||[]).every(t => (t.date||"") === myTodayStr))
-            .reduce((s,pos) => {
+            .filter(pos => myHistOpen.every(hp => hp.contract !== pos.contract || hp.clientId !== pos.clientId))
+            .reduce((s, pos) => {
               const ltp = getBhavClose(pos.contract);
               if (!ltp) return s;
-              return s + (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty;
+              return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
             }, 0);
           myBoxB = myCarryMTM + myTodayBooked + myTodayNewMTM;
         }
@@ -3878,28 +3904,37 @@ export default function BackOffice() {
             const boxA = boxARealized + boxAOpenMTM - boxAExpenses - boxASoftware - boxAInterest;
 
             // ── BOX B: Uses ONLY intraday_trades table ─────────────
-            const myIntraday = intradayTrades.filter(t => t.clientId === client.id);
+            const myIntradayAll = intradayTrades.filter(t => t.clientId === client.id);
+            // BASE_ records = price anchors from EOD — NEVER feed into FIFO
+            const basePriceMap  = {};
+            myIntradayAll.filter(t => (t.id||"").startsWith("BASE_")).forEach(t => {
+              basePriceMap[t.contract] = t.price;
+            });
+            const myIntraday = myIntradayAll.filter(t => !(t.id||"").startsWith("BASE_"));
 
             // Box B only makes sense if we have today's intraday trades
             let boxB = 0;
-            if (myIntraday.length > 0) {
-              // Carry-forward: delta on positions held from before today
-              // Only calculate if we have yesterday's closing price (snapshot or bhavcopy)
+            if (myIntraday.length > 0 || Object.keys(basePriceMap).length > 0) {
+              // Carry-forward MTM: (live LTP - base price) × qty
+              // Base price = F6 closing LTP from yesterday (basePriceMap), fallback to snapshot/bhavcopy
               const carryMTM = histOpen.reduce((s, pos) => {
-                const todayLTP  = getBhavClose(pos.contract);
-                const yestClose = ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
-                if (!todayLTP || !yestClose) return s; // skip if no yesterday close
-                return s + (pos.side === "SELL" ? (yestClose - todayLTP) : (todayLTP - yestClose)) * pos.netQty;
+                const todayLTP = getBhavClose(pos.contract);
+                const base     = basePriceMap[pos.contract] || ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
+                if (!todayLTP || !base) return s;
+                return s + (pos.side === "SELL" ? (base - todayLTP) : (todayLTP - base)) * pos.netQty;
               }, 0);
 
-              // Intraday FIFO on today's ODIN trades only
+              // FIFO on real today trades ONLY (no BASE_ records)
               const { openPositions: intOpen, closedPositions: intClosed } = applyFIFO(myIntraday);
               const intradayBooked = intClosed.reduce((a,c) => a + c.totalPnl, 0);
-              const intradayNewMTM = intOpen.reduce((s, pos) => {
-                const ltp = getBhavClose(pos.contract);
-                if (!ltp) return s;
-                return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
-              }, 0);
+              // MTM on new positions opened today (not in histOpen)
+              const intradayNewMTM = intOpen
+                .filter(pos => !histOpen.some(h => h.contract === pos.contract && h.clientId === pos.clientId))
+                .reduce((s, pos) => {
+                  const ltp = getBhavClose(pos.contract);
+                  if (!ltp) return s;
+                  return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
+                }, 0);
 
               boxB = carryMTM + intradayBooked + intradayNewMTM;
             }
