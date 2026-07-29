@@ -3921,60 +3921,57 @@ export default function BackOffice() {
           </div>
 
           {showClients.map(client => {
-            const closed  = clientClosedPos(client.id);
-            const open    = clientOpenPos(client.id);
+            const todayStr     = new Date().toISOString().slice(0,10);
+            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
+            const ySnap        = closingSnapshot[yesterdayStr] || {};
+            const getYestClose = (contract) =>
+              ySnap[contract] || bhavLookup[contract]?.closePrice || null;
 
-            // All months that have any data for this client — filtered by date selection
-            const tradeDates = state.trades.filter(t => t.clientId === client.id).map(t => (t.date||"").slice(0,7));
-            const interestMonths = (state.interest||[]).filter(i => i.clientId === client.id).map(i => i.yearMonth);
-            const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(m => m && monthInFilter(m)).sort().reverse();
+            // ── ALL trades for this client (used for FIFO — always full history) ──
+            const allClientTrades = state.trades.filter(t => t.clientId === client.id);
 
-            // For range/month filter also filter closed trades
-            const filteredClosed = closed.filter(cp => {
-              // Use the date of the last trade in the contract (closing date)
+            // ── MONTH-FILTERED trades (for P&L display) ──
+            const filteredTrades = allClientTrades.filter(t => monthInFilter((t.date||"").slice(0,7)));
+
+            // ── All months in filtered window ──
+            const tradeDates     = filteredTrades.map(t => (t.date||"").slice(0,7));
+            const interestMonths = (state.interest||[])
+              .filter(i => i.clientId === client.id && monthInFilter((i.yearMonth||"").replace("_SW","")))
+              .map(i => i.yearMonth);
+            const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(Boolean).sort().reverse();
+
+            // ── FIFO on full history (correct open/closed positions) ──
+            const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(allClientTrades);
+
+            // ── Filtered closed contracts: only those closed within selected month(s) ──
+            const filteredClosed = histClosed.filter(cp => {
               const dates = cp.trades.map(t => (t.date||"").slice(0,7)).filter(Boolean).sort();
-              const lastMonth = dates[dates.length - 1]; // most recent trade month
+              const lastMonth = dates[dates.length - 1];
               return lastMonth ? monthInFilter(lastMonth) : false;
             });
 
-            // Grand totals
+            // ── P&L numbers — ALL strictly filtered to selected month(s) ──
             const grandRealized = filteredClosed.reduce((a,c) => a + c.totalPnl, 0);
             const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
-            const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
+            const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m+"_SW"), 0);
             const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
-            // Live MTM on open positions
-            const grandMTM = open.reduce((s, pos) => {
-              const close = getBhavClose(pos.contract);
-              if (close === null) return s;
-              return s + (pos.side === "SELL" ? (pos.avgPrice - close) : (close - pos.avgPrice)) * pos.netQty;
-            }, 0);
-            const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
+            const grandNet      = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
-            // ── 3-Box P&L System ───────────────────────────────────
-            // Box A: main trades table (manual Excel) — FROZEN during market hours
-            // Box B: intraday_trades table (ODIN live) — resets daily
-            // Box C: A + B
-            const todayStr     = new Date().toISOString().slice(0,10);
-            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
-
-            // ── BOX A: Uses ONLY main trades table ────────────────
-            const allClientTrades = state.trades.filter(t => t.clientId === client.id);
-            const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(allClientTrades);
-            const boxARealized = histClosed.reduce((a,c) => a + c.totalPnl, 0);
-            const allMonthsA   = [...new Set(allClientTrades.map(t => (t.date||"").slice(0,7)).filter(Boolean))];
-            const boxAExpenses = allMonthsA.reduce((a,m) => a + getMonthlyCharges(client.id,m), 0);
-            const boxASoftware = allMonthsA.reduce((a,m) => a + getMonthlyInterest(client.id,m+"_SW"), 0);
-            const boxAInterest = allMonthsA.reduce((a,m) => a + getMonthlyInterest(client.id,m), 0);
-            // Open MTM: snapshot → bhavcopy ONLY — NEVER live prices in Box A
-            const ySnap = closingSnapshot[yesterdayStr] || {};
-            const getYestClose = (contract) =>
-              ySnap[contract] || bhavLookup[contract]?.closePrice || null;
-            const boxAOpenMTM = histOpen.reduce((s, pos) => {
+            // ── BOX A: filtered month realized + open MTM at yesterday close ──
+            // Realized = only contracts closed within selected month
+            const boxARealized = grandRealized;
+            const boxAExpenses = grandExpenses;
+            const boxASoftware = grandSoftware;
+            const boxAInterest = grandInterest;
+            const boxAOpenMTM  = histOpen.reduce((s, pos) => {
               const closeP = getYestClose(pos.contract);
               if (!closeP) return s;
               return s + (pos.side === "SELL" ? (pos.avgPrice - closeP) : (closeP - pos.avgPrice)) * pos.netQty;
             }, 0);
-            const boxA = boxARealized + boxAOpenMTM - boxAExpenses - boxASoftware - boxAInterest;
+            // Box A open MTM only shown when "All Time" or current month selected
+            const isCurrentMonth = pnlDateMode === "all" ||
+              (pnlDateMode === "month" && pnlMonth === new Date().toISOString().slice(0,7));
+            const boxA = boxARealized + (isCurrentMonth ? boxAOpenMTM : 0) - boxAExpenses - boxASoftware - boxAInterest;
 
             // ── BOX B: Uses ONLY intraday_trades table ─────────────
             const myIntradayAll = intradayTrades.filter(t => t.clientId === client.id);
@@ -4034,7 +4031,9 @@ export default function BackOffice() {
                   <div style={{ background:C.bg, borderRadius:12, padding:"16px 18px",
                     border:`1px solid ${C.border}` }}>
                     <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase",
-                      letterSpacing:1, marginBottom:5 }}>P&L Till Yesterday</div>
+                      letterSpacing:1, marginBottom:5 }}>
+                      {isCurrentMonth ? "P&L Till Yesterday" : `Realized P&L (${pnlDateMode==="month"?pnlMonth:"Filtered"})`}
+                    </div>
                     <div style={{ fontSize:24, fontWeight:800,
                       color:boxA>=0?C.green:C.red, marginBottom:3 }}>
                       {boxA>=0?"+":""}₹{Math.abs(boxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
