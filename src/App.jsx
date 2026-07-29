@@ -5341,99 +5341,125 @@ export default function BackOffice() {
       // Updates live_positions table with matched LTP values
 
       const parseLTPFile = (text) => {
+        // CONFIRMED COLUMN LAYOUT (11 cols, no "Client" col):
+        // 0: User(clientId) | 1: Symbol | 2: Ser/Exp(expiry) | 3: Strike Price
+        // 4: Option Type    | 5: Net Qty | 6: Net Price(skip) | 7: Market Price(LTP)
+        // 8: Actual MTM P&L | 9: MTM G/L | 10: Scrip Code
+        //
+        // IMPORTANT: Excel auto-converts numeric scrip codes to dates in Strike col!
+        // Real strike prices are plain numbers (77000, 78100 etc)
+        // Excel-date strikes (21-Aug-11 etc) = scrip code misread → use Scrip Code to match instead
+
         const { openPositions } = applyFIFO(state.trades);
         const results = [];
+
+        // Build scrip code → contract lookup from open positions
+        // trades table has scripCode field
+        const scripToContract = {};
+        state.trades.forEach(t => {
+          if (t.scripCode && t.contract) {
+            scripToContract[String(t.scripCode).trim()] = t.contract;
+          }
+        });
+
+        const parseExpiry = (raw) => {
+          if (!raw) return "";
+          const s = String(raw).trim().toUpperCase();
+          const dashMatch = s.match(/(\d{1,2})[\-\/](\w{3})[\-\/](\d{2,4})/);
+          if (dashMatch) {
+            const dd  = dashMatch[1].padStart(2,"0");
+            const mmm = dashMatch[2].slice(0,3);
+            const yy  = dashMatch[3].length === 2 ? "20" + dashMatch[3] : dashMatch[3];
+            return `${dd}${mmm}${yy}`;
+          }
+          if (s.length === 7 && s.slice(2,5).match(/[A-Z]/)) return s.slice(0,5) + "20" + s.slice(5);
+          return s;
+        };
+
+        const normStr = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
 
         for (const line of text.split("\n")) {
           if (!line.trim()) continue;
           const row = line.split("\t");
-          if (row.length < 9) continue;
+          if (row.length < 8) continue;
 
-          const clientId  = (row[0]||"").trim();
-          const symbol    = (row[1]||"").trim().toUpperCase();
-          // row[2] = broker/client code — skip
-          const expiry    = (row[3]||"").trim().toUpperCase();
-          const strike    = (row[4]||"").trim();
-          const optType   = (row[5]||"").trim().toUpperCase();
-          const netQtyS   = (row[6]||"").trim();
-          const ltpS      = (row[8]||"").trim(); // Market Price = LTP
+          const clientId  = normStr(row[0]);
+          const symbol    = normStr(row[1]);
+          const expiryRaw = (row[2]||"").trim();
+          const strikeRaw = (row[3]||"").trim();
+          const optType   = normStr(row[4]);
+          const netQtyS   = (row[5]||"").trim();
+          const ltpS      = (row[7]||"").trim();  // Market Price = col 7
+          const scripCode = (row[row.length-1]||"").trim(); // last col = Scrip Code
 
+          // Skip header / total / separator rows
           if (!clientId || !symbol) continue;
-          if (clientId.toLowerCase().includes("user") || clientId.startsWith("(")) continue;
+          if (clientId.includes("USER") || clientId.startsWith("(") || clientId.startsWith("-")) continue;
+          if (clientId === "ALL" || symbol === "ALL") continue;
 
-          const netQty = parseFloat(netQtyS.replace(",","") || "0");
-          // Blank Net Qty with a valid Market Price = still an open position
-          // Only skip if Net Qty is explicitly 0
-          if (netQty === 0 && netQtyS.trim() !== "") continue; // skip confirmed-zero rows
+          // Skip equity/normal rows
+          if (optType === "NORMAL" || optType === "EQ" || optType === "EQUITY") continue;
 
-          const ltp = parseFloat(ltpS.replace(",","") || "0");
+          const ltp = parseFloat(ltpS.replace(/,/g,"") || "0");
           if (ltp <= 0) continue;
 
-          // Normalize expiry — handle multiple formats:
-          // 30-Jul-26 → 30JUL2026
-          // 28JUL26   → 28JUL2026
-          // 28JUL2026 → 28JUL2026 (already correct)
-          let expNorm = expiry.toUpperCase();
-          // Format: 30-Jul-26 or 30-JUL-26
-          const dashMatch = expiry.match(/(\d{1,2})[\-\/](\w{3})[\-\/](\d{2,4})/);
-          if (dashMatch) {
-            const dd  = dashMatch[1].padStart(2,"0");
-            const mmm = dashMatch[2].toUpperCase().slice(0,3);
-            const yy  = dashMatch[3].length === 2 ? "20" + dashMatch[3] : dashMatch[3];
-            expNorm = `${dd}${mmm}${yy}`;
-          } else if (expNorm.length === 7 && expNorm.slice(2,5).match(/[A-Z]/)) {
-            expNorm = expNorm.slice(0,5) + "20" + expNorm.slice(5);
-          }
+          const netQty = parseFloat(netQtyS.replace(/,/g,"") || "0");
+          // Only skip if explicitly zero (non-blank)
+          if (netQtyS !== "" && netQty === 0) continue;
 
-          // Normalize strike: 75700.00 → 75700
-          let strikeNorm = strike;
-          try {
-            const sf = parseFloat(strike);
-            strikeNorm = sf === Math.floor(sf) ? String(Math.floor(sf)) : String(sf);
-          } catch(e) {}
+          // Determine if strike is a real number or Excel-mangled date
+          const strikeNum = parseFloat(strikeRaw.replace(/,/g,""));
+          const isRealStrike = !isNaN(strikeNum) && !strikeRaw.includes("-") && !strikeRaw.includes("/") && strikeNum > 1000;
+          const strikeNorm = isRealStrike ? String(Math.round(strikeNum)) : "";
 
-          // Build expected contract name (same logic as F8 parser)
+          const expNorm = parseExpiry(expiryRaw);
+
+          // Build contract name
           let contract = "";
-          const optUp = optType.toUpperCase();
-          if (optUp === "XX" || optUp === "FUT" || optUp === "" || optUp === "FUTURES") {
+          if (["CE","PE","CA","PA","CALL","PUT"].includes(optType) && isRealStrike) {
+            contract = `${symbol} ${strikeNorm} ${optType} ${expNorm}`.trim();
+          } else if (optType === "" || optType === "XX" || optType === "FUT") {
             contract = `${symbol} FUT ${expNorm}`.trim();
-          } else if (["CE","PE","CA","PA","CALL","PUT"].includes(optUp)) {
-            contract = `${symbol} ${strikeNorm} ${optUp} ${expNorm}`.trim();
-          } else if (optUp === "NORMAL" || optUp === "EQ" || optUp === "EQUITY") {
-            contract = symbol; // equity
+          } else if (["CE","PE","CA","PA"].includes(optType) && !isRealStrike) {
+            // Strike was mangled by Excel — try to match via scrip code
+            contract = scripCode ? (scripToContract[scripCode] || "") : "";
           } else {
-            contract = `${symbol} ${strikeNorm} ${optUp} ${expNorm}`.trim();
+            contract = `${symbol} FUT ${expNorm}`.trim();
           }
 
-          // Match to open position
-          const match = openPositions.find(p =>
-            p.clientId === clientId && p.contract === contract
+          // Match 1: exact contract + clientId
+          let finalMatch = openPositions.find(p =>
+            p.clientId === clientId && normStr(p.contract) === normStr(contract)
           );
 
-          // Fuzzy match if exact fails
-          let fuzzyMatch = match;
-          if (!match) {
-            const normC = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
-            const tokens = normC(contract).split(" ").filter(Boolean);
-            fuzzyMatch = openPositions.find(p =>
-              p.clientId === clientId &&
-              tokens.every(tk => normC(p.contract).includes(tk))
+          // Match 2: via scrip code in open positions
+          if (!finalMatch && scripCode) {
+            finalMatch = openPositions.find(p =>
+              p.clientId === clientId && String(p.scripCode||"").trim() === scripCode
             );
           }
 
-          const finalMatch = match || fuzzyMatch;
-          const side = netQty > 0 ? "BUY" : "SELL";
-          const isBSE = symbol === "SENSEX" || symbol === "BANKEX" || symbol === "SENSEX50";
+          // Match 3: fuzzy — symbol + expiry + optType + clientId (skip bad strike)
+          if (!finalMatch && contract) {
+            const tokens = normStr(contract).split(" ").filter(t => t.length > 1);
+            finalMatch = openPositions.find(p =>
+              p.clientId === clientId &&
+              tokens.every(tk => normStr(p.contract).includes(tk))
+            );
+          }
+
+          const side = netQty >= 0 ? "BUY" : "SELL";
+          const isBSE = ["SENSEX","BANKEX","SENSEX50"].includes(symbol);
 
           results.push({
             clientId,
-            contract: finalMatch ? finalMatch.contract : contract,
+            contract: finalMatch ? finalMatch.contract : (contract || `${symbol} ${optType} ${expNorm}`),
             ltp,
-            netQty: Math.abs(netQty),
+            netQty: Math.abs(netQty) || 1,
             side,
             exchange: isBSE ? "BFO" : "NFO",
             matched: !!finalMatch,
-            matchedContract: finalMatch?.contract || null,
+            scripCode,
           });
         }
         return results;
@@ -5454,14 +5480,7 @@ export default function BackOffice() {
             const rows2d = XLSX.utils.sheet_to_json(sheet, { header:1, raw:true, defval:"" });
             // Convert 2D array to tab-separated lines
             const text = rows2d.map(r => r.join("\t")).join("\n");
-            console.log("=== LTP FILE DEBUG ===");
-            console.log("Total rows from Excel:", rows2d.length);
-            console.log("Row 0 (header):", rows2d[0]);
-            console.log("Row 1 (first data):", rows2d[1]);
-            console.log("Row 2:", rows2d[2]);
-            console.log("Full text (first 500):", text.slice(0,500));
             const rows = parseLTPFile(text);
-            console.log("Parsed rows:", rows.length, rows.slice(0,2));
             setLtpPreview(rows);
           } catch(err) {
             // Fallback: try as plain text (TSV/CSV)
