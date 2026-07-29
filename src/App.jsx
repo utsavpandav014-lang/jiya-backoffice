@@ -5454,7 +5454,14 @@ export default function BackOffice() {
             const rows2d = XLSX.utils.sheet_to_json(sheet, { header:1, raw:true, defval:"" });
             // Convert 2D array to tab-separated lines
             const text = rows2d.map(r => r.join("\t")).join("\n");
+            console.log("=== LTP FILE DEBUG ===");
+            console.log("Total rows from Excel:", rows2d.length);
+            console.log("Row 0 (header):", rows2d[0]);
+            console.log("Row 1 (first data):", rows2d[1]);
+            console.log("Row 2:", rows2d[2]);
+            console.log("Full text (first 500):", text.slice(0,500));
             const rows = parseLTPFile(text);
+            console.log("Parsed rows:", rows.length, rows.slice(0,2));
             setLtpPreview(rows);
           } catch(err) {
             // Fallback: try as plain text (TSV/CSV)
