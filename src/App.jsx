@@ -5570,7 +5570,10 @@ export default function BackOffice() {
 
             <div style={{ marginBottom:16 }}>
               <input type="file" accept=".txt,.csv,.tsv,.xls,.xlsx"
-                onChange={handleLTPFile}
+                onChange={(e) => {
+                  console.log("FILE SELECTED:", e.target.files[0]?.name);
+                  handleLTPFile(e);
+                }}
                 style={{ color:C.text, fontSize:13 }} />
             </div>
 
