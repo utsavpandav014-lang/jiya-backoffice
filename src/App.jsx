@@ -561,6 +561,74 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
+function DeleteIntradayButton({ notify, C, card, btn }) {
+  const [deleting, setDeleting] = useState(false);
+  const [confirm,  setConfirm]  = useState(false);
+
+  const deleteAutoTrades = async () => {
+    if (!confirm) { setConfirm(true); return; }
+    setDeleting(true);
+    setConfirm(false);
+    try {
+      const today = new Date().toISOString().slice(0,10);
+      const SB_URL = "https://jwfucitnaqkuyzizmuve.supabase.co";
+      const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
+      const headers = {
+        "Content-Type":  "application/json",
+        "apikey":        SB_KEY,
+        "Authorization": `Bearer ${SB_KEY}`,
+        "Prefer":        "return=minimal",
+      };
+      const [r1, r2] = await Promise.all([
+        fetch(`${SB_URL}/rest/v1/intraday_trades?date=eq.${today}&id=like.T*`,     { method:"DELETE", headers }),
+        fetch(`${SB_URL}/rest/v1/intraday_trades?date=eq.${today}&id=like.BASE_*`, { method:"DELETE", headers }),
+      ]);
+      if (r1.ok && r2.ok) {
+        notify("🗑 Today's auto-captured intraday trades deleted. Restart RMS tool to re-capture.");
+      } else {
+        notify("❌ Delete failed — check connection");
+      }
+    } catch(e) {
+      notify("❌ Error: " + e.message);
+    }
+    setDeleting(false);
+  };
+
+  return (
+    <div style={{...card, padding:20, marginTop:16, borderLeft:`4px solid ${C.red}`}}>
+      <div style={{fontSize:15, fontWeight:700, color:C.text, marginBottom:6}}>
+        🗑 Delete Today's Auto-Captured Intraday Trades
+      </div>
+      <div style={{color:C.muted, fontSize:12, marginBottom:14, lineHeight:1.7}}>
+        Deletes <strong style={{color:C.yellow}}>only trades uploaded by RMS tool</strong> (today only).<br/>
+        Manually uploaded Excel trades in <code>trades</code> table are <strong style={{color:C.green}}>not touched</strong>.<br/>
+        After delete: restart RMS tool to re-capture, or upload Excel manually.
+      </div>
+      <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap"}}>
+        <button
+          onClick={deleteAutoTrades}
+          disabled={deleting}
+          style={{
+            background: confirm ? C.red : C.yellow,
+            color: confirm ? "#fff" : "#000",
+            border: "none", borderRadius:8, padding:"10px 20px",
+            fontSize:13, fontWeight:700, cursor:"pointer",
+            opacity: deleting ? 0.6 : 1,
+          }}>
+          {deleting ? "⏳ Deleting..." : confirm ? "⚠️ Confirm — Click to DELETE" : "🗑 Delete Auto Intraday Trades (Today)"}
+        </button>
+        {confirm && !deleting && (
+          <button onClick={() => setConfirm(false)}
+            style={{background:C.card, color:C.muted, border:`1px solid ${C.border}`,
+              borderRadius:8, padding:"10px 16px", fontSize:12, cursor:"pointer"}}>
+            Cancel
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices, logout, resetPriceCache }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
@@ -669,78 +737,9 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
       </div>
 
       {/* ── Intraday Trade Management ── */}
-      {(auth?.role === "admin" || auth?.role === "superadmin") && (() => {
-        const [deleting, setDeleting] = React.useState(false);
-        const [confirm,  setConfirm]  = React.useState(false);
-
-        const deleteAutoTrades = async () => {
-          if (!confirm) { setConfirm(true); return; }
-          setDeleting(true);
-          setConfirm(false);
-          try {
-            const today = new Date().toISOString().slice(0,10);
-            const SUPABASE_URL2     = "https://jwfucitnaqkuyzizmuve.supabase.co";
-            const SUPABASE_ANON_KEY2= "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
-            const headers = {
-              "Content-Type":  "application/json",
-              "apikey":        SUPABASE_ANON_KEY2,
-              "Authorization": `Bearer ${SUPABASE_ANON_KEY2}`,
-              "Prefer":        "return=minimal",
-            };
-            // Delete auto-captured trades: id starts with T (tool format: T{timestamp}_{i}_{rand})
-            // These are in intraday_trades table for today only
-            // BASE_ records (price anchors) also deleted — they get recreated at next EOD
-            // Manually uploaded Excel trades are in trades table — untouched
-            const r1 = await fetch(
-              `${SUPABASE_URL2}/rest/v1/intraday_trades?date=eq.${today}&id=like.T*`,
-              { method: "DELETE", headers }
-            );
-            const r2 = await fetch(
-              `${SUPABASE_URL2}/rest/v1/intraday_trades?date=eq.${today}&id=like.BASE_*`,
-              { method: "DELETE", headers }
-            );
-            if (r1.ok && r2.ok) {
-              notify("🗑 Today's auto-captured intraday trades deleted. Restart the RMS tool to re-capture.", "success");
-            } else {
-              notify("❌ Delete failed — check Supabase connection", "error");
-            }
-          } catch(e) {
-            notify("❌ Error: " + e.message, "error");
-          }
-          setDeleting(false);
-        };
-
-        return (
-          <div style={{...card, padding:20, marginTop:16, borderLeft:`4px solid ${C.red}`}}>
-            <div style={{fontSize:15, fontWeight:700, color:C.text, marginBottom:6}}>
-              🗑 Delete Today's Auto-Captured Intraday Trades
-            </div>
-            <div style={{color:C.muted, fontSize:12, marginBottom:14, lineHeight:1.7}}>
-              Deletes <strong style={{color:C.yellow}}>only trades uploaded automatically by the RMS tool</strong> for today.<br/>
-              Manually uploaded Excel trades (<code>trades</code> table) are <strong style={{color:C.green}}>not affected</strong>.<br/>
-              Use this to: clear bad auto-capture data, then restart RMS tool or upload Excel manually.
-            </div>
-            <button
-              onClick={deleteAutoTrades}
-              disabled={deleting}
-              style={{
-                ...btn(confirm ? C.red : C.yellow),
-                fontSize:13, fontWeight:700, padding:"10px 20px",
-                border: confirm ? `2px solid ${C.red}` : "none",
-                opacity: deleting ? 0.6 : 1,
-              }}>
-              {deleting ? "⏳ Deleting..." : confirm ? "⚠️ Click again to CONFIRM DELETE" : "🗑 Delete Auto Intraday Trades (Today)"}
-            </button>
-            {confirm && (
-              <button
-                onClick={() => setConfirm(false)}
-                style={{...btn(C.muted), fontSize:12, marginLeft:8}}>
-                Cancel
-              </button>
-            )}
-          </div>
-        );
-      })()}
+      {(auth?.role === "admin" || auth?.role === "superadmin") && (
+        <DeleteIntradayButton notify={notify} C={C} card={card} btn={btn} />
+      )}
 
       {/* ── Password Management ── */}
       <PasswordManager state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} auth={auth} onLogout={logout} />
@@ -1667,7 +1666,7 @@ export default function BackOffice() {
       } catch(e) { console.log("Intraday load error:", e.message); }
       // Load live positions from F6 capture (has LTP)
       try {
-        const liveRaw = await sb.select("live_positions", `?adminId=eq.${CONFIG.admin_id||"JIYA"}`);
+        const liveRaw = await sb.select("live_positions", `?adminId=eq.JIYA`);
         setLivePositions(Array.isArray(liveRaw) ? liveRaw : []);
       } catch(e) { console.log("Live positions load error:", e.message); }
 
