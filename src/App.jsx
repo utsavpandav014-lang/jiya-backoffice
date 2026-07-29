@@ -2185,6 +2185,9 @@ export default function BackOffice() {
     catch(e) { return []; }
   });
   const [uploadTradeDate, setUploadTradeDate] = useState(new Date().toISOString().slice(0,10));
+  const [ltpFile,        setLtpFile]        = useState(null);
+  const [ltpPreview,     setLtpPreview]     = useState(null); // [{clientId,contract,ltp,matched}]
+  const [ltpUploading,   setLtpUploading]   = useState(false);
 
   // Normalize expiry date to standard format: DDMMMYYYY (e.g. 02APR2026)
   // Handles: "02APR2026", "02-Apr-26", "02-Apr-2026", "2026-04-02", "02/04/2026" etc.
@@ -3542,6 +3545,9 @@ export default function BackOffice() {
               <div style={{display:"flex", gap:8}}>
                 <button style={btn(C.purple)} onClick={() => setModal("uploadTrades")}>
                   <Icon name="upload" size={16}/> Upload Master File
+                </button>
+                <button style={btn(C.blue)} onClick={() => { setLtpFile(null); setLtpPreview(null); setModal("uploadLTP"); }}>
+                  📡 Upload LTP File
                 </button>
                 {uploadHistory.length > 0 && (
                   <button style={{...btn(C.card), border:`1px solid ${C.border}`, color:C.text, fontSize:13}}
@@ -5326,6 +5332,277 @@ export default function BackOffice() {
         </div>
       </div>
     );
+
+    if (modal === "uploadLTP") {
+      // ── LTP Upload Modal ──────────────────────────────────────
+      // Parses Integrated Net Position file (tab-separated or Excel)
+      // Matches to open positions by: ClientID → Symbol → Expiry → Strike → OptType
+      // Updates live_positions table with matched LTP values
+
+      const parseLTPFile = (text) => {
+        const { openPositions } = applyFIFO(state.trades);
+        const results = [];
+
+        for (const line of text.split("\n")) {
+          if (!line.trim()) continue;
+          const row = line.split("\t");
+          if (row.length < 9) continue;
+
+          const clientId  = (row[0]||"").trim();
+          const symbol    = (row[1]||"").trim().toUpperCase();
+          // row[2] = broker/client code — skip
+          const expiry    = (row[3]||"").trim().toUpperCase();
+          const strike    = (row[4]||"").trim();
+          const optType   = (row[5]||"").trim().toUpperCase();
+          const netQtyS   = (row[6]||"").trim();
+          const ltpS      = (row[8]||"").trim(); // Market Price = LTP
+
+          if (!clientId || !symbol) continue;
+          if (clientId.toLowerCase().includes("user") || clientId.startsWith("(")) continue;
+
+          const netQty = parseFloat(netQtyS.replace(",","") || "0");
+          // Blank Net Qty with a valid Market Price = still an open position
+          // Only skip if Net Qty is explicitly 0
+          if (netQty === 0 && netQtyS.trim() !== "") continue; // skip confirmed-zero rows
+
+          const ltp = parseFloat(ltpS.replace(",","") || "0");
+          if (ltp <= 0) continue;
+
+          // Normalize expiry — handle multiple formats:
+          // 30-Jul-26 → 30JUL2026
+          // 28JUL26   → 28JUL2026
+          // 28JUL2026 → 28JUL2026 (already correct)
+          let expNorm = expiry.toUpperCase();
+          // Format: 30-Jul-26 or 30-JUL-26
+          const dashMatch = expiry.match(/(\d{1,2})[\-\/](\w{3})[\-\/](\d{2,4})/);
+          if (dashMatch) {
+            const dd  = dashMatch[1].padStart(2,"0");
+            const mmm = dashMatch[2].toUpperCase().slice(0,3);
+            const yy  = dashMatch[3].length === 2 ? "20" + dashMatch[3] : dashMatch[3];
+            expNorm = `${dd}${mmm}${yy}`;
+          } else if (expNorm.length === 7 && expNorm.slice(2,5).match(/[A-Z]/)) {
+            expNorm = expNorm.slice(0,5) + "20" + expNorm.slice(5);
+          }
+
+          // Normalize strike: 75700.00 → 75700
+          let strikeNorm = strike;
+          try {
+            const sf = parseFloat(strike);
+            strikeNorm = sf === Math.floor(sf) ? String(Math.floor(sf)) : String(sf);
+          } catch(e) {}
+
+          // Build expected contract name (same logic as F8 parser)
+          let contract = "";
+          const optUp = optType.toUpperCase();
+          if (optUp === "XX" || optUp === "FUT" || optUp === "" || optUp === "FUTURES") {
+            contract = `${symbol} FUT ${expNorm}`.trim();
+          } else if (["CE","PE","CA","PA","CALL","PUT"].includes(optUp)) {
+            contract = `${symbol} ${strikeNorm} ${optUp} ${expNorm}`.trim();
+          } else if (optUp === "NORMAL" || optUp === "EQ" || optUp === "EQUITY") {
+            contract = symbol; // equity
+          } else {
+            contract = `${symbol} ${strikeNorm} ${optUp} ${expNorm}`.trim();
+          }
+
+          // Match to open position
+          const match = openPositions.find(p =>
+            p.clientId === clientId && p.contract === contract
+          );
+
+          // Fuzzy match if exact fails
+          let fuzzyMatch = match;
+          if (!match) {
+            const normC = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
+            const tokens = normC(contract).split(" ").filter(Boolean);
+            fuzzyMatch = openPositions.find(p =>
+              p.clientId === clientId &&
+              tokens.every(tk => normC(p.contract).includes(tk))
+            );
+          }
+
+          const finalMatch = match || fuzzyMatch;
+          const side = netQty > 0 ? "BUY" : "SELL";
+          const isBSE = symbol === "SENSEX" || symbol === "BANKEX" || symbol === "SENSEX50";
+
+          results.push({
+            clientId,
+            contract: finalMatch ? finalMatch.contract : contract,
+            ltp,
+            netQty: Math.abs(netQty),
+            side,
+            exchange: isBSE ? "BFO" : "NFO",
+            matched: !!finalMatch,
+            matchedContract: finalMatch?.contract || null,
+          });
+        }
+        return results;
+      };
+
+      const handleLTPFile = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        setLtpFile(file);
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const text = ev.target.result;
+          const rows = parseLTPFile(text);
+          setLtpPreview(rows);
+        };
+        reader.readAsText(file);
+      };
+
+      const uploadLTP = async () => {
+        if (!ltpPreview || ltpPreview.length === 0) return;
+        setLtpUploading(true);
+        try {
+          const matched = ltpPreview.filter(r => r.matched);
+          if (matched.length === 0) {
+            notify("No matched positions found — check file format");
+            setLtpUploading(false);
+            return;
+          }
+
+          // Delete existing live_positions for this admin
+          await fetch(
+            `${SUPABASE_URL}/rest/v1/live_positions?adminId=eq.JIYA`,
+            { method:"DELETE", headers:{ "apikey":SUPABASE_ANON_KEY, "Authorization":`Bearer ${SUPABASE_ANON_KEY}`, "Prefer":"return=minimal" }}
+          );
+
+          // Insert new rows
+          const rows = matched.map(r => ({
+            id:         `LP_${r.clientId}_${r.contract.replace(/\s+/g,"_")}`,
+            clientId:   r.clientId,
+            contract:   r.contract,
+            netQty:     r.netQty,
+            side:       r.side,
+            ltp:        r.ltp,
+            token:      "",
+            exchange:   r.exchange,
+            adminId:    "JIYA",
+            capturedAt: new Date().toISOString(),
+          }));
+
+          const r = await fetch(
+            `${SUPABASE_URL}/rest/v1/live_positions`,
+            {
+              method:"POST",
+              headers:{ "Content-Type":"application/json","apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${SUPABASE_ANON_KEY}`,"Prefer":"return=minimal" },
+              body: JSON.stringify(rows),
+            }
+          );
+
+          if (r.ok) {
+            // Reload live positions
+            const liveRaw = await fetch(
+              `${SUPABASE_URL}/rest/v1/live_positions?adminId=eq.JIYA`,
+              { headers:{"apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${SUPABASE_ANON_KEY}`} }
+            ).then(res=>res.json());
+            setLivePositions(Array.isArray(liveRaw) ? liveRaw : []);
+            notify(`✅ LTP updated for ${rows.length} positions`);
+            setModal(null); setLtpFile(null); setLtpPreview(null);
+          } else {
+            notify("❌ Upload failed — " + await r.text());
+          }
+        } catch(e) {
+          notify("❌ Error: " + e.message);
+        }
+        setLtpUploading(false);
+      };
+
+      const matched   = (ltpPreview||[]).filter(r => r.matched);
+      const unmatched = (ltpPreview||[]).filter(r => !r.matched);
+
+      return (
+        <div style={overlay} onClick={() => { setModal(null); setLtpFile(null); setLtpPreview(null); }}>
+          <div style={{ ...box, width:700, maxHeight:"92vh", overflowY:"auto" }} onClick={e => e.stopPropagation()}>
+            <h3 style={{ color:C.text, marginTop:0 }}>📡 Upload LTP File (Integrated Net Position)</h3>
+
+            <div style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:10, padding:"12px 16px", marginBottom:16, fontSize:12, color:C.muted, lineHeight:1.8 }}>
+              <strong style={{color:C.text}}>Expected format (tab-separated):</strong><br/>
+              Col 0: Client ID &nbsp;|&nbsp; Col 1: Symbol &nbsp;|&nbsp; Col 2: Broker Code (skip) &nbsp;|&nbsp;
+              Col 3: Expiry &nbsp;|&nbsp; Col 4: Strike &nbsp;|&nbsp; Col 5: Opt Type &nbsp;|&nbsp;
+              Col 6: Net Qty &nbsp;|&nbsp; Col 7: Net Price (skip) &nbsp;|&nbsp; <strong style={{color:C.green}}>Col 8: Market Price (LTP)</strong><br/>
+              Rows where Net Qty = 0 are automatically skipped.
+            </div>
+
+            <div style={{ marginBottom:16 }}>
+              <input type="file" accept=".txt,.csv,.tsv,.xls,.xlsx"
+                onChange={handleLTPFile}
+                style={{ color:C.text, fontSize:13 }} />
+            </div>
+
+            {ltpPreview && (
+              <>
+                <div style={{ display:"flex", gap:12, marginBottom:12 }}>
+                  <div style={{ ...card, padding:"10px 16px", flex:1, textAlign:"center" }}>
+                    <div style={{ fontSize:11, color:C.muted }}>TOTAL ROWS</div>
+                    <div style={{ fontSize:20, fontWeight:800, color:C.text }}>{ltpPreview.length}</div>
+                  </div>
+                  <div style={{ ...card, padding:"10px 16px", flex:1, textAlign:"center" }}>
+                    <div style={{ fontSize:11, color:C.muted }}>MATCHED</div>
+                    <div style={{ fontSize:20, fontWeight:800, color:C.green }}>{matched.length}</div>
+                  </div>
+                  <div style={{ ...card, padding:"10px 16px", flex:1, textAlign:"center" }}>
+                    <div style={{ fontSize:11, color:C.muted }}>UNMATCHED</div>
+                    <div style={{ fontSize:20, fontWeight:800, color:unmatched.length>0?C.red:C.muted }}>{unmatched.length}</div>
+                  </div>
+                </div>
+
+                <div style={{ maxHeight:320, overflowY:"auto", marginBottom:16 }}>
+                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                    <thead>
+                      <tr style={{ position:"sticky", top:0, background:C.card }}>
+                        {["Client","Contract","Net Qty","LTP","Status"].map(h => (
+                          <th key={h} style={{ padding:"8px 10px", textAlign:"left", color:C.muted, borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ltpPreview.map((r,i) => (
+                        <tr key={i} style={{ borderBottom:`1px solid ${C.border}11`, background: r.matched?"transparent":C.red+"08" }}>
+                          <td style={{ padding:"7px 10px", color:C.muted, fontSize:11 }}>{r.clientId}</td>
+                          <td style={{ padding:"7px 10px", color:r.matched?C.text:C.red }}>{r.contract}</td>
+                          <td style={{ padding:"7px 10px", color:C.text }}>{r.side} {r.netQty}</td>
+                          <td style={{ padding:"7px 10px", color:C.green, fontWeight:700 }}>₹{r.ltp}</td>
+                          <td style={{ padding:"7px 10px" }}>
+                            {r.matched
+                              ? <span style={{ color:C.green, fontSize:11 }}>✅ Matched</span>
+                              : <span style={{ color:C.red, fontSize:11 }}>❌ No match</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {unmatched.length > 0 && (
+                  <div style={{ background:C.red+"10", border:`1px solid ${C.red}33`, borderRadius:8, padding:"10px 14px", marginBottom:14, fontSize:12, color:C.muted }}>
+                    ⚠️ {unmatched.length} rows could not be matched to open positions. They will be skipped.
+                    These may be equity positions or contracts not yet in trades data.
+                  </div>
+                )}
+
+                <div style={{ display:"flex", gap:10 }}>
+                  <button onClick={uploadLTP} disabled={ltpUploading || matched.length===0}
+                    style={{ ...btn(C.green), flex:1, padding:"11px", fontSize:14, fontWeight:700,
+                      opacity: matched.length===0 ? 0.4 : 1 }}>
+                    {ltpUploading ? "⏳ Uploading..." : `✅ Upload LTP for ${matched.length} Positions`}
+                  </button>
+                  <button onClick={() => { setModal(null); setLtpFile(null); setLtpPreview(null); }}
+                    style={{ ...btn(C.muted), padding:"11px 20px" }}>Cancel</button>
+                </div>
+              </>
+            )}
+
+            {!ltpPreview && (
+              <div style={{ color:C.muted, fontSize:13, textAlign:"center", padding:"30px 0" }}>
+                Select the Integrated Net Position export file above to preview matches
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
 
     if (modal === "addInterest") return (
       <div style={overlay} onClick={() => setModal(null)}>
