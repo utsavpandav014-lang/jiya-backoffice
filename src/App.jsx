@@ -668,6 +668,80 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
         </div>
       </div>
 
+      {/* ── Intraday Trade Management ── */}
+      {(auth?.role === "admin" || auth?.role === "superadmin") && (() => {
+        const [deleting, setDeleting] = React.useState(false);
+        const [confirm,  setConfirm]  = React.useState(false);
+
+        const deleteAutoTrades = async () => {
+          if (!confirm) { setConfirm(true); return; }
+          setDeleting(true);
+          setConfirm(false);
+          try {
+            const today = new Date().toISOString().slice(0,10);
+            const SUPABASE_URL2     = "https://jwfucitnaqkuyzizmuve.supabase.co";
+            const SUPABASE_ANON_KEY2= "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
+            const headers = {
+              "Content-Type":  "application/json",
+              "apikey":        SUPABASE_ANON_KEY2,
+              "Authorization": `Bearer ${SUPABASE_ANON_KEY2}`,
+              "Prefer":        "return=minimal",
+            };
+            // Delete auto-captured trades: id starts with T (tool format: T{timestamp}_{i}_{rand})
+            // These are in intraday_trades table for today only
+            // BASE_ records (price anchors) also deleted — they get recreated at next EOD
+            // Manually uploaded Excel trades are in trades table — untouched
+            const r1 = await fetch(
+              `${SUPABASE_URL2}/rest/v1/intraday_trades?date=eq.${today}&id=like.T*`,
+              { method: "DELETE", headers }
+            );
+            const r2 = await fetch(
+              `${SUPABASE_URL2}/rest/v1/intraday_trades?date=eq.${today}&id=like.BASE_*`,
+              { method: "DELETE", headers }
+            );
+            if (r1.ok && r2.ok) {
+              notify("🗑 Today's auto-captured intraday trades deleted. Restart the RMS tool to re-capture.", "success");
+            } else {
+              notify("❌ Delete failed — check Supabase connection", "error");
+            }
+          } catch(e) {
+            notify("❌ Error: " + e.message, "error");
+          }
+          setDeleting(false);
+        };
+
+        return (
+          <div style={{...card, padding:20, marginTop:16, borderLeft:`4px solid ${C.red}`}}>
+            <div style={{fontSize:15, fontWeight:700, color:C.text, marginBottom:6}}>
+              🗑 Delete Today's Auto-Captured Intraday Trades
+            </div>
+            <div style={{color:C.muted, fontSize:12, marginBottom:14, lineHeight:1.7}}>
+              Deletes <strong style={{color:C.yellow}}>only trades uploaded automatically by the RMS tool</strong> for today.<br/>
+              Manually uploaded Excel trades (<code>trades</code> table) are <strong style={{color:C.green}}>not affected</strong>.<br/>
+              Use this to: clear bad auto-capture data, then restart RMS tool or upload Excel manually.
+            </div>
+            <button
+              onClick={deleteAutoTrades}
+              disabled={deleting}
+              style={{
+                ...btn(confirm ? C.red : C.yellow),
+                fontSize:13, fontWeight:700, padding:"10px 20px",
+                border: confirm ? `2px solid ${C.red}` : "none",
+                opacity: deleting ? 0.6 : 1,
+              }}>
+              {deleting ? "⏳ Deleting..." : confirm ? "⚠️ Click again to CONFIRM DELETE" : "🗑 Delete Auto Intraday Trades (Today)"}
+            </button>
+            {confirm && (
+              <button
+                onClick={() => setConfirm(false)}
+                style={{...btn(C.muted), fontSize:12, marginLeft:8}}>
+                Cancel
+              </button>
+            )}
+          </div>
+        );
+      })()}
+
       {/* ── Password Management ── */}
       <PasswordManager state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} auth={auth} onLogout={logout} />
 
