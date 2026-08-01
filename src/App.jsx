@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import * as XLSX from "xlsx";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -270,7 +269,6 @@ const Icon = ({ name, size = 18 }) => {
 const SUPABASE_URL      = "https://jwfucitnaqkuyzizmuve.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
 const ANGEL_PROXY       = "/api/angel";
-const ADMIN_ID          = "JIYA";
 
 // Lightweight Supabase REST client (no npm needed)
 const sb = {
@@ -386,7 +384,7 @@ function calcMTM(positions) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, input, auth, onLogout }) {
+function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, input }) {
   const [adminPwd,    setAdminPwd]    = useState("");
   const [clientSel,   setClientSel]   = useState("");
   const [clientPwd,   setClientPwd]   = useState("");
@@ -403,28 +401,18 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
     }
     setSaving(true);
     try {
-      const isSuper = auth?.role === "superadmin";
-      if (isSuper) {
-        // Save to localStorage so login check picks it up
-        try { localStorage.setItem("jiya_super_password", adminPwd); } catch(e) {}
-        // Also save to admins table
-        await withSync(() => sb.upsert("admins", {
-          id: "JIYA_SUPERADMIN", username: "JIYA",
-          password: adminPwd, name: "JIYA", plan: "superadmin", createdBy: "JIYA",
-        }));
-      } else {
-        // Mini admin — update admins table
-        const myAdmin = (state.admins||[]).find(a => a.id === auth?.adminId);
-        if (!myAdmin) { notify("Admin record not found", "error"); setSaving(false); return; }
-        const updated = { ...myAdmin, password: adminPwd };
-        // Remove any fields not in schema
-        delete updated.updatedAt;
-        await withSync(() => sb.upsert("admins", updated));
-        setState(s => ({ ...s, admins: s.admins.map(a => a.id === myAdmin.id ? updated : a) }));
-      }
+      // Admin is stored in clients with id === "JIYA" or role === "admin"
+      const adminClient = clients.find(c => c.id === "JIYA" || c.role === "admin") || { id: "JIYA", name: "Admin", role: "admin" };
+      const updated = { ...adminClient, password: adminPwd };
+      // Save to Supabase
+      await withSync(() => sb.upsert("clients", updated));
+      // Update local state
+      setState(s => ({
+        ...s,
+        clients: s.clients.map(c => c.id === adminClient.id ? updated : c)
+      }));
       setAdminPwd("");
-      notify("✅ Password changed! Logging out in 2 seconds...");
-      setTimeout(() => { if (onLogout) onLogout(); }, 2000);
+      notify("✅ Admin password changed successfully!");
     } catch(e) {
       notify("❌ Failed: " + e.message, "error");
     }
@@ -562,75 +550,7 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
-function DeleteIntradayButton({ notify, C, card, btn }) {
-  const [deleting, setDeleting] = useState(false);
-  const [confirm,  setConfirm]  = useState(false);
-
-  const deleteAutoTrades = async () => {
-    if (!confirm) { setConfirm(true); return; }
-    setDeleting(true);
-    setConfirm(false);
-    try {
-      const today = new Date().toISOString().slice(0,10);
-      const SB_URL = "https://jwfucitnaqkuyzizmuve.supabase.co";
-      const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
-      const headers = {
-        "Content-Type":  "application/json",
-        "apikey":        SB_KEY,
-        "Authorization": `Bearer ${SB_KEY}`,
-        "Prefer":        "return=minimal",
-      };
-      const [r1, r2] = await Promise.all([
-        fetch(`${SB_URL}/rest/v1/intraday_trades?date=eq.${today}&id=like.T*`,     { method:"DELETE", headers }),
-        fetch(`${SB_URL}/rest/v1/intraday_trades?date=eq.${today}&id=like.BASE_*`, { method:"DELETE", headers }),
-      ]);
-      if (r1.ok && r2.ok) {
-        notify("🗑 Today's auto-captured intraday trades deleted. Restart RMS tool to re-capture.");
-      } else {
-        notify("❌ Delete failed — check connection");
-      }
-    } catch(e) {
-      notify("❌ Error: " + e.message);
-    }
-    setDeleting(false);
-  };
-
-  return (
-    <div style={{...card, padding:20, marginTop:16, borderLeft:`4px solid ${C.red}`}}>
-      <div style={{fontSize:15, fontWeight:700, color:C.text, marginBottom:6}}>
-        🗑 Delete Today's Auto-Captured Intraday Trades
-      </div>
-      <div style={{color:C.muted, fontSize:12, marginBottom:14, lineHeight:1.7}}>
-        Deletes <strong style={{color:C.yellow}}>only trades uploaded by RMS tool</strong> (today only).<br/>
-        Manually uploaded Excel trades in <code>trades</code> table are <strong style={{color:C.green}}>not touched</strong>.<br/>
-        After delete: restart RMS tool to re-capture, or upload Excel manually.
-      </div>
-      <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap"}}>
-        <button
-          onClick={deleteAutoTrades}
-          disabled={deleting}
-          style={{
-            background: confirm ? C.red : C.yellow,
-            color: confirm ? "#fff" : "#000",
-            border: "none", borderRadius:8, padding:"10px 20px",
-            fontSize:13, fontWeight:700, cursor:"pointer",
-            opacity: deleting ? 0.6 : 1,
-          }}>
-          {deleting ? "⏳ Deleting..." : confirm ? "⚠️ Confirm — Click to DELETE" : "🗑 Delete Auto Intraday Trades (Today)"}
-        </button>
-        {confirm && !deleting && (
-          <button onClick={() => setConfirm(false)}
-            style={{background:C.card, color:C.muted, border:`1px solid ${C.border}`,
-              borderRadius:8, padding:"10px 16px", fontSize:12, cursor:"pointer"}}>
-            Cancel
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices, logout, resetPriceCache }) {
+function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
     password:    angelCreds.password    || "",
@@ -681,12 +601,6 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
               style={{...btn(C.green),fontSize:12}}>
               📋 Fetch Live Prices Now
             </button>
-            <button onClick={()=>{
-              if(resetPriceCache) resetPriceCache();
-            }} style={{...btn(C.yellow), fontSize:12}}>
-              🔄 Reset & Refetch Prices
-            </button>
-
           </div>
         )}
       </div>
@@ -737,13 +651,8 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
         </div>
       </div>
 
-      {/* ── Intraday Trade Management ── */}
-      {(auth?.role === "admin" || auth?.role === "superadmin") && (
-        <DeleteIntradayButton notify={notify} C={C} card={card} btn={btn} />
-      )}
-
       {/* ── Password Management ── */}
-      <PasswordManager state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} auth={auth} onLogout={logout} />
+      <PasswordManager state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} />
 
       {/* What gets automated */}
       {angelStatus === "connected" && (
@@ -789,31 +698,8 @@ function useCountUp(target, duration = 900) {
 
 export default function BackOffice() {
   const [state, setState] = useState(INITIAL_STATE);
-  // Keep tradesRef, scripNameMapRef, and tokenMapRef always up to date
-  useEffect(() => {
-    tradesRef.current = state.trades || [];
-    // Build scripName map: contract → Angel One symbol (from scriptName field)
-    // Also build token map: contract → { token, exchange } from scripCode field
-    const nameMap = {};
-    const tokenMap = {};
-    (state.trades || []).forEach(t => {
-      if (t.contract && t.scriptName && !nameMap[t.contract]) {
-        nameMap[t.contract] = t.scriptName.trim().toUpperCase();
-      }
-      if (t.contract && t.scripCode && !tokenMap[t.contract]) {
-        const isBSE = ["SENSEX","BANKEX"].includes(t.contract.split(" ")[0]?.toUpperCase());
-        tokenMap[t.contract] = { token: t.scripCode.toString().trim(), exchange: isBSE ? "BFO" : "NFO" };
-      }
-    });
-    scripNameMapRef.current = nameMap;
-    // Pre-populate contractTokenMapRef with known tokens from trades
-    Object.entries(tokenMap).forEach(([contract, info]) => {
-      if (!contractTokenMapRef.current[contract]) {
-        contractTokenMapRef.current[contract] = info;
-      }
-    });
-    console.log("Token map from trades:", Object.keys(tokenMap).length, "contracts");
-  }, [state.trades]);
+  // Keep tradesRef always up to date so polling closures have fresh data
+  useEffect(() => { tradesRef.current = state.trades || []; }, [state.trades]);
   const [dbLoading, setDbLoading] = useState(SUPABASE_CONFIGURED); // show loading if DB configured
   const [dbError, setDbError] = useState(null);
   const [syncStatus, setSyncStatus] = useState("idle"); // "idle"|"saving"|"saved"|"error"
@@ -899,15 +785,6 @@ export default function BackOffice() {
       return saved;
     } catch(e) { return {}; }
   });
-  const [intradayTrades, setIntradayTrades] = useState([]);
-  const [livePositions, setLivePositions] = useState([]); // from F6 — has LTP per contract // Box B only — from intraday_trades table
-  const [closingSnapshot, setClosingSnapshot] = useState(() => {
-    // { "2026-07-23": { "ITC FUT 28JUL2026": 283.10, ... } }
-    try { return JSON.parse(localStorage.getItem("closing_snapshot") || "{}"); } catch(e) { return {}; }
-  });
-  const [snapshotSavedDate, setSnapshotSavedDate] = useState(() => {
-    try { return localStorage.getItem("snapshot_saved_date") || ""; } catch(e) { return ""; }
-  });
   const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
 
@@ -972,119 +849,31 @@ export default function BackOffice() {
 
   // ── Angel One: Poll LTP for all open positions ──
   // ── Angel One: Poll LTP for open positions ──────────────────
-  const contractTokenMapRef = useRef({}); // pre-loaded with known tokens
+  const contractTokenMapRef = useRef({});
   const angelTokenRef    = useRef({ jwtToken: (() => { try { return localStorage.getItem("angel_jwt") || null; } catch(e) { return null; } })() });
   const instrMasterRef   = useRef({});
   const tradesRef        = useRef([]); // always holds latest state.trades
-  const scripNameMapRef  = useRef({}); // { "NIFTY 23950 CE 28JUL2026": "NIFTY26JUL23950CE" }
 
   // Load instrument master from Angel One (no auth needed)
-  // Lookup correct Angel One tokens for open positions using instrument master
-  const lookupOpenPositionTokens = async () => {
-    if (!angelCreds.apiKey) return;
-    try {
-      const { openPositions } = applyFIFO(tradesRef.current);
-      if (!openPositions.length) return;
-
-      // Build list of symbols to look up (both primary and alt formats)
-      const MONTH_NUM = {JAN:"1",FEB:"2",MAR:"3",APR:"4",MAY:"5",JUN:"6",
-                         JUL:"7",AUG:"8",SEP:"9",OCT:"10",NOV:"11",DEC:"12"};
-      const symbolsToLookup = [];
-      const symbolToContract = {};
-
-      openPositions.forEach(pos => {
-        if (contractTokenMapRef.current[pos.contract]?.fromMaster) return; // already confirmed
-        const parts = pos.contract.trim().split(/\s+/);
-        const name = parts[0].toUpperCase();
-        const isFut = pos.contract.includes("FUT");
-        const expiry = isFut ? (parts[2]||parts[1]) : (parts[3]||"");
-        if (!expiry) return;
-        const dd = expiry.slice(0,2), mon = expiry.slice(2,5), yy = expiry.slice(7,9);
-        const m = MONTH_NUM[mon]||"0";
-        if (isFut) {
-          const s1 = `${name}${yy}${m}${dd}FUT`;
-          const s2 = `${name}${dd}${mon}${yy}FUT`;
-          symbolsToLookup.push(s1, s2);
-          symbolToContract[s1] = pos.contract;
-          symbolToContract[s2] = pos.contract;
-        } else {
-          const strike = Math.round(parseFloat(parts[1]||0));
-          const opt = (parts[2]||"").toUpperCase();
-          const s1 = `${name}${yy}${m}${dd}${strike}${opt}`;
-          const s2 = `${name}${dd}${mon}${yy}${strike}${opt}`;
-          symbolsToLookup.push(s1, s2);
-          symbolToContract[s1] = pos.contract;
-          symbolToContract[s2] = pos.contract;
-        }
-      });
-
-      if (!symbolsToLookup.length) return;
-      console.log("Looking up tokens for", symbolsToLookup.length, "symbols...");
-
-      const r = await fetch(ANGEL_PROXY, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "lookup_tokens", apiKey: angelCreds.apiKey, payload: { symbols: symbolsToLookup } })
-      });
-      const data = await r.json();
-      if (data.status && data.data) {
-        let found = 0;
-        Object.entries(data.data).forEach(([sym, info]) => {
-          const contract = symbolToContract[sym];
-          if (contract && !contractTokenMapRef.current[contract]?.fromMaster) {
-            contractTokenMapRef.current[contract] = { ...info, fromMaster: true };
-            found++;
-            console.log(`Token confirmed: ${contract} → ${sym} → ${info.token}`);
-          }
-        });
-        console.log(`Tokens confirmed for ${found} contracts from instrument master`);
-      }
-    } catch(e) {
-      console.log("Token lookup error:", e.message);
-    }
-  };
-
   const loadInstrumentMaster = async () => {
-    const lastLoad    = instrMasterRef.current._loadedAt    || 0;
-    const lastFailed  = instrMasterRef.current._failedAt    || 0;
-    const alreadyLoaded = Object.keys(instrMasterRef.current).length > 1;
-
-    // Don't retry within 5 minutes of a failure
-    if (lastFailed && Date.now() - lastFailed < 5 * 60 * 1000) return;
-    // Don't reload if loaded within last 30 minutes
-    if (alreadyLoaded && Date.now() - lastLoad < 30 * 60 * 1000) return;
-
+    if (Object.keys(instrMasterRef.current).length > 0) return; // already loaded
     try {
       const r = await fetch(ANGEL_PROXY, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "instrument_master", apiKey: angelCreds.apiKey })
       });
-      if (!r.ok) {
-        instrMasterRef.current._failedAt = Date.now();
-        console.log("Instrument master HTTP error:", r.status);
-        return;
-      }
       const data = await r.json();
       if (data.status && data.data?.length) {
         const map = {};
         data.data.forEach(x => {
-          if (x.symbol)        map[x.symbol.toUpperCase()]        = { token: x.token, exchange: x.exch_seg };
-          if (x.tradingsymbol) map[x.tradingsymbol.toUpperCase()] = { token: x.token, exchange: x.exch_seg };
-          if (x.name)          map[x.name.toUpperCase()]          = { token: x.token, exchange: x.exch_seg };
+          map[x.symbol.toUpperCase()] = { token: x.token, exchange: x.exch_seg };
         });
-        instrMasterRef.current      = map;
-        instrMasterRef.current._loadedAt  = Date.now();
-        instrMasterRef.current._failedAt  = 0;
-        contractTokenMapRef.current = {};
-        console.log("Instrument master loaded:", data.data.length, "instruments");
-      } else {
-        instrMasterRef.current._failedAt = Date.now();
+        instrMasterRef.current = map;
+        console.log("Instrument master loaded:", Object.keys(map).length, "contracts");
       }
     } catch(e) {
-      instrMasterRef.current._failedAt = Date.now();
       console.log("Instrument master load error:", e.message);
-      // Don't rethrow — let polling continue without it
     }
   };
 
@@ -1097,32 +886,16 @@ export default function BackOffice() {
     const name    = parts[0].toUpperCase();
     const isBSE   = ["SENSEX","BANKEX","SENSEX50"].includes(name);
     const isFut   = contract.toUpperCase().includes("FUT");
-
-    const MONTH_NUM = {JAN:"1",FEB:"2",MAR:"3",APR:"4",MAY:"5",JUN:"6",
-                       JUL:"7",AUG:"8",SEP:"9",OCT:"10",NOV:"11",DEC:"12"};
-
     if (isFut) {
       const expiry = parts[2] || parts[1];
-      const dd = expiry.slice(0,2), mon = expiry.slice(2,5), yy = expiry.slice(7,9);
-      const m  = MONTH_NUM[mon] || "0";
-      // Try both formats: BSE=YY+M+DD, NSE=DD+MON+YY
-      return {
-        symbol:    `${name}${yy}${m}${dd}FUT`,
-        altSymbol: `${name}${dd}${mon}${yy}FUT`,
-        exchange:  isBSE ? "BFO" : "NFO"
-      };
+      const exp6   = expiry.slice(0,5) + expiry.slice(7,9);
+      return { symbol: name + exp6 + "FUT", exchange: isBSE ? "BFO" : "NFO" };
     } else {
-      const strike  = Math.round(parseFloat(parts[1] || 0));
+      const strike  = parseFloat(parts[1] || 0);
       const optType = (parts[2] || "").toUpperCase();
       const expiry  = parts[3] || "";
-      const dd = expiry.slice(0,2), mon = expiry.slice(2,5), yy = expiry.slice(7,9);
-      const m  = MONTH_NUM[mon] || "0";
-      // Try both formats: BSE=YY+M+DD+STRIKE, NSE=DD+MON+YY+STRIKE
-      return {
-        symbol:    `${name}${yy}${m}${dd}${strike}${optType}`,
-        altSymbol: `${name}${dd}${mon}${yy}${strike}${optType}`,
-        exchange:  isBSE ? "BFO" : "NFO"
-      };
+      const exp6    = expiry.slice(0,5) + expiry.slice(7,9);
+      return { symbol: name + exp6 + Math.round(strike) + optType, exchange: isBSE ? "BFO" : "NFO" };
     }
   };
 
@@ -1258,59 +1031,12 @@ export default function BackOffice() {
     return () => clearInterval(interval);
   }, [state.trades, angelLiveMTM]);
 
-  // ── Save Closing Snapshot at 5:00 PM IST ──────────────────────
-  const saveClosingSnapshot = useCallback(() => {
-    const today = new Date().toISOString().slice(0,10);
-    if (snapshotSavedDate === today) return;
-
-    const mtm = angelLiveMTM;
-    if (Object.keys(mtm).length === 0) return;
-
-    const snapshot = {};
-    Object.entries(mtm).forEach(([contract, data]) => {
-      if (data?.ltp) snapshot[contract] = data.ltp;
-    });
-
-    if (Object.keys(snapshot).length === 0) return;
-
-    const allSnapshots = { ...closingSnapshot, [today]: snapshot };
-    const keys = Object.keys(allSnapshots).sort().slice(-7);
-    const trimmed = {};
-    keys.forEach(k => { trimmed[k] = allSnapshots[k]; });
-
-    setClosingSnapshot(trimmed);
-    setSnapshotSavedDate(today);
-    try {
-      localStorage.setItem("closing_snapshot", JSON.stringify(trimmed));
-      localStorage.setItem("snapshot_saved_date", today);
-    } catch(e) {}
-    notify("📸 Closing snapshot saved — " + Object.keys(snapshot).length + " contracts");
-  }, [angelLiveMTM, closingSnapshot, snapshotSavedDate]);
-
   // ── Angel One: Auto Closing Prices at 7:00 PM ──
   const scheduleAutoBhavcopy = useCallback((jwtToken, apiKey) => {
     const checkTime = () => {
       const now = new Date();
-      const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
       if (now.getHours() === 19 && now.getMinutes() === 0 && now.getSeconds() < 10) {
         fetchAutoBhavcopy(jwtToken, apiKey);
-      }
-      // 3:30 PM — save closing snapshot (market close price)
-      if (h === 15 && m === 30 && s < 10) {
-        saveClosingSnapshot();
-      }
-      // 4:00 PM — clear intraday trades (after manual Excel upload)
-      if (h === 16 && m === 0 && s < 10) {
-        try {
-          const today2 = new Date().toISOString().slice(0,10);
-          fetch(`${SUPABASE_URL}/rest/v1/intraday_trades?date=eq.${today2}`, {
-            method: "DELETE",
-            headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
-          }).then(() => {
-            setIntradayTrades([]);
-            notify("🗑 Intraday data cleared for today");
-          });
-        } catch(e) {}
       }
     };
     const interval = setInterval(checkTime, 5000);
@@ -1358,55 +1084,43 @@ export default function BackOffice() {
         // Check existing token map first
         let mapped = contractTokenMapRef.current[contract];
         if (!mapped) {
-          // Priority 1: Use scripName from trades → look up in instrument master
-          // scripName from ODIN is the EXACT Angel One trading symbol
-          const scripName = scripNameMapRef.current[contract];
-          if (scripName) {
-            const entry = instrMasterRef.current[scripName];
-            if (entry) {
-              mapped = { token: entry.token, exchange: entry.exchange };
-              contractTokenMapRef.current[contract] = mapped;
-              console.log(`Mapped via scripName: ${contract} → ${scripName} → token ${entry.token}`);
-            } else {
-              // scripName not in master (e.g. SUPREMEIND26JULFUT not found)
-              // Use ltp_single with scripName directly — no token needed
-              console.log(`scripName not in master: ${scripName} — will use ltp_single`);
+          const result = contractToAngelSymbol(contract);
+          if (result) {
+            // Try primary format
+            let entry = instrMasterRef.current[result.symbol];
+            // Try alternate formats for SENSEX/BFO contracts
+            if (!entry) {
+              // Try without leading zero in day: SENSEX9JUL2681000CE
+              const alt1 = result.symbol.replace(/^([A-Z]+)0(\d)/, '$1$2');
+              entry = instrMasterRef.current[alt1];
+              if (entry) console.log(`Mapped via alt1: ${contract} → ${alt1}`);
             }
-          }
-          // Priority 2: Build symbol from contract name parts (correct Angel One format)
-          if (!mapped) {
-            const result = contractToAngelSymbol(contract);
-            if (result) {
-              let entry = instrMasterRef.current[result.symbol];
-              if (!entry && result.altSymbol) {
-                entry = instrMasterRef.current[result.altSymbol];
-                if (entry) console.log(`Mapped via alt: ${contract} → ${result.altSymbol}`);
-              }
-              if (entry) {
-                mapped = { token: entry.token, exchange: result.exchange };
+            if (!entry) {
+              // Try with decimal strike: SENSEX09JUL2681000.00CE
+              const parts = contract.trim().split(/\s+/);
+              const strike = parts[1] ? parseFloat(parts[1]) : 0;
+              const alt2 = result.symbol.replace(Math.round(strike).toString(), strike.toFixed(2).replace('.',''));
+              entry = instrMasterRef.current[alt2];
+              if (entry) console.log(`Mapped via alt2: ${contract} → ${alt2}`);
+            }
+            if (entry) {
+              mapped = { token: entry.token, exchange: result.exchange };
+              contractTokenMapRef.current[contract] = mapped;
+              console.log(`Mapped ${contract} → token ${entry.token}`);
+            } else {
+              // Last resort: search by name field containing symbol
+              const sym = contract.split(" ")[0].toUpperCase();
+              const parts2 = contract.trim().split(/\s+/);
+              const strike2 = parts2[1] ? Math.round(parseFloat(parts2[1])).toString() : "";
+              const optType2 = parts2[2] || "";
+              const allKeys = Object.keys(instrMasterRef.current);
+              const found = allKeys.find(k => k.startsWith(sym) && k.includes(strike2) && k.endsWith(optType2));
+              if (found) {
+                mapped = { token: instrMasterRef.current[found].token, exchange: result.exchange };
                 contractTokenMapRef.current[contract] = mapped;
-                console.log(`Mapped via symbol: ${contract} → token ${entry.token}`);
+                console.log(`Mapped via search: ${contract} → ${found} → token ${mapped.token}`);
               } else {
-                console.log(`Not found: ${contract} → tried ${result.symbol} / ${result.altSymbol||"none"}`);
-                // Last resort: try ltp_single with scripName directly
-                if (scripName && angelToken && angelCreds.apiKey) {
-                  try {
-                    const isBSE2 = ["SENSEX","BANKEX"].includes(contract.split(" ")[0].toUpperCase());
-                    const r = await fetch(ANGEL_PROXY, {
-                      method: "POST", headers: {"Content-Type":"application/json"},
-                      body: JSON.stringify({
-                        action: "ltp_single", apiKey: angelCreds.apiKey, jwtToken: angelToken,
-                        payload: { exchange: isBSE2?"BFO":"NFO", tradingsymbol: scripName, symboltoken: "" }
-                      })
-                    });
-                    const d = await r.json();
-                    if (d.status && d.data?.ltp) {
-                      mapped = { token: d.data.symboltoken||scripName, exchange: isBSE2?"BFO":"NFO" };
-                      contractTokenMapRef.current[contract] = mapped;
-                      console.log(`Mapped via ltp_single: ${contract} → LTP ${d.data.ltp}`);
-                    }
-                  } catch(e) {}
-                }
+                console.log(`Not in master: ${contract} → tried ${result.symbol}`);
               }
             }
           }
@@ -1450,35 +1164,6 @@ export default function BackOffice() {
         }
       }
 
-      // Fallback: fetch unmatched contracts individually via scripName
-      const unmatched = uniqueContracts.filter(c => !newMTM[c]);
-      if (unmatched.length > 0) {
-        console.log("Fallback fetch for unmatched:", unmatched);
-        for (const contract of unmatched) {
-          const scripName = scripNameMapRef.current[contract];
-          if (!scripName) continue;
-          try {
-            const isBSE = ["SENSEX","BANKEX"].includes(contract.split(" ")[0].toUpperCase());
-            const exchange = isBSE ? "BFO" : "NFO";
-            const r = await fetch(ANGEL_PROXY, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                action: "ltp_single", apiKey, jwtToken,
-                payload: { exchange, tradingsymbol: scripName, symboltoken: "" }
-              })
-            });
-            const d = await r.json();
-            if (d.status && d.data?.ltp) {
-              newMTM[contract] = { ltp: parseFloat(d.data.ltp), token: d.data.symboltoken || scripName };
-              fetched++;
-              console.log(`Fallback MTM: ${contract} = ₹${d.data.ltp}`);
-            }
-            await new Promise(r => setTimeout(r, 100));
-          } catch(e) { console.log("Fallback error:", contract, e.message); }
-        }
-      }
-
       // Update live MTM state — this automatically updates P&L via getBhavClose
       setAngelLiveMTM(newMTM);
       setAngelMTMStatus("live");
@@ -1490,9 +1175,9 @@ export default function BackOffice() {
       const dbgKeys = Object.keys(newMTM);
       console.log("angelLiveMTM keys:", dbgKeys);
       console.log("FIFO contract names:", dbgContracts);
-      const dbgMatched   = dbgContracts.filter(c => newMTM[c]);
-      const dbgUnmatched = dbgContracts.filter(c => !newMTM[c]);
-      console.log("Matched:", dbgMatched.length, "Unmatched:", dbgUnmatched);
+      const matched = dbgContracts.filter(c => newMTM[c]);
+      const unmatched = dbgContracts.filter(c => !newMTM[c]);
+      console.log("Matched:", matched.length, "Unmatched:", unmatched);
 
       notify(`✅ Closing prices updated for ${fetched}/${uniqueContracts.length} contracts`);
 
@@ -1548,32 +1233,6 @@ export default function BackOffice() {
     }, 2 * 60 * 1000); // ping every 2 min to prevent sleep
 
     return () => clearInterval(keepAlive);
-  }, []);
-
-  // ── Live trades polling 9:00 AM to 3:35 PM ──────────────────
-  useEffect(() => {
-    if (!SUPABASE_CONFIGURED) return;
-    const pollTrades = async () => {
-      const now = new Date();
-      const h = now.getHours(), m = now.getMinutes();
-      const inMarket = (h > 9 || (h === 9 && m >= 0)) && (h < 15 || (h === 15 && m <= 35));
-      if (!inMarket) return;
-      // Silent reload of intraday + live positions
-      try {
-        const today = new Date().toISOString().slice(0,10);
-        const [intradayRaw, liveRaw] = await Promise.all([
-          sb.select("intraday_trades", `?date=eq.${today}&order=time.asc`),
-          sb.select("live_positions", `?adminId=eq.JIYA`),
-        ]);
-        setIntradayTrades(Array.isArray(intradayRaw) ? intradayRaw : []);
-        setLivePositions(Array.isArray(liveRaw) ? liveRaw : []);
-      } catch(e) {}
-      // Full silent reload periodically
-      await loadAllData(true);
-    };
-    // Poll every 10 seconds during market hours
-    const interval = setInterval(pollTrades, 10000);
-    return () => clearInterval(interval);
   }, []);
 
   // ── Silent background refresh when user returns to tab ──
@@ -1659,21 +1318,6 @@ export default function BackOffice() {
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
 
-      // Load today's intraday trades for Box B
-      const today = new Date().toISOString().slice(0,10);
-      try {
-        const intradayRaw = await sb.select("intraday_trades", `?date=eq.${today}&order=time.asc`);
-        setIntradayTrades(Array.isArray(intradayRaw) ? intradayRaw : []);
-      } catch(e) { console.log("Intraday load error:", e.message); }
-      // Load live positions from F6 capture (has LTP)
-      try {
-        const liveRaw = await sb.select("live_positions", `?adminId=eq.JIYA`);
-        setLivePositions(Array.isArray(liveRaw) ? liveRaw : []);
-      } catch(e) { console.log("Live positions load error:", e.message); }
-
-      // Lookup correct tokens for open positions from instrument master
-      setTimeout(() => lookupOpenPositionTokens(), 3000);
-
       // Start live prices AFTER trades are loaded
       const savedJwt = localStorage.getItem("angel_jwt");
       const savedKey = JSON.parse(localStorage.getItem("angel_creds") || "{}").apiKey;
@@ -1747,15 +1391,12 @@ export default function BackOffice() {
   // ── Charges State ──
   const [pnlClientFilter, setPnlClientFilter] = useState("all");
   const [pnlDateMode, setPnlDateMode] = useState("month"); // "all" | "month" | "range"
-  const [todayPnlExpanded, setTodayPnlExpanded] = useState({}); // { clientId: bool }
   const [chartClientFilter, setChartClientFilter] = useState("all"); // for 6-month chart
   const [pnlMonth, setPnlMonth] = useState(new Date().toISOString().slice(0,7));
   const [pnlDateFrom, setPnlDateFrom] = useState("");
   const [pnlDateTo, setPnlDateTo] = useState("");
   const [addInterestForm, setAddInterestForm] = useState({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
   const [tradesClientFilter, setTradesClientFilter] = useState("all");
-  const [positionSearch, setPositionSearch] = useState("");
-  const [pnlClosedSearch, setPnlClosedSearch] = useState("");
   const [chargesEdit, setChargesEdit] = useState(null); // working copy for charges edit
 
   // Get charges config effective for a given date
@@ -1866,29 +1507,20 @@ export default function BackOffice() {
 
   // Get closing price for a contract from bhavcopy
   // getBhavClose: checks Angel One live MTM first, then bhavcopy
-  // getLTP: gets live price from F6 capture first, then bhavcopy
-  // Normalize contract string for fuzzy matching
-  const normContract = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
-
-  const getLTP = (contract) => {
-    const norm = normContract(contract);
-    // Priority 1: F6 live positions — exact match first, then fuzzy
-    let lp = livePositions.find(p => normContract(p.contract) === norm);
-    if (!lp) {
-      // Fuzzy: split into tokens and check all tokens present
-      const tokens = norm.split(" ").filter(Boolean);
-      lp = livePositions.find(p => {
-        const pNorm = normContract(p.contract);
-        return tokens.every(tk => pNorm.includes(tk));
-      });
-    }
-    if (lp?.ltp > 0) return lp.ltp;
-    // Priority 2: Bhavcopy upload
+  const getBhavClose = (contract) => {
+    const direct = angelLiveMTM[contract]?.ltp;
+    if (direct) return direct;
+    const normalized = contract.replace(/(\d+)\.0+\s/g, (m, n) => n + ' ');
+    const norm = angelLiveMTM[normalized]?.ltp;
+    if (norm) return norm;
     if (bhavLookup[contract]?.closePrice) return bhavLookup[contract].closePrice;
-    if (bhavLookup[norm]?.closePrice) return bhavLookup[norm]?.closePrice;
+    // Debug: log first miss to understand the problem
+    if (Object.keys(angelLiveMTM).length > 0 && !window._bhavDebugDone) {
+      window._bhavDebugDone = true;
+      console.log("getBhavClose miss. Contract:", JSON.stringify(contract), "Available keys:", Object.keys(angelLiveMTM).slice(0,3));
+    }
     return null;
   };
-  const getBhavClose = getLTP; // alias for backward compatibility
   const getBhavSettl = (contract) => bhavLookup[contract]?.settlPrice || null;
   const getBhavExpiry = (contract) => bhavLookup[contract]?.expiryRaw || null;
 
@@ -1992,16 +1624,12 @@ export default function BackOffice() {
     const userInput = loginForm.user.trim();
     const passInput = loginForm.pass;
 
-    // Check JIYA superadmin — use saved password if exists, else default
-    const savedSuperPwd = (() => { try { return localStorage.getItem("jiya_super_password") || "Jiya@3044"; } catch(e) { return "Jiya@3044"; } })();
-    // Also check admins table for updated password
-    const superAdminRecord = (state.admins||[]).find(a => a.id === "JIYA_SUPERADMIN");
-    const superPwd = superAdminRecord?.password || savedSuperPwd;
-    const isSuperAdmin = userInput === "JIYA" && passInput === superPwd;
+    // Constant-time comparison to prevent timing attacks
+    const isSuperAdmin = userInput === "JIYA" && passInput === "Jiya@3044";
 
-    // Check sub-admin login — NEVER match JIYA as subAdmin
+    // Check sub-admin login
     const subAdmin = !isSuperAdmin
-      ? (state.admins||[]).find(a => a.username === userInput && a.password === passInput && a.id !== "JIYA_SUPERADMIN" && a.username !== "JIYA")
+      ? (state.admins||[]).find(a => a.username === userInput && a.password === passInput)
       : null;
 
     // Check client login — only from correct admin scope
@@ -2016,14 +1644,12 @@ export default function BackOffice() {
       setPage("dashboard");
       setLoginForm({ user: "", pass: "", error: "" });
     } else if (subAdmin) {
-      // Validate token expiry — only if tokenExpiry is set
-      if (subAdmin.tokenExpiry) {
-        const expiry = new Date(subAdmin.tokenExpiry);
-        if (expiry < new Date()) {
-          setLoginAttempts(prev => prev + 1);
-          setLoginForm(f => ({ ...f, error: "Your access token has expired. Contact JIYA to renew." }));
-          return;
-        }
+      // Validate token expiry
+      const expiry = new Date(subAdmin.tokenExpiry);
+      if (expiry < new Date()) {
+        setLoginAttempts(prev => prev + 1);
+        setLoginForm(f => ({ ...f, error: "Your access token has expired. Contact JIYA to renew." }));
+        return;
       }
       setLoginAttempts(0);
       setAuth({ role: "admin", adminId: subAdmin.id, plan: subAdmin.plan || "basic" });
@@ -2188,9 +1814,6 @@ export default function BackOffice() {
     catch(e) { return []; }
   });
   const [uploadTradeDate, setUploadTradeDate] = useState(new Date().toISOString().slice(0,10));
-  const [ltpFile,        setLtpFile]        = useState(null);
-  const [ltpPreview,     setLtpPreview]     = useState(null); // [{clientId,contract,ltp,matched}]
-  const [ltpUploading,   setLtpUploading]   = useState(false);
 
   // Normalize expiry date to standard format: DDMMMYYYY (e.g. 02APR2026)
   // Handles: "02APR2026", "02-Apr-26", "02-Apr-2026", "2026-04-02", "02/04/2026" etc.
@@ -2874,72 +2497,11 @@ export default function BackOffice() {
 
       // ── CLIENT DASHBOARD ─────────────────────────────────────
       if (auth?.role === "client") {
-        const myData    = clientPnlData.find(c => c.id === cid) || { realizedPnl: 0, mtmPnl: 0, openCount: 0 };
-        const myTrades  = allTrades.filter(t => t.clientId === cid);
-        const myOpen    = clientOpenPos(cid);
-        const myClosed  = clientClosedPos(cid);
+        const myData   = clientPnlData.find(c => c.id === cid) || { realizedPnl: 0, mtmPnl: 0, openCount: 0 };
+        const myTrades = allTrades.filter(t => t.clientId === cid);
         const myMonthPnl = clientNetPnlForMonth(cid, currentMonthStr);
 
-        // Box A/B/C for client — same strict logic as admin P&L page
-        const myTodayStr   = new Date().toISOString().slice(0,10);
-        const myYestStr    = new Date(Date.now()-86400000).toISOString().slice(0,10);
-        const myYSnap      = closingSnapshot[myYestStr] || {};
-        const myHasSnap    = Object.keys(myYSnap).length > 0;
-        const myHistTrades  = myTrades.filter(t => (t.date||"") < myTodayStr);
-        // ALL today's records (includes BASE_ price anchors)
-        const myTodayAll    = myTrades.filter(t => (t.date||"") === myTodayStr);
-        // BASE_ records = EOD price anchors — used for carryMTM price only, NEVER fed into FIFO
-        const myBasePosMap  = {};
-        myTodayAll.filter(t => (t.id||"").startsWith("BASE_")).forEach(t => {
-          myBasePosMap[t.contract] = t.price; // base price = yesterday's closing LTP
-        });
-        // Real trades only — exclude base positions from FIFO
-        const myTodayTrades = myTodayAll.filter(t => !(t.id||"").startsWith("BASE_"));
-        const { openPositions: myHistOpen, closedPositions: myHistClosed } = applyFIFO(myHistTrades);
-
-        // Box A: strictly yesterday's snapshot prices — no fallback to live
-        const myBoxARealized = myHistClosed.reduce((a,c) => a + c.totalPnl, 0);
-        const myHistMonths   = [...new Set(myHistTrades.map(t=>(t.date||"").slice(0,7)).filter(Boolean))];
-        const myBoxAExp  = myHistMonths.reduce((a,m) => a + getMonthlyCharges(cid,m), 0);
-        const myBoxASW   = myHistMonths.reduce((a,m) => a + getMonthlyInterest(cid,m+"_SW"), 0);
-        const myBoxAInt  = myHistMonths.reduce((a,m) => a + getMonthlyInterest(cid,m), 0);
-        const myBoxAMTM  = myHasSnap ? myHistOpen.reduce((s,pos) => {
-          const closeP = myYSnap[pos.contract];
-          if (!closeP) return s;
-          return s + (pos.side==="SELL" ? (pos.avgPrice-closeP) : (closeP-pos.avgPrice)) * pos.netQty;
-        }, 0) : 0;
-        const myBoxA = myBoxARealized + myBoxAMTM - myBoxAExp - myBoxASW - myBoxAInt;
-
-        // Box B: today's intraday only
-        let myBoxB = 0;
-        if (myTodayTrades.length > 0 || myHasSnap) {
-          // carryMTM: (live LTP - base price) × qty for each carry-forward position
-          // Base price = yesterday's 3:30 LTP from F6 (myBasePosMap) or snapshot fallback
-          const myCarryMTM = myHistOpen.reduce((s, pos) => {
-            const ltp  = getBhavClose(pos.contract);
-            const base = myBasePosMap[pos.contract] || myYSnap[pos.contract];
-            if (!ltp || !base) return s;
-            return s + (pos.side === "SELL" ? (base - ltp) : (ltp - base)) * pos.netQty;
-          }, 0);
-          // FIFO on hist + real today trades only (no BASE_ records)
-          const { openPositions: myAllOpen2, closedPositions: myAllClosed2 } = applyFIFO([...myHistTrades, ...myTodayTrades]);
-          // Booked P&L from today's squaring trades
-          const myTodayBooked = myAllClosed2
-            .filter(cp => (cp.trades||[]).some(t => (t.date||"") === myTodayStr))
-            .reduce((a, c) => a + c.totalPnl, 0);
-          // MTM on new positions opened today
-          const myTodayNewMTM = myAllOpen2
-            .filter(pos => myHistOpen.every(hp => hp.contract !== pos.contract || hp.clientId !== pos.clientId))
-            .reduce((s, pos) => {
-              const ltp = getBhavClose(pos.contract);
-              if (!ltp) return s;
-              return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
-            }, 0);
-          myBoxB = myCarryMTM + myTodayBooked + myTodayNewMTM;
-        }
-        const myBoxC = myBoxA + myBoxB;
-
-        // Daily win rate
+        // Daily win rate this month
         const dayMap2 = {};
         myTrades.filter(t=>(t.date||"").slice(0,7)===currentMonthStr).forEach(t=>{
           const d=t.date||""; if(!d) return;
@@ -2947,125 +2509,71 @@ export default function BackOffice() {
           const v=(t.price||0)*(t.qty||0);
           if(t.side==="BUY") dayMap2[d].buyVal+=v; else dayMap2[d].sellVal+=v;
         });
-        const tDays = Object.values(dayMap2).filter(d=>d.buyVal>0||d.sellVal>0);
-        const pDays = tDays.filter(d=>(d.sellVal-d.buyVal)>0).length;
-        const dayWR = tDays.length>0 ? Math.round(pDays/tDays.length*100) : 0;
-        const myWrC = dayWR>=60?C.green:dayWR>=40?C.yellow:C.red;
+        const tDays   = Object.values(dayMap2).filter(d=>d.buyVal>0||d.sellVal>0);
+        const pDays   = tDays.filter(d=>(d.sellVal-d.buyVal)>0).length;
+        const dayWR   = tDays.length>0 ? Math.round(pDays/tDays.length*100) : 0;
+        const myWrC   = winRate>=60?C.green:winRate>=40?C.yellow:C.red;
 
         return (
-          <div style={{maxWidth:1000,margin:"0 auto"}}>
-
-            {/* ── Hero greeting bar ── */}
-            <div style={{marginBottom:20,padding:"22px 28px",
-              background:`linear-gradient(135deg,#1e3a8a 0%,#1e40af 50%,${C.accent} 100%)`,
-              borderRadius:16,boxShadow:"0 8px 32px rgba(59,130,246,0.25)",
+          <div style={{maxWidth:960,margin:"0 auto"}}>
+            {/* Greeting header */}
+            <div style={{marginBottom:24,padding:"24px 28px",
+              background:`linear-gradient(135deg, ${C.accent}18 0%, ${C.accent}05 100%)`,
+              borderRadius:16,border:`1px solid ${C.accent}20`,
               display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
               <div>
-                <div style={{fontSize:11,color:"#93c5fd",fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:6}}>
+                <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:6}}>
                   {greeting}
                 </div>
-                <div style={{fontSize:24,fontWeight:800,color:"#fff",marginBottom:2}}>
+                <div style={{fontSize:22,fontWeight:800,color:C.text,marginBottom:2}}>
                   {currentClient?.name || "Client"}
                 </div>
-                <div style={{fontSize:12,color:"#bfdbfe"}}>
-                  {new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}
-                </div>
+                <div style={{fontSize:12,color:C.muted}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div>
               </div>
               <div style={{textAlign:"right"}}>
-                <div style={{fontSize:10,color:"#93c5fd",letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>
-                  Total P&L {angelMTMStatus==="live"?"● Live":"○"}
-                </div>
-                <div style={{fontSize:32,fontWeight:900,color:myBoxC>=0?"#4ade80":"#f87171"}}>
-                  {myBoxC>=0?"+":""}₹{Math.abs(myBoxC).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                <div style={{fontSize:11,color:C.muted,marginBottom:4}}>This Month P&L</div>
+                <div style={{fontSize:28,fontWeight:800,color:myMonthPnl>=0?C.green:C.red}}>
+                  {myMonthPnl>=0?"+":""}₹{Math.abs(myMonthPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
                 </div>
               </div>
             </div>
 
-            {/* ── 3 P&L Boxes: A + B = C ── */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:20}}>
-              <div style={{...card,padding:"16px 20px"}}>
-                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>P&L Till Yesterday</div>
-                <div style={{fontSize:22,fontWeight:800,color:myBoxA>=0?C.green:C.red}}>
-                  {myBoxA>=0?"+":""}₹{Math.abs(myBoxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
+            {/* 3 stat cards */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:24}}>
+              {/* Realized P&L */}
+              <div style={{...card,padding:"20px 22px"}}>
+                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>All-Time Realized</div>
+                <div style={{fontSize:26,fontWeight:800,color:myData.realizedPnl>=0?C.green:C.red,lineHeight:1}}>
+                  {myData.realizedPnl>=0?"+":""}₹{Math.abs(myData.realizedPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
                 </div>
-                <div style={{fontSize:10,color:C.muted,marginTop:4}}>Frozen at yesterday's close</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:6}}>Booked profits/losses</div>
               </div>
-              <div style={{...card,padding:"16px 20px",
-                border:`2px solid ${myBoxB>=0?C.green+"44":C.red+"44"}`,
-                boxShadow:`0 0 16px ${myBoxB>=0?C.green+"18":C.red+"18"}`}}>
-                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>
-                  Today's Live P&L <span style={{color:angelMTMStatus==="live"?C.green:C.muted}}>{angelMTMStatus==="live"?"●":"○"}</span>
+
+              {/* Win Rate */}
+              <div style={{...card,padding:"20px 22px",borderTop:`3px solid ${myWrC}`}}>
+                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Win Rate</div>
+                <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                  <div style={{fontSize:36,fontWeight:900,color:myWrC,lineHeight:1}}>{winRate}%</div>
+                  <div style={{fontSize:12,color:C.muted}}>12 months</div>
                 </div>
-                <div style={{fontSize:22,fontWeight:800,color:myBoxB>=0?C.green:C.red}}>
-                  {myBoxB>=0?"+":""}₹{Math.abs(myBoxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                <div style={{marginTop:8,height:4,background:C.border,borderRadius:2,overflow:"hidden"}}>
+                  <div style={{height:"100%",width:winRate+"%",background:myWrC,borderRadius:2,transition:"width 1s"}}/>
                 </div>
-                <div style={{fontSize:10,color:C.muted,marginTop:4}}>{myOpen.length} open positions</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:6}}>
+                  This month: <b style={{color:myWrC}}>{dayWR}%</b> daily ({pDays}/{tDays.length} days)
+                </div>
               </div>
-              <div style={{...card,padding:"16px 20px",
-                border:`2px solid ${myBoxC>=0?C.green+"66":C.red+"66"}`,
-                boxShadow:`0 0 20px ${myBoxC>=0?C.green+"22":C.red+"22"}`}}>
-                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>Total P&L</div>
-                <div style={{fontSize:22,fontWeight:800,color:myBoxC>=0?C.green:C.red}}>
-                  {myBoxC>=0?"+":""}₹{Math.abs(myBoxC).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                </div>
-                <div style={{fontSize:10,color:C.muted,marginTop:4}}>Full month P&L</div>
+
+              {/* Open Positions */}
+              <div style={{...card,padding:"20px 22px",cursor:"pointer"}}
+                onClick={()=>setPage("trades")}
+                onMouseEnter={e=>{e.currentTarget.style.boxShadow="0 4px 20px rgba(0,0,0,0.1)";e.currentTarget.style.transform="translateY(-2px)";}}
+                onMouseLeave={e=>{e.currentTarget.style.boxShadow="";e.currentTarget.style.transform="";}}>
+                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>Open Positions</div>
+                <div style={{fontSize:36,fontWeight:800,color:C.accent,lineHeight:1}}>{myData.openCount}</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:6}}>Active contracts →</div>
               </div>
             </div>
-
-            {/* ── 4 KPI cards ── */}
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
-              {[
-                {label:"This Month Net",val:`${myMonthPnl>=0?"+":""}₹${Math.abs(myMonthPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}`,color:myMonthPnl>=0?C.green:C.red},
-                {label:"Open Positions",val:myOpen.length,color:C.accent,link:true},
-                {label:"Daily Win Rate",val:dayWR+"%",color:myWrC},
-                {label:"Closed Trades",val:myClosed.length,color:C.purple},
-              ].map((k,i)=>(
-                <div key={i} style={{...card,padding:"14px 16px",cursor:k.link?"pointer":"default"}}
-                  onClick={k.link?()=>setPage("trades"):undefined}>
-                  <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>{k.label}</div>
-                  <div style={{fontSize:20,fontWeight:800,color:k.color}}>{k.val}</div>
-                </div>
-              ))}
-            </div>
-
-            {/* ── Live open positions mini-table ── */}
-            {myOpen.length > 0 && (
-              <div style={{...card,padding:0,overflow:"hidden",marginBottom:20}}>
-                <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <div style={{fontWeight:700,color:C.text,fontSize:14}}>📈 Open Positions</div>
-                  <div style={{fontSize:11,color:angelMTMStatus==="live"?C.green:C.muted}}>
-                    {angelMTMStatus==="live"?"● Live prices":"○ Prices not connected"}
-                  </div>
-                </div>
-                <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                  <thead>
-                    <tr style={{background:C.bg}}>
-                      {["Contract","Side","Qty","Avg Price","LTP","MTM"].map(h=>(
-                        <th key={h} style={{padding:"9px 16px",color:C.muted,fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:0.5,textAlign:h==="Contract"||h==="Side"?"left":"right",borderBottom:`1px solid ${C.border}`}}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {myOpen.map((pos,i)=>{
-                      const ltp = getBhavClose(pos.contract);
-                      const mtm = ltp !== null ? (pos.side==="SELL"?(pos.avgPrice-ltp):(ltp-pos.avgPrice))*pos.netQty : null;
-                      return (
-                        <tr key={i} style={{borderBottom:`1px solid ${C.border}22`}}>
-                          <td style={{padding:"10px 16px",color:C.accent,fontWeight:600}}>{pos.contract}</td>
-                          <td style={{padding:"10px 16px"}}><span style={{...badge(pos.side==="SELL"?C.red:C.green)}}>{pos.side}</span></td>
-                          <td style={{padding:"10px 16px",textAlign:"right",fontWeight:700}}>{pos.netQty}</td>
-                          <td style={{padding:"10px 16px",textAlign:"right"}}>₹{pos.avgPrice.toFixed(2)}</td>
-                          <td style={{padding:"10px 16px",textAlign:"right",color:C.accent}}>{ltp?`₹${ltp.toFixed(2)}`:"—"}</td>
-                          <td style={{padding:"10px 16px",textAlign:"right",fontWeight:700,color:mtm===null?C.muted:mtm>=0?C.green:C.red}}>
-                            {mtm===null?"—":`${mtm>=0?"+":""}₹${Math.abs(mtm).toLocaleString("en-IN",{maximumFractionDigits:0})}`}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
 
             {/* Quote */}
             <div style={{padding:"20px 24px",background:`linear-gradient(135deg,#1e3a5f,#1e3a8a)`,
@@ -3549,9 +3057,6 @@ export default function BackOffice() {
                 <button style={btn(C.purple)} onClick={() => setModal("uploadTrades")}>
                   <Icon name="upload" size={16}/> Upload Master File
                 </button>
-                <button style={btn(C.blue)} onClick={() => { setLtpFile(null); setLtpPreview(null); setModal("uploadLTP"); }}>
-                  📡 Upload LTP File
-                </button>
                 {uploadHistory.length > 0 && (
                   <button style={{...btn(C.card), border:`1px solid ${C.border}`, color:C.text, fontSize:13}}
                     onClick={() => setModal("uploadHistory")}>
@@ -3578,46 +3083,6 @@ export default function BackOffice() {
             ))}
           </div>
 
-          {/* Smart Search + Download */}
-          <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:16, flexWrap:"wrap" }}>
-            <div style={{ position:"relative", flex:1, minWidth:220 }}>
-              <span style={{ position:"absolute", left:10, top:"50%", transform:"translateY(-50%)", color:C.muted, fontSize:14 }}>🔍</span>
-              <input
-                type="text"
-                placeholder="Search contracts... (e.g. PATANJALI, 02JUL2026, PE, FUT)"
-                value={positionSearch}
-                onChange={e => setPositionSearch(e.target.value)}
-                style={{ ...input, paddingLeft:34, fontSize:13 }}
-              />
-            </div>
-            {positionSearch && (
-              <button onClick={() => setPositionSearch("")}
-                style={{ ...btn(C.muted), fontSize:12, padding:"8px 12px" }}>✕ Clear</button>
-            )}
-            <button onClick={() => {
-              // Download ALL positions as Excel (CSV)
-              const allOpen   = showClients.flatMap(c => clientOpenPos(c.id).map(p => ({...p, clientName: c.name})));
-              const allClosed = showClients.flatMap(c => clientClosedPos(c.id).map(p => ({...p, clientName: c.name})));
-              const rows = [
-                ["Type","Client","Contract","Side","Net Qty","Avg Price","Close Price","MTM P&L"],
-                ...allOpen.map(p => {
-                  const close = getBhavClose(p.contract);
-                  const mtm   = close !== null ? ((p.side==="SELL" ? (p.avgPrice-close) : (close-p.avgPrice)) * p.netQty).toFixed(2) : "";
-                  return ["OPEN", p.clientName||p.clientId, p.contract, p.side, p.netQty, p.avgPrice.toFixed(2), close?.toFixed(2)||"", mtm];
-                }),
-                ...allClosed.map(p => ["CLOSED", p.clientName||p.clientId, p.contract, "", "", "", "", p.totalPnl.toFixed(2)]),
-              ];
-              const csv = rows.map(r => r.map(v => '"'+v+'"').join(",")).join("\n");
-              const blob = new Blob([csv], { type:"text/csv" });
-              const url  = URL.createObjectURL(blob);
-              const a    = document.createElement("a");
-              a.href = url; a.download = `positions_${new Date().toISOString().slice(0,10)}.csv`; a.click();
-              URL.revokeObjectURL(url);
-            }} style={{ ...btn(C.green), fontSize:12 }}>
-              ⬇ Download Excel
-            </button>
-          </div>
-
           {showClients.map(client => {
             const open   = clientOpenPos(client.id);
             const closed = clientClosedPos(client.id);
@@ -3641,22 +3106,9 @@ export default function BackOffice() {
                 )}
 
                 {/* Open Positions */}
-                {(positionFilter==="open" || positionFilter==="all") && open.length > 0 && (() => {
-                  const sl = positionSearch.toLowerCase();
-                  const filtOpen = sl ? open.filter(p =>
-                    p.contract.toLowerCase().includes(sl) || p.side.toLowerCase().includes(sl) || p.netQty.toString().includes(sl)
-                  ) : open;
-                  const sumMTM = filtOpen.reduce((s,p) => {
-                    const close = getBhavClose(p.contract);
-                    return s + (close !== null ? (p.side==="SELL" ? (p.avgPrice-close) : (close-p.avgPrice)) * p.netQty : 0);
-                  }, 0);
-                  const sumBooked = filtOpen.reduce((s,p) => s + (p.bookedPnl||0), 0);
-                  if (filtOpen.length === 0) return null;
-                  return (
+                {(positionFilter==="open" || positionFilter==="all") && open.length > 0 && (
                   <div style={{ ...card, marginBottom:12 }}>
-                    <div style={{ color:C.yellow, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>
-                      🟡 Open Positions {sl && `(${filtOpen.length}/${open.length})`}
-                    </div>
+                    <div style={{ color:C.yellow, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>🟡 Open Positions</div>
                     <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
                       <thead>
                         <tr>{["Contract","Net Qty","Side","Avg Price","Close Price","MTM P&L","Booked P&L"].map(h=>(
@@ -3664,7 +3116,7 @@ export default function BackOffice() {
                         ))}</tr>
                       </thead>
                       <tbody>
-                        {filtOpen.map((p,i) => {
+                        {open.map((p,i) => {
                           const close = getBhavClose(p.contract);
                           const mtm   = close !== null
                             ? (p.side==="SELL" ? (p.avgPrice-close) : (close-p.avgPrice)) * p.netQty
@@ -3690,40 +3142,14 @@ export default function BackOffice() {
                           );
                         })}
                       </tbody>
-                      {/* Sum row */}
-                      <tfoot>
-                        <tr style={{ borderTop:`2px solid ${C.border}`, background:C.sidebar }}>
-                          <td style={{ padding:"10px 12px", fontWeight:700, color:C.muted, fontSize:12 }}>TOTAL ({filtOpen.length})</td>
-                          <td colSpan={4}></td>
-                          <td style={{ padding:"10px 12px", fontWeight:800, color:sumMTM>=0?C.green:C.red }}>
-                            {sumMTM>=0?"+":""}₹{sumMTM.toFixed(2)}
-                          </td>
-                          <td style={{ padding:"10px 12px", fontWeight:800, color:sumBooked>=0?C.green:C.red }}>
-                            {sumBooked>=0?"+":""}₹{sumBooked.toFixed(2)}
-                          </td>
-                        </tr>
-                      </tfoot>
                     </table>
                   </div>
-                  );
-                })()}
+                )}
 
                 {/* Closed Positions */}
-                {(positionFilter==="closed" || positionFilter==="all") && closed.length > 0 && (() => {
-                  const sl2 = positionSearch.toLowerCase();
-                  const filtClosed = sl2 ? closed.filter(cp => cp.contract.toLowerCase().includes(sl2)) : closed;
-                  if (filtClosed.length === 0) return null;
-                  const closedTrades = filtClosed.flatMap(c => c.trades||[]);
-                  const sumGross = filtClosed.reduce((s,cp) => s + (cp.totalPnl||0), 0);
-                  const sumNet   = closedTrades.reduce((s,t) => {
-                    const ch = getTradeCharges(t);
-                    return s + (t.pnl||0) - (ch.total||0);
-                  }, sumGross);
-                  return (
+                {(positionFilter==="closed" || positionFilter==="all") && closed.length > 0 && (
                   <div style={{ ...card, marginBottom:12 }}>
-                    <div style={{ color:C.green, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>
-                      ✅ Closed Positions {sl2 && `(${filtClosed.length}/${closed.length})`}
-                    </div>
+                    <div style={{ color:C.green, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>✅ Closed Positions</div>
                     <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
                       <thead>
                         <tr>{["Contract","Qty","Sell Price","Buy Price","Gross P&L","Charges","Net P&L"].map(h=>(
@@ -3731,7 +3157,7 @@ export default function BackOffice() {
                         ))}</tr>
                       </thead>
                       <tbody>
-                        {filtClosed.flatMap(c=>c.trades||[]).map((t,i) => {
+                        {closed.flatMap(c=>c.trades).map((t,i) => {
                           // Find trades for this closed trade to calc charges
                           const relatedTrades = clientTrades.filter(tr =>
                             tr.contract === t.contract && (tr.date === t.date || true)
@@ -3756,23 +3182,9 @@ export default function BackOffice() {
                           );
                         })}
                       </tbody>
-                      <tfoot>
-                        <tr style={{ borderTop:`2px solid ${C.border}`, background:C.sidebar }}>
-                          <td style={{ padding:"10px 12px", fontWeight:700, color:C.muted, fontSize:12 }}>TOTAL ({filtClosed.length})</td>
-                          <td colSpan={3}></td>
-                          <td style={{ padding:"10px 12px", fontWeight:800, color:sumGross>=0?C.green:C.red }}>
-                            {sumGross>=0?"+":""}₹{sumGross.toFixed(2)}
-                          </td>
-                          <td></td>
-                          <td style={{ padding:"10px 12px", fontWeight:800, color:sumNet>=0?C.green:C.red }}>
-                            {sumNet>=0?"+":""}₹{sumNet.toFixed(2)}
-                          </td>
-                        </tr>
-                      </tfoot>
                     </table>
                   </div>
-                  );
-                })()}
+                )}
 
                 {/* Charges breakdown per trade — admin only */}
                 {isAdmin && (positionFilter==="closed" || positionFilter==="all") && clientTrades.length>0 && (
@@ -3930,237 +3342,51 @@ export default function BackOffice() {
           </div>
 
           {showClients.map(client => {
-            const todayStr     = new Date().toISOString().slice(0,10);
-            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
-            const ySnap        = closingSnapshot[yesterdayStr] || {};
-            const getYestClose = (contract) =>
-              ySnap[contract] || bhavLookup[contract]?.closePrice || null;
+            const closed  = clientClosedPos(client.id);
+            const open    = clientOpenPos(client.id);
 
-            // ── ALL trades for this client (used for FIFO — always full history) ──
-            const allClientTrades = state.trades.filter(t => t.clientId === client.id);
-            const closed = clientClosedPos(client.id);
-            const open   = clientOpenPos(client.id);
+            // All months that have any data for this client — filtered by date selection
+            const tradeDates = state.trades.filter(t => t.clientId === client.id).map(t => (t.date||"").slice(0,7));
+            const interestMonths = (state.interest||[]).filter(i => i.clientId === client.id).map(i => i.yearMonth);
+            const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(m => m && monthInFilter(m)).sort().reverse();
 
-            // ── MONTH-FILTERED trades (for P&L display) ──
-            const filteredTrades = allClientTrades.filter(t => monthInFilter((t.date||"").slice(0,7)));
+            // For range/month filter also filter closed trades
+            const filteredClosed = closed.filter(cp =>
+              cp.trades.some(t => monthInFilter((t.date||"").slice(0,7)))
+            );
 
-            // ── All months in filtered window ──
-            const tradeDates     = filteredTrades.map(t => (t.date||"").slice(0,7));
-            const interestMonths = (state.interest||[])
-              .filter(i => i.clientId === client.id && monthInFilter((i.yearMonth||"").replace("_SW","")))
-              .map(i => i.yearMonth);
-            const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(Boolean).sort().reverse();
-
-            // ── FIFO on full history (correct open/closed positions) ──
-            const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(allClientTrades);
-
-            // ── Filtered closed contracts: only those closed within selected month(s) ──
-            const filteredClosed = histClosed.filter(cp => {
-              const dates = cp.trades.map(t => (t.date||"").slice(0,7)).filter(Boolean).sort();
-              const lastMonth = dates[dates.length - 1];
-              return lastMonth ? monthInFilter(lastMonth) : false;
-            });
-
-            // ── P&L numbers — ALL strictly filtered to selected month(s) ──
+            // Grand totals
             const grandRealized = filteredClosed.reduce((a,c) => a + c.totalPnl, 0);
             const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
-            const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m+"_SW"), 0);
+            const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
             const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
-            const grandNet      = grandRealized - grandExpenses - grandSoftware - grandInterest;
-
-            // ── BOX A: filtered month realized + open MTM at yesterday close ──
-            // Realized = only contracts closed within selected month
-            const boxARealized = grandRealized;
-            const boxAExpenses = grandExpenses;
-            const boxASoftware = grandSoftware;
-            const boxAInterest = grandInterest;
-            const boxAOpenMTM  = histOpen.reduce((s, pos) => {
-              const closeP = getYestClose(pos.contract);
-              if (!closeP) return s;
-              return s + (pos.side === "SELL" ? (pos.avgPrice - closeP) : (closeP - pos.avgPrice)) * pos.netQty;
-            }, 0);
-            // Box A open MTM only shown when "All Time" or current month selected
-            const isCurrentMonth = pnlDateMode === "all" ||
-              (pnlDateMode === "month" && pnlMonth === new Date().toISOString().slice(0,7));
-            const boxA = boxARealized + (isCurrentMonth ? boxAOpenMTM : 0) - boxAExpenses - boxASoftware - boxAInterest;
-
-            // ── BOX B: Uses ONLY intraday_trades table ─────────────
-            const myIntradayAll = intradayTrades.filter(t => t.clientId === client.id);
-            // BASE_ records = price anchors from EOD — NEVER feed into FIFO
-            const basePriceMap  = {};
-            myIntradayAll.filter(t => (t.id||"").startsWith("BASE_")).forEach(t => {
-              basePriceMap[t.contract] = t.price;
-            });
-            const myIntraday = myIntradayAll.filter(t => !(t.id||"").startsWith("BASE_"));
-
-            // Box B only makes sense if we have today's intraday trades
-            let boxB = 0;
-            if (myIntraday.length > 0 || Object.keys(basePriceMap).length > 0) {
-              // Carry-forward MTM: (live LTP - base price) × qty
-              // Base price = F6 closing LTP from yesterday (basePriceMap), fallback to snapshot/bhavcopy
-              const carryMTM = histOpen.reduce((s, pos) => {
-                const todayLTP = getBhavClose(pos.contract);
-                const base     = basePriceMap[pos.contract] || ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
-                if (!todayLTP || !base) return s;
-                return s + (pos.side === "SELL" ? (base - todayLTP) : (todayLTP - base)) * pos.netQty;
-              }, 0);
-
-              // FIFO on real today trades ONLY (no BASE_ records)
-              const { openPositions: intOpen, closedPositions: intClosed } = applyFIFO(myIntraday);
-              const intradayBooked = intClosed.reduce((a,c) => a + c.totalPnl, 0);
-              // MTM on new positions opened today (not in histOpen)
-              const intradayNewMTM = intOpen
-                .filter(pos => !histOpen.some(h => h.contract === pos.contract && h.clientId === pos.clientId))
-                .reduce((s, pos) => {
-                  const ltp = getBhavClose(pos.contract);
-                  if (!ltp) return s;
-                  return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
-                }, 0);
-
-              boxB = carryMTM + intradayBooked + intradayNewMTM;
-            }
-
-            // ── BOX C: Total ───────────────────────────────────────
-            const boxC = boxA + boxB;
-
-            // allOpen2 for expanded view
-            const allOpen2 = histOpen;
-            const box2MTM = histOpen.reduce((s, pos) => {
+            // Live MTM on open positions
+            const grandMTM = open.reduce((s, pos) => {
               const close = getBhavClose(pos.contract);
               if (close === null) return s;
               return s + (pos.side === "SELL" ? (pos.avgPrice - close) : (close - pos.avgPrice)) * pos.netQty;
             }, 0);
+            const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
+                {/* Client name */}
                 {isAdmin && (
                   <div style={{ color:C.accent, fontWeight:700, fontSize:15, marginBottom:16 }}>
                     {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
                   </div>
                 )}
 
-                {/* ── THREE P&L BOXES: A + B = C ── */}
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12, marginBottom:20 }}>
-
-                  {/* BOX A — P&L Till Yesterday (FROZEN) */}
-                  <div style={{ background:C.bg, borderRadius:12, padding:"16px 18px",
-                    border:`1px solid ${C.border}` }}>
-                    <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase",
-                      letterSpacing:1, marginBottom:5 }}>
-                      {isCurrentMonth ? "P&L Till Yesterday" : `Realized P&L (${pnlDateMode==="month"?pnlMonth:"Filtered"})`}
-                    </div>
-                    <div style={{ fontSize:24, fontWeight:800,
-                      color:boxA>=0?C.green:C.red, marginBottom:3 }}>
-                      {boxA>=0?"+":""}₹{Math.abs(boxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                    </div>
-                    <div style={{ fontSize:10, color:C.muted }}>
-                      Booked + yesterday's close MTM
-                    </div>
-                  </div>
-
-                  {/* BOX B — Today's Intraday P&L (LIVE, expandable) */}
-                  {(()=>{
-                    const [expanded, setExpanded] = [
-                      todayPnlExpanded[client.id],
-                      (v) => setTodayPnlExpanded(prev => ({...prev, [client.id]: v}))
-                    ];
-                    return (
-                      <div style={{ background:C.bg, borderRadius:12, padding:"18px 20px",
-                        border:`2px solid ${boxB>=0?C.green+"44":C.red+"44"}`,
-                        boxShadow:`0 0 16px ${boxB>=0?C.green+"18":C.red+"18"}`,
-                        cursor:"pointer" }}
-                        onClick={() => setExpanded(!expanded)}>
-                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                          <div>
-                            <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase",
-                              letterSpacing:1, marginBottom:6 }}>
-                              Today's P&L {angelMTMStatus==="live" ?
-                                <span style={{color:C.green}}>● Live</span> :
-                                <span style={{color:C.muted}}>○</span>}
-                            </div>
-                            <div style={{ fontSize:28, fontWeight:800,
-                              color:boxB>=0?C.green:C.red, marginBottom:4 }}>
-                              {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                            </div>
-                            <div style={{ fontSize:11, color:C.muted }}>
-                              {allOpen2?.length||open.length} pos · click to {expanded?"hide":"expand"}
-                            </div>
-                          </div>
-                          <span style={{ color:C.muted, fontSize:18 }}>{expanded?"▲":"▼"}</span>
-                        </div>
-
-                        {/* Expanded: per-position breakdown */}
-                        {expanded && (
-                          <div style={{ marginTop:14, borderTop:`1px solid ${C.border}`, paddingTop:12 }}
-                            onClick={e=>e.stopPropagation()}>
-                            {open.length === 0 ? (
-                              <div style={{color:C.muted,fontSize:12}}>No open positions</div>
-                            ) : open.map((pos,i) => {
-                              const ltp  = getBhavClose(pos.contract);
-                              const mtm  = ltp !== null
-                                ? (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty
-                                : null;
-                              return (
-                                <div key={i} style={{ display:"flex", justifyContent:"space-between",
-                                  alignItems:"center", padding:"7px 0",
-                                  borderBottom:`1px solid ${C.border}22`,
-                                  fontSize:12 }}>
-                                  <div>
-                                    <div style={{color:C.text,fontWeight:600}}>{pos.contract}</div>
-                                    <div style={{color:C.muted,fontSize:11}}>
-                                      {pos.side} {pos.netQty} @ ₹{pos.avgPrice.toFixed(2)}
-                                      {ltp !== null && ` → LTP ₹${ltp.toFixed(2)}`}
-                                    </div>
-                                  </div>
-                                  <div style={{
-                                    fontWeight:700, fontSize:13,
-                                    color: mtm===null ? C.muted : mtm>=0 ? C.green : C.red
-                                  }}>
-                                    {mtm===null ? "—" : `${mtm>=0?"+":""}₹${Math.abs(mtm).toLocaleString("en-IN",{maximumFractionDigits:0})}`}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                            <div style={{ display:"flex", justifyContent:"space-between",
-                              marginTop:10, paddingTop:8,
-                              borderTop:`1px solid ${C.border}`,
-                              fontWeight:700, fontSize:13 }}>
-                              <span style={{color:C.muted}}>Today's Total</span>
-                              <span style={{color:boxB>=0?C.green:C.red}}>
-                                {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                              </span>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                  {/* BOX C — Total Live P&L (A + B) */}
-                  <div style={{ background:C.bg, borderRadius:12, padding:"16px 18px",
-                    border:`2px solid ${boxC>=0?C.green+"66":C.red+"66"}`,
-                    boxShadow:`0 0 20px ${boxC>=0?C.green+"22":C.red+"22"}` }}>
-                    <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase",
-                      letterSpacing:1, marginBottom:5 }}>Total P&L</div>
-                    <div style={{ fontSize:24, fontWeight:800,
-                      color:boxC>=0?C.green:C.red, marginBottom:3 }}>
-                      {boxC>=0?"+":""}₹{Math.abs(boxC).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                    </div>
-                    <div style={{ fontSize:10, color:C.muted }}>
-                      Full month P&L including live
-                    </div>
-                  </div>
-                </div>
-                {/* ── END 3-BOX P&L ── */}
-
-                {/* Grand summary cards — Row 2: Till Yesterday Breakdown */}
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12, marginBottom:24 }}>
+                {/* Grand summary cards */}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
                   {[
-                    { label:"Realized P&L",    val:boxA + boxAExpenses + boxASoftware + boxAInterest, color:(boxA+boxAExpenses+boxASoftware+boxAInterest)>=0?C.green:C.red },
-                    { label:"Expenses",         val:-boxAExpenses,   color:C.yellow },
-                    { label:"Software Charges", val:-boxASoftware,   color:C.purple },
-                    { label:"Interest",         val:-boxAInterest,   color:C.red },
-                    { label:"Net P&L",          val:boxA,            color:boxA>=0?C.green:C.red, big:true },
+                    { label:"Realized P&L",     val:grandRealized,         color:grandRealized>=0?C.green:C.red },
+                    { label:"Expenses",          val:-grandExpenses,        color:C.yellow },
+                    { label:"Software Charges",  val:-grandSoftware,        color:C.purple },
+                    { label:"Interest",          val:-grandInterest,        color:C.red },
+                    { label:"Live MTM",          val:grandMTM,              color:grandMTM>=0?C.green:C.red },
+                    { label:"Net P&L",           val:grandNet+grandMTM,     color:(grandNet+grandMTM)>=0?C.green:C.red, big:true },
+                    { label:"Open Positions",    val:open.length,           color:C.accent, count:true },
                   ].map(s => (
                     <div key={s.label} style={{ background:C.bg, borderRadius:10, padding:"14px 16px",
                       border:`1px solid ${s.big ? s.color+"66" : C.border}`,
@@ -4175,20 +3401,23 @@ export default function BackOffice() {
 
                 {/* Formula line */}
                 <div style={{ background:C.bg, borderRadius:8, padding:"10px 16px", marginBottom:20, fontSize:13, color:C.muted, display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
-                  <span style={{ color:(boxA+boxAExpenses+boxASoftware+boxAInterest)>=0?C.green:C.red, fontWeight:600 }}>₹{(boxA+boxAExpenses+boxASoftware+boxAInterest).toFixed(2)}</span>
+                  <span style={{ color:grandRealized>=0?C.green:C.red, fontWeight:600 }}>₹{grandRealized.toFixed(2)}</span>
                   <span>(Realized)</span>
                   <span>−</span>
-                  <span style={{ color:C.yellow, fontWeight:600 }}>₹{boxAExpenses.toFixed(2)}</span>
+                  <span style={{ color:C.yellow, fontWeight:600 }}>₹{grandExpenses.toFixed(2)}</span>
                   <span>(Expenses)</span>
                   <span>−</span>
-                  <span style={{ color:C.purple, fontWeight:600 }}>₹{boxASoftware.toFixed(2)}</span>
+                  <span style={{ color:C.purple, fontWeight:600 }}>₹{grandSoftware.toFixed(2)}</span>
                   <span>(Software)</span>
                   <span>−</span>
-                  <span style={{ color:C.red, fontWeight:600 }}>₹{boxAInterest.toFixed(2)}</span>
+                  <span style={{ color:C.red, fontWeight:600 }}>₹{grandInterest.toFixed(2)}</span>
                   <span>(Interest)</span>
                   <span>=</span>
-                  <span style={{ color:boxA>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{boxA.toFixed(2)}</span>
-                  <span style={{ color:C.muted }}>(Net P&L — Till Yesterday)</span>
+                  <span style={{ color:grandMTM>=0?C.green:C.red, fontWeight:600 }}>₹{grandMTM.toFixed(2)}</span>
+                  <span>(Live MTM)</span>
+                  <span>=</span>
+                  <span style={{ color:(grandNet+grandMTM)>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{(grandNet+grandMTM).toFixed(2)}</span>
+                  <span style={{ color:C.muted }}>(Net P&L)</span>
                 </div>
 
                 {/* Month-by-month breakdown */}
@@ -4249,11 +3478,11 @@ export default function BackOffice() {
                       <tfoot>
                         <tr style={{ borderTop:`2px solid ${C.border}` }}>
                           <td style={{ padding:"10px 12px", color:C.muted, fontWeight:700, fontSize:12 }}>GRAND TOTAL</td>
-                          <td style={{ padding:"10px 12px", color:(boxA+boxAExpenses+boxASoftware+boxAInterest)>=0?C.green:C.red, fontWeight:700 }}>₹{(boxA+boxAExpenses+boxASoftware+boxAInterest).toFixed(2)}</td>
-                          <td style={{ padding:"10px 12px", color:C.yellow, fontWeight:700 }}>− ₹{boxAExpenses.toFixed(2)}</td>
-                          <td style={{ padding:"10px 12px", color:C.red, fontWeight:700 }}>− ₹{boxAInterest.toFixed(2)}</td>
-                          <td style={{ padding:"10px 12px", color:C.purple, fontWeight:700 }}>₹{boxASoftware.toFixed(2)}</td>
-                          <td style={{ padding:"10px 12px", color:boxA>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{boxA.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:grandRealized>=0?C.green:C.red, fontWeight:700 }}>₹{grandRealized.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.yellow, fontWeight:700 }}>− ₹{grandExpenses.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.red, fontWeight:700 }}>− ₹{grandInterest.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.purple, fontWeight:700 }}>₹{grandSoftware.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</td>
                         </tr>
                       </tfoot>
                     </table>
@@ -4261,66 +3490,28 @@ export default function BackOffice() {
                 )}
 
                 {/* Closed contracts detail — filtered by current date selection */}
-                {filteredClosed.length > 0 && (()=>{
-                  const sl = (pnlClosedSearch||"").toLowerCase();
-                  const searchedClosed = sl
-                    ? filteredClosed.filter(c => c.contract.toLowerCase().includes(sl))
-                    : filteredClosed;
-                  const sumPnl = searchedClosed.reduce((a,c) => a + c.totalPnl, 0);
-                  return (
-                  <div>
-                    <div style={{ display:"flex", gap:8, alignItems:"center", margin:"10px 0" }}>
-                      <div style={{ position:"relative", flex:1 }}>
-                        <span style={{ position:"absolute", left:8, top:"50%", transform:"translateY(-50%)", color:C.muted, fontSize:13 }}>🔍</span>
-                        <input
-                          type="text"
-                          placeholder="Search closed contracts... (e.g. NIFTY, 28JUL2026, PE)"
-                          value={pnlClosedSearch||""}
-                          onChange={e => setPnlClosedSearch(e.target.value)}
-                          style={{ ...input, paddingLeft:30, fontSize:12, padding:"6px 8px 6px 28px" }}
-                        />
-                      </div>
-                      {pnlClosedSearch && (
-                        <button onClick={() => setPnlClosedSearch("")}
-                          style={{ ...btn(C.muted), fontSize:11, padding:"6px 10px" }}>✕</button>
-                      )}
-                      {pnlClosedSearch && (
-                        <span style={{ fontSize:11, color:C.muted }}>{searchedClosed.length}/{filteredClosed.length}</span>
-                      )}
-                    </div>
-                    <details>
-                      <summary style={{ color:C.muted, fontSize:12, cursor:"pointer", padding:"8px 0", userSelect:"none" }}>
-                        📋 Closed Contracts ({filteredClosed.length})
-                      </summary>
-                      <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, marginTop:4 }}>
-                        <thead>
-                          <tr>{["Contract","Gross P&L"].map(h=>(
-                            <th key={h} style={{ textAlign:"left", padding:"6px 12px", color:C.muted, borderBottom:`1px solid ${C.border}` }}>{h}</th>
-                          ))}</tr>
-                        </thead>
-                        <tbody>
-                          {searchedClosed.map((c,i)=>(
-                            <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
-                              <td style={{ padding:"8px 12px", color:C.accent }}>{c.contract}</td>
-                              <td style={{ padding:"8px 12px", color:c.totalPnl>=0?C.green:C.red, fontWeight:600 }}>₹{c.totalPnl.toFixed(2)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                        <tfoot>
-                          <tr style={{ borderTop:`2px solid ${C.border}`, background:C.bg }}>
-                            <td style={{ padding:"8px 12px", fontWeight:700, color:C.muted, fontSize:11 }}>
-                              TOTAL {pnlClosedSearch ? `(${searchedClosed.length} filtered)` : `(${filteredClosed.length})`}
-                            </td>
-                            <td style={{ padding:"8px 12px", fontWeight:800, color:sumPnl>=0?C.green:C.red }}>
-                              {sumPnl>=0?"+":""}₹{sumPnl.toFixed(2)}
-                            </td>
+                {filteredClosed.length > 0 && (
+                  <details>
+                    <summary style={{ color:C.muted, fontSize:12, cursor:"pointer", padding:"8px 0", userSelect:"none" }}>
+                      📋 View closed contracts ({filteredClosed.length})
+                    </summary>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, marginTop:10 }}>
+                      <thead>
+                        <tr>{["Contract","Gross P&L"].map(h=>(
+                          <th key={h} style={{ textAlign:"left", padding:"6px 12px", color:C.muted, borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                        ))}</tr>
+                      </thead>
+                      <tbody>
+                        {filteredClosed.map((c,i)=>(
+                          <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
+                            <td style={{ padding:"8px 12px", color:C.accent }}>{c.contract}</td>
+                            <td style={{ padding:"8px 12px", color:c.totalPnl>=0?C.green:C.red, fontWeight:600 }}>₹{c.totalPnl.toFixed(2)}</td>
                           </tr>
-                        </tfoot>
-                      </table>
-                    </details>
-                  </div>
-                  );
-                })()}
+                        ))}
+                      </tbody>
+                    </table>
+                  </details>
+                )}
 
                 {filteredClosed.length===0 && allMonths.length===0 && (
                   <div style={{ color:C.muted, fontSize:13 }}>No closed positions yet.</div>
@@ -4774,7 +3965,7 @@ export default function BackOffice() {
 
 
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
-      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} logout={logout} resetPriceCache={()=>{ contractTokenMapRef.current={...HARDCODED_TOKENS}; instrMasterRef.current={}; try{localStorage.removeItem("angel_live_mtm");}catch(e){} setAngelLiveMTM({}); notify("🗑 Cache cleared — fetching fresh..."); setTimeout(()=>fetchAutoBhavcopy(angelToken,angelCreds.apiKey),500); }} />;
+      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} />;
     }
 
     // ── Super Admin: Manage Admins ──
@@ -5335,318 +4526,6 @@ export default function BackOffice() {
         </div>
       </div>
     );
-
-    if (modal === "uploadLTP") {
-      // ── LTP Upload Modal ──────────────────────────────────────
-      // Parses Integrated Net Position file (tab-separated or Excel)
-      // Matches to open positions by: ClientID → Symbol → Expiry → Strike → OptType
-      // Updates live_positions table with matched LTP values
-
-      const parseLTPFile = (text) => {
-        // CONFIRMED COLUMN LAYOUT (11 cols, no "Client" col):
-        // 0: User(clientId) | 1: Symbol | 2: Ser/Exp(expiry) | 3: Strike Price
-        // 4: Option Type    | 5: Net Qty | 6: Net Price(skip) | 7: Market Price(LTP)
-        // 8: Actual MTM P&L | 9: MTM G/L | 10: Scrip Code
-        //
-        // IMPORTANT: Excel auto-converts numeric scrip codes to dates in Strike col!
-        // Real strike prices are plain numbers (77000, 78100 etc)
-        // Excel-date strikes (21-Aug-11 etc) = scrip code misread → use Scrip Code to match instead
-
-        const { openPositions } = applyFIFO(state.trades);
-        const results = [];
-
-        // Build scrip code → contract lookup from open positions
-        // trades table has scripCode field
-        const scripToContract = {};
-        state.trades.forEach(t => {
-          if (t.scripCode && t.contract) {
-            scripToContract[String(t.scripCode).trim()] = t.contract;
-          }
-        });
-
-        const parseExpiry = (raw) => {
-          if (!raw) return "";
-          const s = String(raw).trim().toUpperCase();
-          const dashMatch = s.match(/(\d{1,2})[\-\/](\w{3})[\-\/](\d{2,4})/);
-          if (dashMatch) {
-            const dd  = dashMatch[1].padStart(2,"0");
-            const mmm = dashMatch[2].slice(0,3);
-            const yy  = dashMatch[3].length === 2 ? "20" + dashMatch[3] : dashMatch[3];
-            return `${dd}${mmm}${yy}`;
-          }
-          if (s.length === 7 && s.slice(2,5).match(/[A-Z]/)) return s.slice(0,5) + "20" + s.slice(5);
-          return s;
-        };
-
-        const normStr = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
-
-        for (const line of text.split("\n")) {
-          if (!line.trim()) continue;
-          const row = line.split("\t");
-          if (row.length < 8) continue;
-
-          const clientId  = normStr(row[0]);
-          const symbol    = normStr(row[1]);
-          const expiryRaw = (row[2]||"").trim();
-          const strikeRaw = (row[3]||"").trim();
-          const optType   = normStr(row[4]);
-          const netQtyS   = (row[5]||"").trim();
-          const ltpS      = (row[7]||"").trim();  // Market Price = col 7
-          const scripCode = (row[row.length-1]||"").trim(); // last col = Scrip Code
-
-          // Skip header / total / separator rows
-          if (!clientId || !symbol) continue;
-          if (clientId.includes("USER") || clientId.startsWith("(") || clientId.startsWith("-")) continue;
-          if (clientId === "ALL" || symbol === "ALL") continue;
-
-          // Skip equity/normal rows
-          if (optType === "NORMAL" || optType === "EQ" || optType === "EQUITY") continue;
-
-          const ltp = parseFloat(ltpS.replace(/,/g,"") || "0");
-          if (ltp <= 0) continue;
-
-          const netQty = parseFloat(netQtyS.replace(/,/g,"") || "0");
-          // Only skip if explicitly zero (non-blank)
-          if (netQtyS !== "" && netQty === 0) continue;
-
-          // Determine if strike is a real number or Excel-mangled date
-          const strikeNum = parseFloat(strikeRaw.replace(/,/g,""));
-          const isRealStrike = !isNaN(strikeNum) && !strikeRaw.includes("-") && !strikeRaw.includes("/") && strikeNum > 1000;
-          const strikeNorm = isRealStrike ? String(Math.round(strikeNum)) : "";
-
-          const expNorm = parseExpiry(expiryRaw);
-
-          // Build contract name
-          let contract = "";
-          if (["CE","PE","CA","PA","CALL","PUT"].includes(optType) && isRealStrike) {
-            contract = `${symbol} ${strikeNorm} ${optType} ${expNorm}`.trim();
-          } else if (optType === "" || optType === "XX" || optType === "FUT") {
-            contract = `${symbol} FUT ${expNorm}`.trim();
-          } else if (["CE","PE","CA","PA"].includes(optType) && !isRealStrike) {
-            // Strike was mangled by Excel — try to match via scrip code
-            contract = scripCode ? (scripToContract[scripCode] || "") : "";
-          } else {
-            contract = `${symbol} FUT ${expNorm}`.trim();
-          }
-
-          // Match 1: exact contract + clientId
-          let finalMatch = openPositions.find(p =>
-            p.clientId === clientId && normStr(p.contract) === normStr(contract)
-          );
-
-          // Match 2: via scrip code in open positions
-          if (!finalMatch && scripCode) {
-            finalMatch = openPositions.find(p =>
-              p.clientId === clientId && String(p.scripCode||"").trim() === scripCode
-            );
-          }
-
-          // Match 3: fuzzy — symbol + expiry + optType + clientId (skip bad strike)
-          if (!finalMatch && contract) {
-            const tokens = normStr(contract).split(" ").filter(t => t.length > 1);
-            finalMatch = openPositions.find(p =>
-              p.clientId === clientId &&
-              tokens.every(tk => normStr(p.contract).includes(tk))
-            );
-          }
-
-          const side = netQty >= 0 ? "BUY" : "SELL";
-          const isBSE = ["SENSEX","BANKEX","SENSEX50"].includes(symbol);
-
-          results.push({
-            clientId,
-            contract: finalMatch ? finalMatch.contract : (contract || `${symbol} ${optType} ${expNorm}`),
-            ltp,
-            netQty: Math.abs(netQty) || 1,
-            side,
-            exchange: isBSE ? "BFO" : "NFO",
-            matched: !!finalMatch,
-            scripCode,
-          });
-        }
-        return results;
-      };
-
-      const handleLTPFile = (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        setLtpFile(file);
-
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          try {
-            const bstr = ev.target.result;
-            const wb   = XLSX.read(bstr, { type: "binary", cellDates: false, raw: false });
-            const ws   = wb.Sheets[wb.SheetNames[0]];
-            const data = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", raw:false });
-            const text = data.map(r => r.map(c => String(c??  "").trim()).join("\t")).join("\n");
-            const rows = parseLTPFile(text);
-            setLtpPreview(rows);
-          } catch(err) {
-            // Last resort: treat as plain TSV
-            try {
-              const rows = parseLTPFile(ev.target.result);
-              setLtpPreview(rows);
-            } catch(e2) {
-              setLtpPreview([]);
-            }
-          }
-        };
-        reader.readAsBinaryString(file);
-      };
-
-      const uploadLTP = async () => {
-        if (!ltpPreview || ltpPreview.length === 0) return;
-        setLtpUploading(true);
-        try {
-          const matched = ltpPreview.filter(r => r.matched);
-          if (matched.length === 0) {
-            notify("No matched positions found — check file format");
-            setLtpUploading(false);
-            return;
-          }
-
-          // Delete existing live_positions for this admin
-          await fetch(
-            `${SUPABASE_URL}/rest/v1/live_positions?adminId=eq.JIYA`,
-            { method:"DELETE", headers:{ "apikey":SUPABASE_ANON_KEY, "Authorization":`Bearer ${SUPABASE_ANON_KEY}`, "Prefer":"return=minimal" }}
-          );
-
-          // Insert new rows
-          const rows = matched.map(r => ({
-            id:         `LP_${r.clientId}_${r.contract.replace(/\s+/g,"_")}`,
-            clientId:   r.clientId,
-            contract:   r.contract,
-            netQty:     r.netQty,
-            side:       r.side,
-            ltp:        r.ltp,
-            token:      "",
-            exchange:   r.exchange,
-            adminId:    "JIYA",
-            capturedAt: new Date().toISOString(),
-          }));
-
-          const r = await fetch(
-            `${SUPABASE_URL}/rest/v1/live_positions`,
-            {
-              method:"POST",
-              headers:{ "Content-Type":"application/json","apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${SUPABASE_ANON_KEY}`,"Prefer":"return=minimal" },
-              body: JSON.stringify(rows),
-            }
-          );
-
-          if (r.ok) {
-            // Reload live positions
-            const liveRaw = await fetch(
-              `${SUPABASE_URL}/rest/v1/live_positions?adminId=eq.JIYA`,
-              { headers:{"apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${SUPABASE_ANON_KEY}`} }
-            ).then(res=>res.json());
-            setLivePositions(Array.isArray(liveRaw) ? liveRaw : []);
-            notify(`✅ LTP updated for ${rows.length} positions`);
-            setModal(null); setLtpFile(null); setLtpPreview(null);
-          } else {
-            notify("❌ Upload failed — " + await r.text());
-          }
-        } catch(e) {
-          notify("❌ Error: " + e.message);
-        }
-        setLtpUploading(false);
-      };
-
-      const matched   = (ltpPreview||[]).filter(r => r.matched);
-      const unmatched = (ltpPreview||[]).filter(r => !r.matched);
-
-      return (
-        <div style={overlay} onClick={() => { setModal(null); setLtpFile(null); setLtpPreview(null); }}>
-          <div style={{ ...box, width:700, maxHeight:"92vh", overflowY:"auto" }} onClick={e => e.stopPropagation()}>
-            <h3 style={{ color:C.text, marginTop:0 }}>📡 Upload LTP File (Integrated Net Position)</h3>
-
-            <div style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:10, padding:"12px 16px", marginBottom:16, fontSize:12, color:C.muted, lineHeight:1.8 }}>
-              <strong style={{color:C.text}}>Expected format (tab-separated):</strong><br/>
-              Col 0: Client ID &nbsp;|&nbsp; Col 1: Symbol &nbsp;|&nbsp; Col 2: Broker Code (skip) &nbsp;|&nbsp;
-              Col 3: Expiry &nbsp;|&nbsp; Col 4: Strike &nbsp;|&nbsp; Col 5: Opt Type &nbsp;|&nbsp;
-              Col 6: Net Qty &nbsp;|&nbsp; Col 7: Net Price (skip) &nbsp;|&nbsp; <strong style={{color:C.green}}>Col 8: Market Price (LTP)</strong><br/>
-              Rows where Net Qty = 0 are automatically skipped.
-            </div>
-
-            <div style={{ marginBottom:16 }}>
-              <input type="file" accept=".txt,.csv,.tsv,.xls,.xlsx"
-                onChange={handleLTPFile}
-                style={{ color:C.text, fontSize:13 }} />
-            </div>
-
-            {ltpPreview && (
-              <>
-                <div style={{ display:"flex", gap:12, marginBottom:12 }}>
-                  <div style={{ ...card, padding:"10px 16px", flex:1, textAlign:"center" }}>
-                    <div style={{ fontSize:11, color:C.muted }}>TOTAL ROWS</div>
-                    <div style={{ fontSize:20, fontWeight:800, color:C.text }}>{ltpPreview.length}</div>
-                  </div>
-                  <div style={{ ...card, padding:"10px 16px", flex:1, textAlign:"center" }}>
-                    <div style={{ fontSize:11, color:C.muted }}>MATCHED</div>
-                    <div style={{ fontSize:20, fontWeight:800, color:C.green }}>{matched.length}</div>
-                  </div>
-                  <div style={{ ...card, padding:"10px 16px", flex:1, textAlign:"center" }}>
-                    <div style={{ fontSize:11, color:C.muted }}>UNMATCHED</div>
-                    <div style={{ fontSize:20, fontWeight:800, color:unmatched.length>0?C.red:C.muted }}>{unmatched.length}</div>
-                  </div>
-                </div>
-
-                <div style={{ maxHeight:320, overflowY:"auto", marginBottom:16 }}>
-                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
-                    <thead>
-                      <tr style={{ position:"sticky", top:0, background:C.card }}>
-                        {["Client","Contract","Net Qty","LTP","Status"].map(h => (
-                          <th key={h} style={{ padding:"8px 10px", textAlign:"left", color:C.muted, borderBottom:`1px solid ${C.border}` }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {ltpPreview.map((r,i) => (
-                        <tr key={i} style={{ borderBottom:`1px solid ${C.border}11`, background: r.matched?"transparent":C.red+"08" }}>
-                          <td style={{ padding:"7px 10px", color:C.muted, fontSize:11 }}>{r.clientId}</td>
-                          <td style={{ padding:"7px 10px", color:r.matched?C.text:C.red }}>{r.contract}</td>
-                          <td style={{ padding:"7px 10px", color:C.text }}>{r.side} {r.netQty}</td>
-                          <td style={{ padding:"7px 10px", color:C.green, fontWeight:700 }}>₹{r.ltp}</td>
-                          <td style={{ padding:"7px 10px" }}>
-                            {r.matched
-                              ? <span style={{ color:C.green, fontSize:11 }}>✅ Matched</span>
-                              : <span style={{ color:C.red, fontSize:11 }}>❌ No match</span>}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                {unmatched.length > 0 && (
-                  <div style={{ background:C.red+"10", border:`1px solid ${C.red}33`, borderRadius:8, padding:"10px 14px", marginBottom:14, fontSize:12, color:C.muted }}>
-                    ⚠️ {unmatched.length} rows could not be matched to open positions. They will be skipped.
-                    These may be equity positions or contracts not yet in trades data.
-                  </div>
-                )}
-
-                <div style={{ display:"flex", gap:10 }}>
-                  <button onClick={uploadLTP} disabled={ltpUploading || matched.length===0}
-                    style={{ ...btn(C.green), flex:1, padding:"11px", fontSize:14, fontWeight:700,
-                      opacity: matched.length===0 ? 0.4 : 1 }}>
-                    {ltpUploading ? "⏳ Uploading..." : `✅ Upload LTP for ${matched.length} Positions`}
-                  </button>
-                  <button onClick={() => { setModal(null); setLtpFile(null); setLtpPreview(null); }}
-                    style={{ ...btn(C.muted), padding:"11px 20px" }}>Cancel</button>
-                </div>
-              </>
-            )}
-
-            {!ltpPreview && (
-              <div style={{ color:C.muted, fontSize:13, textAlign:"center", padding:"30px 0" }}>
-                Select the Integrated Net Position export file above to preview matches
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    }
 
     if (modal === "addInterest") return (
       <div style={overlay} onClick={() => setModal(null)}>
