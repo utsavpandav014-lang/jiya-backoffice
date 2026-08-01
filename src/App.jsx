@@ -1999,9 +1999,9 @@ export default function BackOffice() {
     const superPwd = superAdminRecord?.password || savedSuperPwd;
     const isSuperAdmin = userInput === "JIYA" && passInput === superPwd;
 
-    // Check sub-admin login
+    // Check sub-admin login — NEVER match JIYA as subAdmin
     const subAdmin = !isSuperAdmin
-      ? (state.admins||[]).find(a => a.username === userInput && a.password === passInput)
+      ? (state.admins||[]).find(a => a.username === userInput && a.password === passInput && a.id !== "JIYA_SUPERADMIN" && a.username !== "JIYA")
       : null;
 
     // Check client login — only from correct admin scope
@@ -2016,12 +2016,14 @@ export default function BackOffice() {
       setPage("dashboard");
       setLoginForm({ user: "", pass: "", error: "" });
     } else if (subAdmin) {
-      // Validate token expiry
-      const expiry = new Date(subAdmin.tokenExpiry);
-      if (expiry < new Date()) {
-        setLoginAttempts(prev => prev + 1);
-        setLoginForm(f => ({ ...f, error: "Your access token has expired. Contact JIYA to renew." }));
-        return;
+      // Validate token expiry — only if tokenExpiry is set
+      if (subAdmin.tokenExpiry) {
+        const expiry = new Date(subAdmin.tokenExpiry);
+        if (expiry < new Date()) {
+          setLoginAttempts(prev => prev + 1);
+          setLoginForm(f => ({ ...f, error: "Your access token has expired. Contact JIYA to renew." }));
+          return;
+        }
       }
       setLoginAttempts(0);
       setAuth({ role: "admin", adminId: subAdmin.id, plan: subAdmin.plan || "basic" });
