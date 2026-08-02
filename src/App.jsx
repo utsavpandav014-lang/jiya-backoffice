@@ -550,6 +550,48 @@ function PasswordManager({ state, setState, sb, withSync, notify, C, card, btn, 
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
+function DeleteIntradayButton({ notify, C, card, btn }) {
+  const [deleting, setDeleting] = useState(false);
+  const [confirm,  setConfirm]  = useState(false);
+  const deleteAutoTrades = async () => {
+    if (!confirm) { setConfirm(true); return; }
+    setDeleting(true); setConfirm(false);
+    try {
+      const today = new Date().toISOString().slice(0,10);
+      const SB_URL = "https://jwfucitnaqkuyzizmuve.supabase.co";
+      const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp3ZnVjaXRuYXFrdXl6aXptdXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MTIyNDIsImV4cCI6MjA5MTE4ODI0Mn0.62UKN69g9qXoSipj_JdVtMt7JNcX03e-CeVWwOC3s6A";
+      const headers = {"Content-Type":"application/json","apikey":SB_KEY,"Authorization":`Bearer ${SB_KEY}`,"Prefer":"return=minimal"};
+      const [r1,r2] = await Promise.all([
+        fetch(`${SB_URL}/rest/v1/intraday_trades?date=eq.${today}&id=like.T*`,{method:"DELETE",headers}),
+        fetch(`${SB_URL}/rest/v1/intraday_trades?date=eq.${today}&id=like.BASE_*`,{method:"DELETE",headers}),
+      ]);
+      if (r1.ok && r2.ok) notify("🗑 Today's auto-captured intraday trades deleted.");
+      else notify("❌ Delete failed");
+    } catch(e) { notify("❌ Error: "+e.message); }
+    setDeleting(false);
+  };
+  return (
+    <div style={{...card,padding:20,marginTop:16,borderLeft:`4px solid ${C.red}`}}>
+      <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:6}}>🗑 Delete Today's Auto-Captured Intraday Trades</div>
+      <div style={{color:C.muted,fontSize:12,marginBottom:14,lineHeight:1.7}}>
+        Deletes only RMS tool trades for today. Manual Excel uploads are <strong style={{color:C.green}}>not affected</strong>.
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={deleteAutoTrades} disabled={deleting}
+          style={{background:confirm?C.red:C.yellow,color:confirm?"#fff":"#000",border:"none",borderRadius:8,
+            padding:"10px 20px",fontSize:13,fontWeight:700,cursor:"pointer",opacity:deleting?0.6:1}}>
+          {deleting?"⏳ Deleting...":confirm?"⚠️ Confirm — Click to DELETE":"🗑 Delete Auto Intraday Trades (Today)"}
+        </button>
+        {confirm&&!deleting&&(
+          <button onClick={()=>setConfirm(false)}
+            style={{background:"transparent",border:`1px solid ${C.border}`,borderRadius:8,
+              padding:"10px 16px",fontSize:12,cursor:"pointer",color:C.muted}}>Cancel</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
@@ -650,6 +692,10 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
           <br/>⚡ <strong>What this enables:</strong> Live option prices for accurate MTM calculation.
         </div>
       </div>
+
+      {(auth?.role === "admin" || auth?.role === "superadmin") && (
+        <DeleteIntradayButton notify={notify} C={C} card={card} btn={btn} />
+      )}
 
       {/* ── Password Management ── */}
       <PasswordManager state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} />
@@ -1828,6 +1874,9 @@ export default function BackOffice() {
     catch(e) { return []; }
   });
   const [uploadTradeDate, setUploadTradeDate] = useState(new Date().toISOString().slice(0,10));
+  const [ltpFile, setLtpFile] = useState(null);
+  const [ltpPreview, setLtpPreview] = useState(null);
+  const [ltpUploading, setLtpUploading] = useState(false);
 
   // Normalize expiry date to standard format: DDMMMYYYY (e.g. 02APR2026)
   // Handles: "02APR2026", "02-Apr-26", "02-Apr-2026", "2026-04-02", "02/04/2026" etc.
@@ -2375,6 +2424,7 @@ export default function BackOffice() {
     { id: "ledger", label: "Ledger", icon: "ledger" },
     { id: "trades", label: "Trades & Positions", icon: "trades" },
     { id: "pnl", label: "Profit & Loss", icon: "pnl" },
+    { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
     { id: "charges", label: "Charges", icon: "charges", locked: !hasFeature(auth?.plan, "charges") },
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
     ...(hasFeature(auth?.plan, "audit") ? [{ id: "audit", label: "📋 Audit Log", icon: "ledger" }] : []),
@@ -2390,6 +2440,7 @@ export default function BackOffice() {
     { id: "ledger", label: "My Ledger", icon: "ledger" },
     { id: "trades", label: "My Positions", icon: "trades" },
     { id: "pnl", label: "My P&L", icon: "pnl" },
+    { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
     { id: "tickets", label: "Support", icon: "ticket" },
   ];
   const pages = (auth.role === "admin" || auth.role === "superadmin") ? adminPages : clientPages;
@@ -2875,6 +2926,112 @@ export default function BackOffice() {
       </div>
     );
 
+    if (page === "livemtm") {
+      const showC = auth.role === "client"
+        ? state.clients.filter(c => c.id === auth.clientId)
+        : visibleClients;
+      return (
+        <div style={{padding:"24px 28px",maxWidth:1100,margin:"0 auto"}}>
+          <div style={{fontSize:22,fontWeight:800,color:C.text,marginBottom:6}}>📡 Live MTM</div>
+          <div style={{color:C.muted,fontSize:13,marginBottom:24}}>
+            Box A = P&L till yesterday (FIFO) · Box B = Today live · Box C = A+B
+          </div>
+          {showC.map(client => {
+            const cid = client.id;
+            const allClientTrades = state.trades.filter(t => t.clientId === cid);
+            const todayStr = new Date().toISOString().slice(0,10);
+            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
+            const histTrades  = allClientTrades.filter(t => (t.date||"") < todayStr);
+            const todayTrades = allClientTrades.filter(t => (t.date||"") === todayStr);
+            const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(histTrades);
+            const ySnap = closingSnapshot[yesterdayStr] || {};
+            const boxARealized = histClosed.reduce((a,c) => a + c.totalPnl, 0);
+            const allMonthsA   = [...new Set(histTrades.map(t=>(t.date||"").slice(0,7)).filter(Boolean))];
+            const boxAExp = allMonthsA.reduce((a,m)=>a+getMonthlyCharges(cid,m),0);
+            const boxASW  = allMonthsA.reduce((a,m)=>a+getMonthlyInterest(cid,m+"_SW"),0);
+            const boxAInt = allMonthsA.reduce((a,m)=>a+getMonthlyInterest(cid,m),0);
+            const boxAOpenMTM = histOpen.reduce((s,pos)=>{
+              const closeP = ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
+              if (!closeP) return s;
+              return s + (pos.side==="SELL"?(pos.avgPrice-closeP):(closeP-pos.avgPrice))*pos.netQty;
+            },0);
+            const boxA = boxARealized + boxAOpenMTM - boxAExp - boxASW - boxAInt;
+            const { openPositions: allOpen2, closedPositions: allClosed2 } = applyFIFO([...histTrades, ...todayTrades]);
+            const carryMTM = histOpen.reduce((s,pos)=>{
+              const ltp  = getBhavClose(pos.contract);
+              const base = ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
+              if (!ltp||!base) return s;
+              return s + (pos.side==="SELL"?(base-ltp):(ltp-base))*pos.netQty;
+            },0);
+            const todayBooked = allClosed2
+              .filter(cp=>(cp.trades||[]).every(t=>(t.date||"")===todayStr))
+              .reduce((a,c)=>a+c.totalPnl,0);
+            const todayNewMTM = allOpen2
+              .filter(pos=>(pos.trades||[]).every(t=>(t.date||"")===todayStr))
+              .reduce((s,pos)=>{
+                const ltp=getBhavClose(pos.contract); if(!ltp) return s;
+                return s+(pos.side==="SELL"?(pos.avgPrice-ltp):(ltp-pos.avgPrice))*pos.netQty;
+              },0);
+            const boxB = carryMTM + todayBooked + todayNewMTM;
+            const boxC = boxA + boxB;
+            const boxes = [
+              {label:"P&L Till Yesterday",val:boxA,sub:"FIFO frozen",color:boxA>=0?C.green:C.red},
+              {label:"Today's Live P&L",  val:boxB,sub:"Intraday + carry",color:boxB>=0?C.green:C.red},
+              {label:"Total P&L",         val:boxC,sub:"A + B",color:boxC>=0?C.green:C.red,big:true},
+            ];
+            return (
+              <div key={cid} style={{...card,marginBottom:20,padding:20}}>
+                <div style={{fontWeight:700,color:C.accent,marginBottom:16}}>
+                  {client.name} <span style={{color:C.muted,fontWeight:400,fontSize:13}}>({cid})</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:16}}>
+                  {boxes.map(b=>(
+                    <div key={b.label} style={{background:C.bg,borderRadius:12,padding:"16px 18px",
+                      border:`2px solid ${b.big?b.color+"66":C.border}`,
+                      boxShadow:b.big?`0 0 16px ${b.color}22`:"none"}}>
+                      <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>{b.label}</div>
+                      <div style={{fontSize:b.big?26:22,fontWeight:800,color:b.color,marginBottom:4}}>
+                        {b.val>=0?"+":""}₹{Math.abs(b.val).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                      </div>
+                      <div style={{fontSize:10,color:C.muted}}>{b.sub}</div>
+                    </div>
+                  ))}
+                </div>
+                {(allOpen2||histOpen).length > 0 && (
+                  <div>
+                    <div style={{fontSize:11,color:C.muted,fontWeight:600,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>Open Positions</div>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                      <thead><tr>{["Contract","Side","Qty","Avg Price","LTP","MTM P&L"].map(h=>(
+                        <th key={h} style={{padding:"7px 10px",textAlign:"left",color:C.muted,borderBottom:`1px solid ${C.border}`,fontWeight:600,fontSize:11}}>{h}</th>
+                      ))}</tr></thead>
+                      <tbody>
+                        {(allOpen2.length?allOpen2:histOpen).filter(p=>p.clientId===cid).map((pos,i)=>{
+                          const ltp=getBhavClose(pos.contract);
+                          const mtm=ltp!==null?(pos.side==="SELL"?(pos.avgPrice-ltp):(ltp-pos.avgPrice))*pos.netQty:null;
+                          return (
+                            <tr key={i} style={{borderBottom:`1px solid ${C.border}11`}}>
+                              <td style={{padding:"8px 10px",color:C.text,fontWeight:600}}>{pos.contract}</td>
+                              <td style={{padding:"8px 10px",color:pos.side==="BUY"?C.green:C.red}}>{pos.side}</td>
+                              <td style={{padding:"8px 10px",color:C.text}}>{pos.netQty}</td>
+                              <td style={{padding:"8px 10px",color:C.muted}}>₹{pos.avgPrice.toFixed(2)}</td>
+                              <td style={{padding:"8px 10px",color:C.blue}}>{ltp!==null?`₹${ltp.toFixed(2)}`:"—"}</td>
+                              <td style={{padding:"8px 10px",fontWeight:700,color:mtm===null?C.muted:mtm>=0?C.green:C.red}}>
+                                {mtm===null?"—":`${mtm>=0?"+":""}₹${Math.abs(mtm).toLocaleString("en-IN",{maximumFractionDigits:0})}`}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
     if (page === "ledger") {
       const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
 
@@ -3074,6 +3231,9 @@ export default function BackOffice() {
               <div style={{display:"flex", gap:8}}>
                 <button style={btn(C.purple)} onClick={() => setModal("uploadTrades")}>
                   <Icon name="upload" size={16}/> Upload Master File
+                </button>
+                <button style={btn(C.blue)} onClick={() => {setLtpFile(null);setLtpPreview(null);setModal("uploadLTP");}}>
+                  📡 Upload LTP File
                 </button>
                 {uploadHistory.length > 0 && (
                   <button style={{...btn(C.card), border:`1px solid ${C.border}`, color:C.text, fontSize:13}}
@@ -4544,6 +4704,170 @@ export default function BackOffice() {
         </div>
       </div>
     );
+
+    if (modal === "uploadLTP") {
+      const parseLTPFile = (text) => {
+        const { openPositions } = applyFIFO(state.trades);
+        const results = [];
+        const normStr = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
+        const parseExpiry = (raw) => {
+          if (!raw) return "";
+          const s = String(raw).trim().toUpperCase();
+          const m = s.match(/(\d{1,2})[\-\/](\w{3})[\-\/](\d{2,4})/);
+          if (m) { const dd=m[1].padStart(2,"0"),mmm=m[2].slice(0,3),yy=m[3].length===2?"20"+m[3]:m[3]; return `${dd}${mmm}${yy}`; }
+          if (s.length===7&&s.slice(2,5).match(/[A-Z]/)) return s.slice(0,5)+"20"+s.slice(5);
+          return s;
+        };
+        for (const line of text.split("\n")) {
+          if (!line.trim()) continue;
+          const row = line.split("\t");
+          if (row.length < 8) continue;
+          const clientId  = normStr(row[0]);
+          const symbol    = normStr(row[1]);
+          const expiry    = (row[2]||"").trim();
+          const strike    = (row[3]||"").trim();
+          const optType   = normStr(row[4]);
+          const netQtyS   = (row[5]||"").trim();
+          const ltpS      = (row[7]||"").trim();
+          const scripCode = (row[row.length-1]||"").trim();
+          if (!clientId||!symbol) continue;
+          if (clientId.includes("USER")||clientId.startsWith("(")||clientId.startsWith("-")) continue;
+          if (optType==="NORMAL"||optType==="EQ"||optType==="EQUITY") continue;
+          const ltp = parseFloat(ltpS.replace(/,/g,"")||"0");
+          if (ltp<=0) continue;
+          const netQty = parseFloat(netQtyS.replace(/,/g,"")||"0");
+          if (netQtyS!==""&&netQty===0) continue;
+          const expNorm = parseExpiry(expiry);
+          const strikeNum = parseFloat(strike.replace(/,/g,""));
+          const isRealStrike = !isNaN(strikeNum)&&!strike.includes("-")&&!strike.includes("/")&&strikeNum>1000;
+          const strikeNorm = isRealStrike?String(Math.round(strikeNum)):"";
+          let contract = "";
+          if (["CE","PE","CA","PA"].includes(optType)&&isRealStrike) contract=`${symbol} ${strikeNorm} ${optType} ${expNorm}`.trim();
+          else if (optType===""||optType==="XX"||optType==="FUT") contract=`${symbol} FUT ${expNorm}`.trim();
+          else if (["CE","PE","CA","PA"].includes(optType)&&!isRealStrike) contract="";
+          else contract=`${symbol} FUT ${expNorm}`.trim();
+          let finalMatch = openPositions.find(p=>p.clientId===clientId&&normStr(p.contract)===normStr(contract));
+          if (!finalMatch&&contract) {
+            const tokens=normStr(contract).split(" ").filter(t=>t.length>1);
+            finalMatch=openPositions.find(p=>p.clientId===clientId&&tokens.every(tk=>normStr(p.contract).includes(tk)));
+          }
+          const side=netQty>=0?"BUY":"SELL";
+          const isBSE=["SENSEX","BANKEX","SENSEX50"].includes(symbol);
+          results.push({clientId,contract:finalMatch?finalMatch.contract:(contract||`${symbol} ${optType} ${expNorm}`),
+            ltp,netQty:Math.abs(netQty)||1,side,exchange:isBSE?"BFO":"NFO",matched:!!finalMatch,scripCode});
+        }
+        return results;
+      };
+
+      const handleLTPFile = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        setLtpFile(file);
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const loadAndParse = (XLSXLib) => {
+            try {
+              const wb = XLSXLib.read(ev.target.result, {type:"binary",raw:false});
+              const ws = wb.Sheets[wb.SheetNames[0]];
+              const data = XLSXLib.utils.sheet_to_json(ws,{header:1,defval:"",raw:false});
+              const text = data.map(r=>r.map(c=>String(c??"").trim()).join("\t")).join("\n");
+              setLtpPreview(parseLTPFile(text));
+            } catch(err) { setLtpPreview(parseLTPFile(ev.target.result)); }
+          };
+          if (window.XLSX) { loadAndParse(window.XLSX); }
+          else {
+            const s=document.createElement("script");
+            s.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+            s.onload=()=>loadAndParse(window.XLSX);
+            s.onerror=()=>{ try{setLtpPreview(parseLTPFile(ev.target.result));}catch(e){setLtpPreview([]);} };
+            document.head.appendChild(s);
+          }
+        };
+        reader.readAsBinaryString(file);
+      };
+
+      const uploadLTP = async () => {
+        if (!ltpPreview||!ltpPreview.length) return;
+        setLtpUploading(true);
+        try {
+          const matched = ltpPreview.filter(r=>r.matched);
+          if (!matched.length) { notify("No matched positions found"); setLtpUploading(false); return; }
+          await fetch(`${SUPABASE_URL}/rest/v1/live_positions?adminId=eq.JIYA`,
+            {method:"DELETE",headers:{"apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${SUPABASE_ANON_KEY}`,"Prefer":"return=minimal"}});
+          const rows = matched.map(r=>({
+            id:`LP_${r.clientId}_${r.contract.replace(/\s+/g,"_")}`,
+            clientId:r.clientId,contract:r.contract,netQty:r.netQty,side:r.side,
+            ltp:r.ltp,token:"",exchange:r.exchange,adminId:"JIYA",capturedAt:new Date().toISOString()
+          }));
+          const res = await fetch(`${SUPABASE_URL}/rest/v1/live_positions`,
+            {method:"POST",headers:{"Content-Type":"application/json","apikey":SUPABASE_ANON_KEY,
+              "Authorization":`Bearer ${SUPABASE_ANON_KEY}`,"Prefer":"return=minimal"},body:JSON.stringify(rows)});
+          if (res.ok) { notify(`✅ LTP updated for ${rows.length} positions`); setModal(null); setLtpFile(null); setLtpPreview(null); }
+          else notify("❌ Upload failed");
+        } catch(e) { notify("❌ Error: "+e.message); }
+        setLtpUploading(false);
+      };
+
+      const matched   = (ltpPreview||[]).filter(r=>r.matched);
+      const unmatched = (ltpPreview||[]).filter(r=>!r.matched);
+      return (
+        <div style={overlay} onClick={()=>{setModal(null);setLtpFile(null);setLtpPreview(null);}}>
+          <div style={{...box,width:700,maxHeight:"92vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+            <h3 style={{color:C.text,marginTop:0}}>📡 Upload LTP File (Integrated Net Position)</h3>
+            <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 16px",marginBottom:16,fontSize:12,color:C.muted,lineHeight:1.8}}>
+              Tab-separated F6 export. Col 0:Client · Col 1:Symbol · Col 2:Expiry · Col 3:Strike · Col 4:OptType · Col 5:NetQty · Col 6:NetPrice · <strong style={{color:C.green}}>Col 7:Market Price (LTP)</strong>
+            </div>
+            <div style={{marginBottom:16}}>
+              <input type="file" accept=".txt,.csv,.tsv,.xls,.xlsx" onChange={handleLTPFile}
+                style={{color:C.text,fontSize:13}}/>
+            </div>
+            {ltpPreview && (
+              <>
+                <div style={{display:"flex",gap:12,marginBottom:12}}>
+                  {[{l:"TOTAL",v:ltpPreview.length,c:C.text},{l:"MATCHED",v:matched.length,c:C.green},{l:"UNMATCHED",v:unmatched.length,c:unmatched.length>0?C.red:C.muted}].map(s=>(
+                    <div key={s.l} style={{...card,padding:"10px 16px",flex:1,textAlign:"center"}}>
+                      <div style={{fontSize:11,color:C.muted}}>{s.l}</div>
+                      <div style={{fontSize:20,fontWeight:800,color:s.c}}>{s.v}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{maxHeight:300,overflowY:"auto",marginBottom:16}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                    <thead><tr>{["Client","Contract","NetQty","LTP","Status"].map(h=>(
+                      <th key={h} style={{padding:"8px 10px",textAlign:"left",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                    ))}</tr></thead>
+                    <tbody>
+                      {ltpPreview.map((r,i)=>(
+                        <tr key={i} style={{borderBottom:`1px solid ${C.border}11`,background:r.matched?"transparent":C.red+"08"}}>
+                          <td style={{padding:"7px 10px",color:C.muted,fontSize:11}}>{r.clientId}</td>
+                          <td style={{padding:"7px 10px",color:r.matched?C.text:C.red}}>{r.contract}</td>
+                          <td style={{padding:"7px 10px",color:C.text}}>{r.side} {r.netQty}</td>
+                          <td style={{padding:"7px 10px",color:C.green,fontWeight:700}}>₹{r.ltp}</td>
+                          <td style={{padding:"7px 10px"}}>{r.matched?<span style={{color:C.green,fontSize:11}}>✅ Matched</span>:<span style={{color:C.red,fontSize:11}}>❌ No match</span>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <button onClick={uploadLTP} disabled={ltpUploading||matched.length===0}
+                    style={{...btn(C.green),flex:1,padding:"11px",fontSize:14,fontWeight:700,opacity:matched.length===0?0.4:1}}>
+                    {ltpUploading?"⏳ Uploading...":`✅ Upload LTP for ${matched.length} Positions`}
+                  </button>
+                  <button onClick={()=>{setModal(null);setLtpFile(null);setLtpPreview(null);}}
+                    style={{...btn(C.muted),padding:"11px 20px"}}>Cancel</button>
+                </div>
+              </>
+            )}
+            {!ltpPreview&&(
+              <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:"30px 0"}}>
+                Select your F6 Integrated Net Position export file above
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
 
     if (modal === "addInterest") return (
       <div style={overlay} onClick={() => setModal(null)}>
