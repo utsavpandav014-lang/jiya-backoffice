@@ -2182,7 +2182,7 @@ export default function BackOffice() {
   // ── Trade Upload (Broker Master File) ──
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadPreview, setUploadPreview] = useState(null);
-  const [uploadMode, setUploadMode] = useState("replace");
+  const [uploadMode, setUploadMode] = useState("append");
   const [uploadHistory, setUploadHistory] = useState(() => {
     try { return JSON.parse(localStorage.getItem("jiya_upload_history") || "[]"); }
     catch(e) { return []; }
@@ -2485,9 +2485,15 @@ export default function BackOffice() {
           if (existing.length < 1000) break;
         }
       }
+      // Deduplicate: skip trades whose ID already exists in DB
+      const existingIds = new Set(
+        (await sb.select("trades", `?clientId=in.(${[...new Set(newTrades.map(t=>t.clientId))].join(",")})&select=id&limit=10000`) || [])
+          .map(r => r.id)
+      );
+      const toInsert = newTrades.filter(t => !existingIds.has(t.id));
       // Insert in batches of 500
-      for (let i = 0; i < newTrades.length; i += 500) {
-        await sb.upsert("trades", newTrades.slice(i, i + 500));
+      for (let i = 0; i < toInsert.length; i += 500) {
+        await sb.upsert("trades", toInsert.slice(i, i + 500));
       }
     });
 
@@ -5139,8 +5145,8 @@ export default function BackOffice() {
             <div style={{ color: C.accent, fontWeight: 700, fontSize: 13, marginBottom: 10 }}>STEP 2 — Import Mode</div>
             <div style={{ display: "flex", gap: 8 }}>
               {[
-                { val: "append", label: "➕ Append", desc: "Add to existing trades (use for daily uploads within same month)" },
-                { val: "replace", label: "🔄 Replace", desc: "Replace current month trades only (previous months are safe)" },
+                { val: "append", label: "➕ Append (Default)", desc: "Adds new trades — existing trades untouched. Use this for daily uploads." },
+                { val: "replace", label: "🔄 Replace Month", desc: "Deletes & replaces current month trades only. Use only to fix a wrong upload." },
               ].map(m => (
                 <div key={m.val} onClick={() => setUploadMode(m.val)}
                   style={{ flex: 1, padding: "10px 14px", borderRadius: 8, cursor: "pointer",
