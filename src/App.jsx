@@ -4661,6 +4661,9 @@ export default function BackOffice() {
     if (modal === "uploadLTP") {
       const parseLTPFile = (text) => {
         const { openPositions } = applyFIFO(state.trades);
+        // Only match OPEN positions — skip closed contracts
+        const openContractKeys = new Set(openPositions.map(p => p.clientId + "||" + p.contract.trim().toUpperCase()));
+
         const results = [];
         const normStr = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
         const parseExpiry = (raw) => {
@@ -4691,23 +4694,59 @@ export default function BackOffice() {
           const netQty = parseFloat(netQtyS.replace(/,/g,"")||"0");
           if (netQtyS!==""&&netQty===0) continue;
           const expNorm = parseExpiry(expiry);
+
+          // Strike handling: may be blank (Excel col too narrow) or a real number
           const strikeNum = parseFloat(strike.replace(/,/g,""));
-          const isRealStrike = !isNaN(strikeNum)&&!strike.includes("-")&&!strike.includes("/")&&strikeNum>1000;
-          const strikeNorm = isRealStrike?String(Math.round(strikeNum)):"";
+          const isRealStrike = !isNaN(strikeNum) && !strike.includes("-") && !strike.includes("/") && strikeNum > 100;
+          const strikeNorm = isRealStrike ? String(Math.round(strikeNum)) : "";
+
+          // Build contract — if strike missing for options, find by symbol+expiry+optType
           let contract = "";
-          if (["CE","PE","CA","PA"].includes(optType)&&isRealStrike) contract=`${symbol} ${strikeNorm} ${optType} ${expNorm}`.trim();
-          else if (optType===""||optType==="XX"||optType==="FUT") contract=`${symbol} FUT ${expNorm}`.trim();
-          else if (["CE","PE","CA","PA"].includes(optType)&&!isRealStrike) contract="";
-          else contract=`${symbol} FUT ${expNorm}`.trim();
-          let finalMatch = openPositions.find(p=>p.clientId===clientId&&normStr(p.contract)===normStr(contract));
-          if (!finalMatch&&contract) {
-            const tokens=normStr(contract).split(" ").filter(t=>t.length>1);
-            finalMatch=openPositions.find(p=>p.clientId===clientId&&tokens.every(tk=>normStr(p.contract).includes(tk)));
+          let finalMatch = null;
+
+          if (["CE","PE","CA","PA"].includes(optType) && isRealStrike) {
+            // Strike present — exact match
+            contract = `${symbol} ${strikeNorm} ${optType} ${expNorm}`.trim();
+            finalMatch = openPositions.find(p =>
+              p.clientId === clientId && normStr(p.contract) === normStr(contract)
+            );
+          } else if (["CE","PE","CA","PA"].includes(optType) && !isRealStrike) {
+            // Strike missing — match by clientId + symbol + optType + expiry
+            finalMatch = openPositions.find(p => {
+              if (p.clientId !== clientId) return false;
+              const pc = normStr(p.contract);
+              return pc.startsWith(symbol) && pc.includes(optType) && pc.endsWith(expNorm);
+            });
+            contract = finalMatch ? finalMatch.contract : `${symbol} ${optType} ${expNorm}`.trim();
+          } else if (optType === "" || optType === "XX" || optType === "FUT") {
+            contract = `${symbol} FUT ${expNorm}`.trim();
+            finalMatch = openPositions.find(p =>
+              p.clientId === clientId && normStr(p.contract) === normStr(contract)
+            );
+          } else {
+            contract = `${symbol} FUT ${expNorm}`.trim();
+            finalMatch = openPositions.find(p =>
+              p.clientId === clientId && normStr(p.contract) === normStr(contract)
+            );
           }
-          const side=netQty>=0?"BUY":"SELL";
-          const isBSE=["SENSEX","BANKEX","SENSEX50"].includes(symbol);
-          results.push({clientId,contract:finalMatch?finalMatch.contract:(contract||`${symbol} ${optType} ${expNorm}`),
-            ltp,netQty:Math.abs(netQty)||1,side,exchange:isBSE?"BFO":"NFO",matched:!!finalMatch,scripCode});
+
+          // Verify match is actually OPEN (not closed)
+          if (finalMatch) {
+            const key = finalMatch.clientId + "||" + finalMatch.contract.trim().toUpperCase();
+            if (!openContractKeys.has(key)) finalMatch = null; // it's closed — skip
+          }
+
+          // Skip if no match found (don't include unmatched closed contracts)
+          const side = netQty >= 0 ? "BUY" : "SELL";
+          const isBSE = ["SENSEX","BANKEX","SENSEX50"].includes(symbol);
+          results.push({
+            clientId,
+            contract: finalMatch ? finalMatch.contract : contract,
+            ltp, netQty: Math.abs(netQty)||1, side,
+            exchange: isBSE ? "BFO" : "NFO",
+            matched: !!finalMatch,
+            scripCode
+          });
         }
         return results;
       };
