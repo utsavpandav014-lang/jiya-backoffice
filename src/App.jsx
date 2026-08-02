@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import * as XLSX from "xlsx";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -5480,22 +5479,29 @@ export default function BackOffice() {
 
         const reader = new FileReader();
         reader.onload = (ev) => {
-          try {
-            const bstr = ev.target.result;
-            const wb   = XLSX.read(bstr, { type: "binary", cellDates: false, raw: false });
-            const ws   = wb.Sheets[wb.SheetNames[0]];
-            const data = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", raw:false });
-            const text = data.map(r => r.map(c => String(c??  "").trim()).join("\t")).join("\n");
-            const rows = parseLTPFile(text);
-            setLtpPreview(rows);
-          } catch(err) {
-            // Last resort: treat as plain TSV
+          const loadAndParse = (XLSXLib) => {
             try {
-              const rows = parseLTPFile(ev.target.result);
+              const bstr = ev.target.result;
+              const wb   = XLSXLib.read(bstr, { type: "binary", raw: false });
+              const ws   = wb.Sheets[wb.SheetNames[0]];
+              const data = XLSXLib.utils.sheet_to_json(ws, { header:1, defval:"", raw:false });
+              const text = data.map(r => r.map(c => String(c ?? "").trim()).join("\t")).join("\n");
+              const rows = parseLTPFile(text);
               setLtpPreview(rows);
-            } catch(e2) {
+            } catch(err) {
               setLtpPreview([]);
             }
+          };
+
+          // Load SheetJS from CDN at runtime (not bundled)
+          if (window.XLSX) {
+            loadAndParse(window.XLSX);
+          } else {
+            const script = document.createElement("script");
+            script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+            script.onload = () => loadAndParse(window.XLSX);
+            script.onerror = () => setLtpPreview([]);
+            document.head.appendChild(script);
           }
         };
         reader.readAsBinaryString(file);
