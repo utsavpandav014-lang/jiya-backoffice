@@ -2465,33 +2465,39 @@ export default function BackOffice() {
 
     withSync(async () => {
       if (uploadMode === "replace") {
-        // Delete ONLY current month trades — locked months are NEVER touched
-        const currentMonth = new Date().toISOString().slice(0, 7); // "2026-05"
-        const lockedMonths = state.lockedMonths || [];
-        // Delete current month trades in batches
-        while (true) {
-          // Only fetch trades from current (unlocked) month
-          const existing = await sb.select("trades",
-            `?date=gte.${currentMonth}-01&date=lt.${currentMonth}-32&limit=1000&select=id`
-          );
-          if (!Array.isArray(existing) || existing.length === 0) break;
-          const ids = existing.map(r => r.id).join(",");
-          await fetch(`${sb.url("trades")}?id=in.(${ids})`, {
-            method: "DELETE",
-            headers: { ...sb.headers, "Prefer": "" }
-          });
-          if (existing.length < 1000) break;
+        // Delete trades for the SAME MONTHS as in the uploaded file
+        // NOT current calendar month — so uploading July file deletes July trades
+        const uploadedMonths = [...new Set(newTrades.map(t => (t.date||"").slice(0,7)).filter(Boolean))];
+        const lockedMonths   = state.lockedMonths || [];
+        const monthsToDelete = uploadedMonths.filter(m => !lockedMonths.includes(m));
+        for (const month of monthsToDelete) {
+          while (true) {
+            const existing = await sb.select("trades",
+              `?date=gte.${month}-01&date=lte.${month}-31&limit=1000&select=id`
+            );
+            if (!Array.isArray(existing) || existing.length === 0) break;
+            const ids = existing.map(r => r.id).join(",");
+            await fetch(`${sb.url("trades")}?id=in.(${ids})`, {
+              method: "DELETE",
+              headers: { ...sb.headers, "Prefer": "" }
+            });
+            if (existing.length < 1000) break;
+          }
         }
-      }
-      // Deduplicate: skip trades whose ID already exists in DB
-      const existingIds = new Set(
-        (await sb.select("trades", `?clientId=in.(${[...new Set(newTrades.map(t=>t.clientId))].join(",")})&select=id&limit=10000`) || [])
-          .map(r => r.id)
-      );
-      const toInsert = newTrades.filter(t => !existingIds.has(t.id));
-      // Insert in batches of 500
-      for (let i = 0; i < toInsert.length; i += 500) {
-        await sb.upsert("trades", toInsert.slice(i, i + 500));
+        // In replace mode — insert all (no dedup needed, we just deleted)
+        for (let i = 0; i < newTrades.length; i += 500) {
+          await sb.upsert("trades", newTrades.slice(i, i + 500));
+        }
+      } else {
+        // Append mode — deduplicate by ID, skip existing
+        const existingIds = new Set(
+          (await sb.select("trades", `?clientId=in.(${[...new Set(newTrades.map(t=>t.clientId))].join(",")})&select=id&limit=10000`) || [])
+            .map(r => r.id)
+        );
+        const toInsert = newTrades.filter(t => !existingIds.has(t.id));
+        for (let i = 0; i < toInsert.length; i += 500) {
+          await sb.upsert("trades", toInsert.slice(i, i + 500));
+        }
       }
     });
 
@@ -3972,60 +3978,23 @@ export default function BackOffice() {
             const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
             const grandNet      = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
-            // ── BOX A: filtered month realized + open MTM at yesterday close ──
-            // Realized = only contracts closed within selected month
-            const boxARealized = grandRealized;
-            const boxAExpenses = grandExpenses;
-            const boxASoftware = grandSoftware;
-            const boxAInterest = grandInterest;
-            const boxAOpenMTM  = histOpen.reduce((s, pos) => {
-              const closeP = getYestClose(pos.contract);
-              if (!closeP) return s;
-              return s + (pos.side === "SELL" ? (pos.avgPrice - closeP) : (closeP - pos.avgPrice)) * pos.netQty;
-            }, 0);
-            // Box A open MTM only shown when "All Time" or current month selected
+            // ── P&L: Pure FIFO on state.trades only — NO intraday mixing ──
+            const realizedPnl  = grandRealized;
+            const totalExpenses= grandExpenses;
+            const totalSoftware= grandSoftware;
+            const totalInterest= grandInterest;
+            const netPnl       = realizedPnl - totalExpenses - totalSoftware - totalInterest;
+
+            // Aliases kept for backward compat with rendering below
+            const boxARealized = realizedPnl;
+            const boxAExpenses = totalExpenses;
+            const boxASoftware = totalSoftware;
+            const boxAInterest = totalInterest;
+            const boxA         = netPnl;
+            const boxB         = 0; // Live MTM moved to separate section
+            const boxC         = netPnl;
             const isCurrentMonth = pnlDateMode === "all" ||
               (pnlDateMode === "month" && pnlMonth === new Date().toISOString().slice(0,7));
-            const boxA = boxARealized + (isCurrentMonth ? boxAOpenMTM : 0) - boxAExpenses - boxASoftware - boxAInterest;
-
-            // ── BOX B: Uses ONLY intraday_trades table ─────────────
-            const myIntradayAll = intradayTrades.filter(t => t.clientId === client.id);
-            // BASE_ records = price anchors from EOD — NEVER feed into FIFO
-            const basePriceMap  = {};
-            myIntradayAll.filter(t => (t.id||"").startsWith("BASE_")).forEach(t => {
-              basePriceMap[t.contract] = t.price;
-            });
-            const myIntraday = myIntradayAll.filter(t => !(t.id||"").startsWith("BASE_"));
-
-            // Box B only makes sense if we have today's intraday trades
-            let boxB = 0;
-            if (myIntraday.length > 0 || Object.keys(basePriceMap).length > 0) {
-              // Carry-forward MTM: (live LTP - base price) × qty
-              // Base price = F6 closing LTP from yesterday (basePriceMap), fallback to snapshot/bhavcopy
-              const carryMTM = histOpen.reduce((s, pos) => {
-                const todayLTP = getBhavClose(pos.contract);
-                const base     = basePriceMap[pos.contract] || ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
-                if (!todayLTP || !base) return s;
-                return s + (pos.side === "SELL" ? (base - todayLTP) : (todayLTP - base)) * pos.netQty;
-              }, 0);
-
-              // FIFO on real today trades ONLY (no BASE_ records)
-              const { openPositions: intOpen, closedPositions: intClosed } = applyFIFO(myIntraday);
-              const intradayBooked = intClosed.reduce((a,c) => a + c.totalPnl, 0);
-              // MTM on new positions opened today (not in histOpen)
-              const intradayNewMTM = intOpen
-                .filter(pos => !histOpen.some(h => h.contract === pos.contract && h.clientId === pos.clientId))
-                .reduce((s, pos) => {
-                  const ltp = getBhavClose(pos.contract);
-                  if (!ltp) return s;
-                  return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
-                }, 0);
-
-              boxB = carryMTM + intradayBooked + intradayNewMTM;
-            }
-
-            // ── BOX C: Total ───────────────────────────────────────
-            const boxC = boxA + boxB;
 
             // allOpen2 for expanded view
             const allOpen2 = histOpen;
@@ -4062,99 +4031,6 @@ export default function BackOffice() {
                     </div>
                   </div>
 
-                  {/* BOX B — Today's Intraday P&L (LIVE, expandable) */}
-                  {(()=>{
-                    const [expanded, setExpanded] = [
-                      todayPnlExpanded[client.id],
-                      (v) => setTodayPnlExpanded(prev => ({...prev, [client.id]: v}))
-                    ];
-                    return (
-                      <div style={{ background:C.bg, borderRadius:12, padding:"18px 20px",
-                        border:`2px solid ${boxB>=0?C.green+"44":C.red+"44"}`,
-                        boxShadow:`0 0 16px ${boxB>=0?C.green+"18":C.red+"18"}`,
-                        cursor:"pointer" }}
-                        onClick={() => setExpanded(!expanded)}>
-                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                          <div>
-                            <div style={{ fontSize:11, color:C.muted, textTransform:"uppercase",
-                              letterSpacing:1, marginBottom:6 }}>
-                              Today's P&L {angelMTMStatus==="live" ?
-                                <span style={{color:C.green}}>● Live</span> :
-                                <span style={{color:C.muted}}>○</span>}
-                            </div>
-                            <div style={{ fontSize:28, fontWeight:800,
-                              color:boxB>=0?C.green:C.red, marginBottom:4 }}>
-                              {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                            </div>
-                            <div style={{ fontSize:11, color:C.muted }}>
-                              {allOpen2?.length||open.length} pos · click to {expanded?"hide":"expand"}
-                            </div>
-                          </div>
-                          <span style={{ color:C.muted, fontSize:18 }}>{expanded?"▲":"▼"}</span>
-                        </div>
-
-                        {/* Expanded: per-position breakdown */}
-                        {expanded && (
-                          <div style={{ marginTop:14, borderTop:`1px solid ${C.border}`, paddingTop:12 }}
-                            onClick={e=>e.stopPropagation()}>
-                            {open.length === 0 ? (
-                              <div style={{color:C.muted,fontSize:12}}>No open positions</div>
-                            ) : open.map((pos,i) => {
-                              const ltp  = getBhavClose(pos.contract);
-                              const mtm  = ltp !== null
-                                ? (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty
-                                : null;
-                              return (
-                                <div key={i} style={{ display:"flex", justifyContent:"space-between",
-                                  alignItems:"center", padding:"7px 0",
-                                  borderBottom:`1px solid ${C.border}22`,
-                                  fontSize:12 }}>
-                                  <div>
-                                    <div style={{color:C.text,fontWeight:600}}>{pos.contract}</div>
-                                    <div style={{color:C.muted,fontSize:11}}>
-                                      {pos.side} {pos.netQty} @ ₹{pos.avgPrice.toFixed(2)}
-                                      {ltp !== null && ` → LTP ₹${ltp.toFixed(2)}`}
-                                    </div>
-                                  </div>
-                                  <div style={{
-                                    fontWeight:700, fontSize:13,
-                                    color: mtm===null ? C.muted : mtm>=0 ? C.green : C.red
-                                  }}>
-                                    {mtm===null ? "—" : `${mtm>=0?"+":""}₹${Math.abs(mtm).toLocaleString("en-IN",{maximumFractionDigits:0})}`}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                            <div style={{ display:"flex", justifyContent:"space-between",
-                              marginTop:10, paddingTop:8,
-                              borderTop:`1px solid ${C.border}`,
-                              fontWeight:700, fontSize:13 }}>
-                              <span style={{color:C.muted}}>Today's Total</span>
-                              <span style={{color:boxB>=0?C.green:C.red}}>
-                                {boxB>=0?"+":""}₹{Math.abs(boxB).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                              </span>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                  {/* BOX C — Total Live P&L (A + B) */}
-                  <div style={{ background:C.bg, borderRadius:12, padding:"16px 18px",
-                    border:`2px solid ${boxC>=0?C.green+"66":C.red+"66"}`,
-                    boxShadow:`0 0 20px ${boxC>=0?C.green+"22":C.red+"22"}` }}>
-                    <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase",
-                      letterSpacing:1, marginBottom:5 }}>Total P&L</div>
-                    <div style={{ fontSize:24, fontWeight:800,
-                      color:boxC>=0?C.green:C.red, marginBottom:3 }}>
-                      {boxC>=0?"+":""}₹{Math.abs(boxC).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                    </div>
-                    <div style={{ fontSize:10, color:C.muted }}>
-                      Full month P&L including live
-                    </div>
-                  </div>
-                </div>
                 {/* ── END 3-BOX P&L ── */}
 
                 {/* Grand summary cards — Row 2: Till Yesterday Breakdown */}
