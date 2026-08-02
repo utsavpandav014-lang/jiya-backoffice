@@ -1557,7 +1557,8 @@ export default function BackOffice() {
       const h = now.getHours(), m = now.getMinutes();
       const inMarket = (h > 9 || (h === 9 && m >= 0)) && (h < 15 || (h === 15 && m <= 35));
       if (!inMarket) return;
-      // Silent reload of intraday + live positions
+      // Silent reload of intraday + live positions ONLY
+      // DO NOT reload trades here — it overwrites freshly uploaded data
       try {
         const today = new Date().toISOString().slice(0,10);
         const [intradayRaw, liveRaw] = await Promise.all([
@@ -1567,8 +1568,6 @@ export default function BackOffice() {
         setIntradayTrades(Array.isArray(intradayRaw) ? intradayRaw : []);
         setLivePositions(Array.isArray(liveRaw) ? liveRaw : []);
       } catch(e) {}
-      // Full silent reload periodically
-      await loadAllData(true);
     };
     // Poll every 10 seconds during market hours
     const interval = setInterval(pollTrades, 10000);
