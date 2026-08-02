@@ -1327,6 +1327,15 @@ export default function BackOffice() {
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
 
+      // Load live positions (LTP from uploaded LTP file or F6 capture)
+      try {
+        const liveRaw = await fetch(`${SUPABASE_URL}/rest/v1/live_positions?adminId=eq.JIYA`, {
+          headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}` }
+        });
+        const liveData = await liveRaw.json();
+        if (Array.isArray(liveData)) setLivePositions(liveData);
+      } catch(e) { console.log("Live positions load error:", e.message); }
+
       // Start live prices AFTER trades are loaded
       const savedJwt = localStorage.getItem("angel_jwt");
       const savedKey = JSON.parse(localStorage.getItem("angel_creds") || "{}").apiKey;
@@ -1516,18 +1525,28 @@ export default function BackOffice() {
 
   // Get closing price for a contract from bhavcopy
   // getBhavClose: checks Angel One live MTM first, then bhavcopy
+  // Build lookup from live_positions table (uploaded LTP file or F6 capture)
+  const livePosLookup = {};
+  livePositions.forEach(p => {
+    if (p.contract && p.ltp > 0) livePosLookup[p.contract.trim().toUpperCase()] = p.ltp;
+  });
+
   const getBhavClose = (contract) => {
+    const norm = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
+    const cn = norm(contract);
+    // Priority 1: Angel One live MTM
     const direct = angelLiveMTM[contract]?.ltp;
     if (direct) return direct;
     const normalized = contract.replace(/(\d+)\.0+\s/g, (m, n) => n + ' ');
-    const norm = angelLiveMTM[normalized]?.ltp;
-    if (norm) return norm;
+    const ang = angelLiveMTM[normalized]?.ltp;
+    if (ang) return ang;
+    // Priority 2: Uploaded LTP file (live_positions table)
+    if (livePosLookup[cn]) return livePosLookup[cn];
+    // Fuzzy match: try without trailing zeros in strike
+    const fuzzy = Object.keys(livePosLookup).find(k => norm(k) === cn);
+    if (fuzzy) return livePosLookup[fuzzy];
+    // Priority 3: Bhavcopy
     if (bhavLookup[contract]?.closePrice) return bhavLookup[contract].closePrice;
-    // Debug: log first miss to understand the problem
-    if (Object.keys(angelLiveMTM).length > 0 && !window._bhavDebugDone) {
-      window._bhavDebugDone = true;
-      console.log("getBhavClose miss. Contract:", JSON.stringify(contract), "Available keys:", Object.keys(angelLiveMTM).slice(0,3));
-    }
     return null;
   };
   const getBhavSettl = (contract) => bhavLookup[contract]?.settlPrice || null;
@@ -4794,7 +4813,17 @@ export default function BackOffice() {
           const res = await fetch(`${SUPABASE_URL}/rest/v1/live_positions`,
             {method:"POST",headers:{"Content-Type":"application/json","apikey":SUPABASE_ANON_KEY,
               "Authorization":`Bearer ${SUPABASE_ANON_KEY}`,"Prefer":"return=minimal"},body:JSON.stringify(rows)});
-          if (res.ok) { notify(`✅ LTP updated for ${rows.length} positions`); setModal(null); setLtpFile(null); setLtpPreview(null); }
+          if (res.ok) {
+            // Reload livePositions so getBhavClose immediately uses new LTP
+            try {
+              const fresh = await fetch(`${SUPABASE_URL}/rest/v1/live_positions?adminId=eq.JIYA`,
+                {headers:{"apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${SUPABASE_ANON_KEY}`}});
+              const freshData = await fresh.json();
+              if (Array.isArray(freshData)) setLivePositions(freshData);
+            } catch(e) {}
+            notify(`✅ LTP updated for ${rows.length} positions — prices now showing`);
+            setModal(null); setLtpFile(null); setLtpPreview(null);
+          }
           else notify("❌ Upload failed");
         } catch(e) { notify("❌ Error: "+e.message); }
         setLtpUploading(false);
