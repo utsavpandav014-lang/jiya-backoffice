@@ -219,10 +219,10 @@ const INITIAL_STATE = {
 
 // ── Plan feature access ──────────────────────────────
 const PLAN_FEATURES = {
-  basic:   ["dashboard","clients","trades","pnl","ledger","tickets","settings"],
-  pro:     ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges"],
-  perfect: ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","audit","export"],
-  superadmin: ["dashboard","clients","trades","pnl","ledger","tickets","settings","charges","audit","export","admins","tokens"],
+  basic:   ["dashboard","clients","trades","pnl","livemtm","ledger","tickets","settings"],
+  pro:     ["dashboard","clients","trades","pnl","livemtm","ledger","tickets","settings","charges"],
+  perfect: ["dashboard","clients","trades","pnl","livemtm","ledger","tickets","settings","charges","audit","export"],
+  superadmin: ["dashboard","clients","trades","pnl","livemtm","ledger","tickets","settings","charges","audit","export","admins","tokens"],
 };
 
 const hasFeature = (plan, feature) => {
@@ -2745,6 +2745,7 @@ export default function BackOffice() {
     { id: "ledger", label: "Ledger", icon: "ledger" },
     { id: "trades", label: "Trades & Positions", icon: "trades" },
     { id: "pnl", label: "Profit & Loss", icon: "pnl" },
+    { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
     { id: "charges", label: "Charges", icon: "charges", locked: !hasFeature(auth?.plan, "charges") },
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
     ...(hasFeature(auth?.plan, "audit") ? [{ id: "audit", label: "📋 Audit Log", icon: "ledger" }] : []),
@@ -2760,6 +2761,7 @@ export default function BackOffice() {
     { id: "ledger", label: "My Ledger", icon: "ledger" },
     { id: "trades", label: "My Positions", icon: "trades" },
     { id: "pnl", label: "My P&L", icon: "pnl" },
+    { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
     { id: "tickets", label: "Support", icon: "ticket" },
   ];
   const pages = (auth.role === "admin" || auth.role === "superadmin") ? adminPages : clientPages;
@@ -3358,6 +3360,136 @@ export default function BackOffice() {
         </div>
       </div>
     );
+
+    if (page === "livemtm") {
+      // ── LIVE MTM PAGE ── 3 Boxes: P&L Till Yesterday (A) + Today's Live (B) = Total (C)
+      const showC = auth.role === "client"
+        ? state.clients.filter(c => c.id === auth.clientId)
+        : visibleClients;
+
+      return (
+        <div style={{ padding:"24px 28px", maxWidth:1100, margin:"0 auto" }}>
+          <div style={{ fontSize:22, fontWeight:800, color:C.text, marginBottom:6 }}>📡 Live MTM</div>
+          <div style={{ color:C.muted, fontSize:13, marginBottom:24 }}>
+            Box A = P&L till yesterday (FIFO + closed MTM) · Box B = Today's intraday live · Box C = A + B
+          </div>
+
+          {showC.map(client => {
+            const cid = client.id;
+            const allClientTrades = state.trades.filter(t => t.clientId === cid);
+            const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(allClientTrades);
+
+            // BOX A: Realized + open MTM at yesterday close
+            const boxARealized = histClosed.reduce((a,c) => a + c.totalPnl, 0);
+            const allMonthsA   = [...new Set(allClientTrades.map(t => (t.date||"").slice(0,7)).filter(Boolean))];
+            const boxAExp      = allMonthsA.reduce((a,m) => a + getMonthlyCharges(cid,m), 0);
+            const boxASW       = allMonthsA.reduce((a,m) => a + getMonthlyInterest(cid,m+"_SW"), 0);
+            const boxAInt      = allMonthsA.reduce((a,m) => a + getMonthlyInterest(cid,m), 0);
+            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
+            const ySnap        = closingSnapshot[yesterdayStr] || {};
+            const boxAOpenMTM  = histOpen.reduce((s, pos) => {
+              const yc = ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
+              if (!yc) return s;
+              return s + (pos.side==="SELL" ? (pos.avgPrice-yc) : (yc-pos.avgPrice)) * pos.netQty;
+            }, 0);
+            const boxA = boxARealized + boxAOpenMTM - boxAExp - boxASW - boxAInt;
+
+            // BOX B: Intraday live
+            const myIntradayAll = intradayTrades.filter(t => t.clientId === cid);
+            const basePriceMap  = {};
+            myIntradayAll.filter(t => (t.id||"").startsWith("BASE_")).forEach(t => {
+              basePriceMap[t.contract] = t.price;
+            });
+            const myIntraday = myIntradayAll.filter(t => !(t.id||"").startsWith("BASE_"));
+            let boxB = 0;
+            if (myIntraday.length > 0 || Object.keys(basePriceMap).length > 0) {
+              const carryMTM = histOpen.reduce((s, pos) => {
+                const ltp  = getBhavClose(pos.contract);
+                const base = basePriceMap[pos.contract] || ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
+                if (!ltp || !base) return s;
+                return s + (pos.side==="SELL" ? (base-ltp) : (ltp-base)) * pos.netQty;
+              }, 0);
+              const { openPositions: intOpen, closedPositions: intClosed } = applyFIFO(myIntraday);
+              const intBooked = intClosed.reduce((a,c) => a + c.totalPnl, 0);
+              const intNewMTM = intOpen
+                .filter(p => !histOpen.some(h => h.contract===p.contract))
+                .reduce((s,pos) => {
+                  const ltp = getBhavClose(pos.contract);
+                  if (!ltp) return s;
+                  return s + (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty;
+                }, 0);
+              boxB = carryMTM + intBooked + intNewMTM;
+            }
+            const boxC = boxA + boxB;
+
+            const boxes = [
+              { label:"P&L Till Yesterday", val:boxA, sub:"FIFO + closed MTM · frozen", color:boxA>=0?C.green:C.red },
+              { label:"Today's Live P&L",   val:boxB, sub:"Intraday + carry MTM · live", color:boxB>=0?C.green:C.red },
+              { label:"Total P&L",          val:boxC, sub:"A + B", color:boxC>=0?C.green:C.red, big:true },
+            ];
+
+            return (
+              <div key={cid} style={{ ...card, marginBottom:20, padding:20 }}>
+                <div style={{ fontWeight:700, color:C.accent, marginBottom:16 }}>
+                  {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({cid})</span>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+                  {boxes.map(b => (
+                    <div key={b.label} style={{
+                      background:C.bg, borderRadius:12, padding:"16px 18px",
+                      border:`2px solid ${b.big ? b.color+"66" : C.border}`,
+                      boxShadow: b.big ? `0 0 16px ${b.color}22` : "none"
+                    }}>
+                      <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase", letterSpacing:1, marginBottom:6 }}>{b.label}</div>
+                      <div style={{ fontSize:b.big?26:22, fontWeight:800, color:b.color, marginBottom:4 }}>
+                        {b.val>=0?"+":""}₹{Math.abs(b.val).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                      </div>
+                      <div style={{ fontSize:10, color:C.muted }}>{b.sub}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Open positions with live LTP */}
+                {histOpen.length > 0 && (
+                  <div style={{ marginTop:16 }}>
+                    <div style={{ fontSize:11, color:C.muted, fontWeight:600, marginBottom:8, textTransform:"uppercase", letterSpacing:1 }}>Open Positions — Live MTM</div>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                      <thead>
+                        <tr>
+                          {["Contract","Side","Qty","Avg Price","LTP","MTM P&L"].map(h => (
+                            <th key={h} style={{ padding:"7px 10px", textAlign:"left", color:C.muted, borderBottom:`1px solid ${C.border}`, fontWeight:600, fontSize:11 }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {histOpen.map((pos,i) => {
+                          const ltp = getBhavClose(pos.contract);
+                          const mtm = ltp !== null
+                            ? (pos.side==="SELL" ? (pos.avgPrice-ltp) : (ltp-pos.avgPrice)) * pos.netQty
+                            : null;
+                          return (
+                            <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
+                              <td style={{ padding:"8px 10px", color:C.text, fontWeight:600 }}>{pos.contract}</td>
+                              <td style={{ padding:"8px 10px", color:pos.side==="BUY"?C.green:C.red }}>{pos.side}</td>
+                              <td style={{ padding:"8px 10px", color:C.text }}>{pos.netQty}</td>
+                              <td style={{ padding:"8px 10px", color:C.muted }}>₹{pos.avgPrice.toFixed(2)}</td>
+                              <td style={{ padding:"8px 10px", color:C.blue }}>{ltp !== null ? `₹${ltp.toFixed(2)}` : "—"}</td>
+                              <td style={{ padding:"8px 10px", fontWeight:700, color:mtm===null?C.muted:mtm>=0?C.green:C.red }}>
+                                {mtm===null ? "—" : `${mtm>=0?"+":""}₹${Math.abs(mtm).toLocaleString("en-IN",{maximumFractionDigits:0})}`}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
 
     if (page === "ledger") {
       const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
@@ -4011,25 +4143,6 @@ export default function BackOffice() {
                     {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
                   </div>
                 )}
-
-                {/* ── THREE P&L BOXES: A + B = C ── */}
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12, marginBottom:20 }}>
-
-                  {/* BOX A — P&L Till Yesterday (FROZEN) */}
-                  <div style={{ background:C.bg, borderRadius:12, padding:"16px 18px",
-                    border:`1px solid ${C.border}` }}>
-                    <div style={{ fontSize:10, color:C.muted, textTransform:"uppercase",
-                      letterSpacing:1, marginBottom:5 }}>
-                      {isCurrentMonth ? "P&L Till Yesterday" : `Realized P&L (${pnlDateMode==="month"?pnlMonth:"Filtered"})`}
-                    </div>
-                    <div style={{ fontSize:24, fontWeight:800,
-                      color:boxA>=0?C.green:C.red, marginBottom:3 }}>
-                      {boxA>=0?"+":""}₹{Math.abs(boxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                    </div>
-                    <div style={{ fontSize:10, color:C.muted }}>
-                      Booked + yesterday's close MTM
-                    </div>
-                  </div>
 
                 {/* ── END 3-BOX P&L ── */}
 
