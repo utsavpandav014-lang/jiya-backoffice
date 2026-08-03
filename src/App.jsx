@@ -826,7 +826,22 @@ export default function BackOffice() {
   const [angelLivePrice, setAngelLivePrice] = useState({}); // { "NIFTY_23000_CE_13APR2026": 45.50, ... }
   const [angelLiveMTM,   setAngelLiveMTM]   = useState({}); // { "NIFTY 23000 CE 13APR2026": { ltp, token, exchange } }
   const [livePositions, setLivePositions]   = useState([]); // from live_positions table (LTP file upload)
-  const [manualLTP, setManualLTP]           = useState({}); // { "clientId||contract": ltp } — manual overrides
+  const [manualLTP, setManualLTP] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("jiya_manual_ltp") || "{}"); } catch(e) { return {}; }
+  });
+
+  // Save manualLTP to localStorage whenever it changes
+  useEffect(() => {
+    try { localStorage.setItem("jiya_manual_ltp", JSON.stringify(manualLTP)); } catch(e) {}
+  }, [manualLTP]);
+  const [closingData, setClosingData] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("jiya_closing_data") || "{}"); } catch(e) { return {}; }
+  });
+
+  // Save closingData to localStorage whenever it changes
+  useEffect(() => {
+    try { localStorage.setItem("jiya_closing_data", JSON.stringify(closingData)); } catch(e) {}
+  }, [closingData]); // { clientId: boxA } saved from P&L page // { "clientId||contract": ltp } — manual overrides
   const [editingLTP, setEditingLTP]         = useState(null); // { clientId, contract } currently editing
   const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
@@ -2350,7 +2365,7 @@ export default function BackOffice() {
               value={i === 0 ? loginForm.user : loginForm.pass}
               onChange={(e) => setLoginForm((f) => ({ ...f, [i === 0 ? "user" : "pass"]: e.target.value, error: "" }))}
               onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-              style={{ width: "100%", marginTop: 6, padding: "13px 16px", background: "#f8fafc", border: "1.5px solid #e2e8f0", borderRadius: 12, color: "#1a202c", fontSize: 15, outline: "none", boxSizing: "border-box", transition: "border-color 0.2s" }}
+              style={{ width: "100%", marginTop: 6, padding: "13px 16px", background: C.bg, border: "1.5px solid #e2e8f0", borderRadius: 12, color: "#1a202c", fontSize: 15, outline: "none", boxSizing: "border-box", transition: "border-color 0.2s" }}
               placeholder={i === 0 ? "Enter your User ID" : "Enter your password"}
               autoComplete={i === 1 ? "current-password" : "username"}
             />
@@ -2388,7 +2403,7 @@ export default function BackOffice() {
   };
   const card = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "20px 24px", boxShadow: "0 1px 4px rgba(0,0,0,0.06)" };
   const btn = (color = C.accent) => ({ background: color, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", cursor: "pointer", fontSize: 13, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6 });
-  const input = { width: "100%", background: "#f8fafc", border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px", color: C.text, fontSize: 14, outline: "none", boxSizing: "border-box" };
+  const input = { width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px", color: C.text, fontSize: 14, outline: "none", boxSizing: "border-box" };
   const badge = (color) => ({ background: color + "18", color: color, padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600 });
 
   // ── Sidebar ──
@@ -2904,101 +2919,96 @@ export default function BackOffice() {
       const showC = auth.role === "client"
         ? state.clients.filter(c => c.id === auth.clientId)
         : visibleClients;
+
+      // Calculate Net P&L per client from P&L page (same formula)
+      const getNetPnlForClient = (cid) => {
+        const clientTrades2 = state.trades.filter(t => t.clientId === cid);
+        const { openPositions: op, closedPositions: cp } = applyFIFO(clientTrades2);
+        const closedPnl = cp.reduce((a,c) => a + c.totalPnl, 0);
+        const openMTM2  = op.reduce((s,pos) => {
+          const manualKey = `${pos.clientId}||${pos.contract}`;
+          const ltp2 = manualLTP[manualKey] !== undefined
+            ? manualLTP[manualKey]
+            : getBhavClose(pos.contract);
+          if (ltp2 === null || ltp2 === undefined) return s;
+          return s + (pos.side==="SELL" ? (pos.avgPrice-ltp2) : (ltp2-pos.avgPrice)) * pos.netQty;
+        }, 0);
+        const allMonths2 = [...new Set(clientTrades2.map(t=>(t.date||"").slice(0,7)).filter(Boolean))];
+        const exp2 = allMonths2.reduce((a,m)=>a+getMonthlyCharges(cid,m),0);
+        const sw2  = allMonths2.reduce((a,m)=>a+getMonthlyInterest(cid,m+"_SW"),0);
+        const int2 = allMonths2.reduce((a,m)=>a+getMonthlyInterest(cid,m),0);
+        return closedPnl + openMTM2 - exp2 - sw2 - int2;
+      };
+
       return (
         <div style={{padding:"24px 28px",maxWidth:1100,margin:"0 auto"}}>
-          <div style={{fontSize:22,fontWeight:800,color:C.text,marginBottom:6}}>📡 Live MTM</div>
-          <div style={{color:C.muted,fontSize:13,marginBottom:24}}>
-            Box A = P&L till yesterday (FIFO) · Box B = Today live · Box C = A+B
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <div style={{fontSize:22,fontWeight:800,color:C.text}}>📡 Live MTM</div>
+            <button
+              onClick={() => {
+                // Copy Net P&L from P&L page into Box A for each client
+                const snapshot = {};
+                showC.forEach(client => {
+                  snapshot[client.id] = getNetPnlForClient(client.id);
+                });
+                setClosingData(snapshot);
+                notify("✅ Box A updated from P&L page");
+              }}
+              style={{...btn(C.accent),fontSize:13,padding:"10px 20px",fontWeight:700}}>
+              📥 Get Closing Data
+            </button>
           </div>
+          <div style={{color:C.muted,fontSize:13,marginBottom:24}}>
+            Box A = Net P&L copied from P&L page · Box B & C = coming soon
+          </div>
+
           {showC.map(client => {
-            const cid = client.id;
-            const allClientTrades = state.trades.filter(t => t.clientId === cid);
-            const todayStr = new Date().toISOString().slice(0,10);
-            const yesterdayStr = new Date(Date.now()-86400000).toISOString().slice(0,10);
-            const histTrades  = allClientTrades.filter(t => (t.date||"") < todayStr);
-            const todayTrades = allClientTrades.filter(t => (t.date||"") === todayStr);
-            const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(histTrades);
-            const ySnap = {}; // no closing snapshot in this version — use bhavcopy/LTP for yesterday prices
-            const boxARealized = histClosed.reduce((a,c) => a + c.totalPnl, 0);
-            const allMonthsA   = [...new Set(histTrades.map(t=>(t.date||"").slice(0,7)).filter(Boolean))];
-            const boxAExp = allMonthsA.reduce((a,m)=>a+getMonthlyCharges(cid,m),0);
-            const boxASW  = allMonthsA.reduce((a,m)=>a+getMonthlyInterest(cid,m+"_SW"),0);
-            const boxAInt = allMonthsA.reduce((a,m)=>a+getMonthlyInterest(cid,m),0);
-            const boxAOpenMTM = histOpen.reduce((s,pos)=>{
-              const closeP = ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
-              if (!closeP) return s;
-              return s + (pos.side==="SELL"?(pos.avgPrice-closeP):(closeP-pos.avgPrice))*pos.netQty;
-            },0);
-            const boxA = boxARealized + boxAOpenMTM - boxAExp - boxASW - boxAInt;
-            const { openPositions: allOpen2, closedPositions: allClosed2 } = applyFIFO([...histTrades, ...todayTrades]);
-            const carryMTM = histOpen.reduce((s,pos)=>{
-              const ltp  = getBhavClose(pos.contract);
-              const base = ySnap[pos.contract] || bhavLookup[pos.contract]?.closePrice;
-              if (!ltp||!base) return s;
-              return s + (pos.side==="SELL"?(base-ltp):(ltp-base))*pos.netQty;
-            },0);
-            const todayBooked = allClosed2
-              .filter(cp=>(cp.trades||[]).every(t=>(t.date||"")===todayStr))
-              .reduce((a,c)=>a+c.totalPnl,0);
-            const todayNewMTM = allOpen2
-              .filter(pos=>(pos.trades||[]).every(t=>(t.date||"")===todayStr))
-              .reduce((s,pos)=>{
-                const ltp=getBhavClose(pos.contract); if(!ltp) return s;
-                return s+(pos.side==="SELL"?(pos.avgPrice-ltp):(ltp-pos.avgPrice))*pos.netQty;
-              },0);
-            const boxB = carryMTM + todayBooked + todayNewMTM;
-            const boxC = boxA + boxB;
-            const boxes = [
-              {label:"P&L Till Yesterday",val:boxA,sub:"FIFO frozen",color:boxA>=0?C.green:C.red},
-              {label:"Today's Live P&L",  val:boxB,sub:"Intraday + carry",color:boxB>=0?C.green:C.red},
-              {label:"Total P&L",         val:boxC,sub:"A + B",color:boxC>=0?C.green:C.red,big:true},
-            ];
+            const cid   = client.id;
+            const boxA  = closingData[cid] !== undefined ? closingData[cid] : null;
+
             return (
               <div key={cid} style={{...card,marginBottom:20,padding:20}}>
-                <div style={{fontWeight:700,color:C.accent,marginBottom:16}}>
+                <div style={{fontWeight:700,color:C.accent,marginBottom:16,fontSize:15}}>
                   {client.name} <span style={{color:C.muted,fontWeight:400,fontSize:13}}>({cid})</span>
                 </div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:16}}>
-                  {boxes.map(b=>(
-                    <div key={b.label} style={{background:C.bg,borderRadius:12,padding:"16px 18px",
-                      border:`2px solid ${b.big?b.color+"66":C.border}`,
-                      boxShadow:b.big?`0 0 16px ${b.color}22`:"none"}}>
-                      <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>{b.label}</div>
-                      <div style={{fontSize:b.big?26:22,fontWeight:800,color:b.color,marginBottom:4}}>
-                        {b.val>=0?"+":""}₹{Math.abs(b.val).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                      </div>
-                      <div style={{fontSize:10,color:C.muted}}>{b.sub}</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+                  {/* BOX A */}
+                  <div style={{background:C.bg,borderRadius:12,padding:"20px",
+                    border:`2px solid ${boxA!==null?(boxA>=0?C.green:C.red):C.border}`}}>
+                    <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                      Box A — P&L Till Yesterday
                     </div>
-                  ))}
-                </div>
-                {(allOpen2||histOpen).length > 0 && (
-                  <div>
-                    <div style={{fontSize:11,color:C.muted,fontWeight:600,marginBottom:8,textTransform:"uppercase",letterSpacing:1}}>Open Positions</div>
-                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                      <thead><tr>{["Contract","Side","Qty","Avg Price","LTP","MTM P&L"].map(h=>(
-                        <th key={h} style={{padding:"7px 10px",textAlign:"left",color:C.muted,borderBottom:`1px solid ${C.border}`,fontWeight:600,fontSize:11}}>{h}</th>
-                      ))}</tr></thead>
-                      <tbody>
-                        {(allOpen2.length?allOpen2:histOpen).filter(p=>p.clientId===cid).map((pos,i)=>{
-                          const ltp=getBhavClose(pos.contract);
-                          const mtm=ltp!==null?(pos.side==="SELL"?(pos.avgPrice-ltp):(ltp-pos.avgPrice))*pos.netQty:null;
-                          return (
-                            <tr key={i} style={{borderBottom:`1px solid ${C.border}11`}}>
-                              <td style={{padding:"8px 10px",color:C.text,fontWeight:600}}>{pos.contract}</td>
-                              <td style={{padding:"8px 10px",color:pos.side==="BUY"?C.green:C.red}}>{pos.side}</td>
-                              <td style={{padding:"8px 10px",color:C.text}}>{pos.netQty}</td>
-                              <td style={{padding:"8px 10px",color:C.muted}}>₹{pos.avgPrice.toFixed(2)}</td>
-                              <td style={{padding:"8px 10px",color:C.blue}}>{ltp!==null?`₹${ltp.toFixed(2)}`:"—"}</td>
-                              <td style={{padding:"8px 10px",fontWeight:700,color:mtm===null?C.muted:mtm>=0?C.green:C.red}}>
-                                {mtm===null?"—":`${mtm>=0?"+":""}₹${Math.abs(mtm).toLocaleString("en-IN",{maximumFractionDigits:0})}`}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                    {boxA !== null ? (
+                      <>
+                        <div style={{fontSize:28,fontWeight:800,color:boxA>=0?C.green:C.red,marginBottom:4}}>
+                          {boxA>=0?"+":""}₹{Math.abs(boxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                        </div>
+                        <div style={{fontSize:11,color:C.muted}}>Copied from Net P&L</div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{fontSize:22,color:C.muted,marginBottom:4}}>—</div>
+                        <div style={{fontSize:11,color:C.muted}}>Click "Get Closing Data" to set</div>
+                      </>
+                    )}
                   </div>
-                )}
+                  {/* BOX B */}
+                  <div style={{background:C.bg,borderRadius:12,padding:"20px",border:`1px solid ${C.border}`}}>
+                    <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                      Box B — Today's Live P&L
+                    </div>
+                    <div style={{fontSize:22,color:C.muted,marginBottom:4}}>—</div>
+                    <div style={{fontSize:11,color:C.muted}}>Coming soon</div>
+                  </div>
+                  {/* BOX C */}
+                  <div style={{background:C.bg,borderRadius:12,padding:"20px",border:`1px solid ${C.border}`}}>
+                    <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                      Box C — Total (A + B)
+                    </div>
+                    <div style={{fontSize:22,color:C.muted,marginBottom:4}}>—</div>
+                    <div style={{fontSize:11,color:C.muted}}>Coming soon</div>
+                  </div>
+                </div>
               </div>
             );
           })}
@@ -3039,7 +3049,7 @@ export default function BackOffice() {
               {/* Client filter dropdown - admin only */}
               {isAdmin && (
                 <select value={ledgerClientFilter} onChange={e => setLedgerClientFilter(e.target.value)}
-                  style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
+                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
                   <option value="all">All Clients</option>
                   {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
                 </select>
@@ -3195,7 +3205,7 @@ export default function BackOffice() {
                   padding:"7px 12px",color:C.text,fontSize:13,outline:"none",width:220}}/>
               {isAdmin && (
                 <select value={tradesClientFilter} onChange={e => setTradesClientFilter(e.target.value)}
-                  style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
+                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
                   <option value="all">All Clients</option>
                   {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
                 </select>
@@ -3209,6 +3219,14 @@ export default function BackOffice() {
                 <button style={btn(C.blue)} onClick={() => {setLtpFile(null);setLtpPreview(null);setModal("uploadLTP");}}>
                   📡 Upload LTP File
                 </button>
+                {Object.keys(manualLTP).length > 0 && (
+                  <button style={{...btn(C.muted),fontSize:12}} onClick={() => {
+                    setManualLTP({});
+                    notify("Manual LTP cleared");
+                  }}>
+                    ✕ Clear Manual LTP ({Object.keys(manualLTP).length})
+                  </button>
+                )}
                 {uploadHistory.length > 0 && (
                   <button style={{...btn(C.card), border:`1px solid ${C.border}`, color:C.text, fontSize:13}}
                     onClick={() => setModal("uploadHistory")}>
@@ -3492,7 +3510,7 @@ export default function BackOffice() {
         </div>
               {isAdmin && (
                 <select value={pnlClientFilter} onChange={e => setPnlClientFilter(e.target.value)}
-                  style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
+                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
                   <option value="all">All Clients</option>
                   {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
                 </select>
@@ -3524,15 +3542,15 @@ export default function BackOffice() {
               ))}
               {pnlDateMode === "month" && (
                 <input type="month" value={pnlMonth} onChange={e => setPnlMonth(e.target.value)}
-                  style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none", fontWeight:600 }}/>
+                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none", fontWeight:600 }}/>
               )}
               {pnlDateMode === "range" && (
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                   <input type="date" value={pnlDateFrom} onChange={e => setPnlDateFrom(e.target.value)}
-                    style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
+                    style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
                   <span style={{ color:C.muted }}>to</span>
                   <input type="date" value={pnlDateTo} onChange={e => setPnlDateTo(e.target.value)}
-                    style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
+                    style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
                 </div>
               )}
             </div>
@@ -3553,16 +3571,23 @@ export default function BackOffice() {
             );
 
             // Grand totals
-            const grandRealized = filteredClosed.reduce((a,c) => a + c.totalPnl, 0);
+            // Closed position P&L (FIFO booked)
+            const closedPnl = filteredClosed.reduce((a,c) => a + c.totalPnl, 0);
+            // Open position MTM (using uploaded LTP / manual LTP)
+            const openMTM = open.reduce((s, pos) => {
+              const manualKey = `${pos.clientId}||${pos.contract}`;
+              const ltp = manualLTP[manualKey] !== undefined
+                ? manualLTP[manualKey]
+                : getBhavClose(pos.contract);
+              if (ltp === null || ltp === undefined) return s;
+              return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
+            }, 0);
+            // Realized P&L = Closed P&L + Open Position MTM
+            const grandRealized = closedPnl + openMTM;
             const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
             const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
             const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
-            // Live MTM on open positions
-            const grandMTM = open.reduce((s, pos) => {
-              const close = getBhavClose(pos.contract);
-              if (close === null) return s;
-              return s + (pos.side === "SELL" ? (pos.avgPrice - close) : (close - pos.avgPrice)) * pos.netQty;
-            }, 0);
+            const grandMTM = 0; // MTM now included in grandRealized
             const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
             return (
@@ -3577,13 +3602,12 @@ export default function BackOffice() {
                 {/* Grand summary cards */}
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
                   {[
-                    { label:"Realized P&L",     val:grandRealized,         color:grandRealized>=0?C.green:C.red },
-                    { label:"Expenses",          val:-grandExpenses,        color:C.yellow },
-                    { label:"Software Charges",  val:-grandSoftware,        color:C.purple },
-                    { label:"Interest",          val:-grandInterest,        color:C.red },
-                    { label:"Live MTM",          val:grandMTM,              color:grandMTM>=0?C.green:C.red },
-                    { label:"Net P&L",           val:grandNet+grandMTM,     color:(grandNet+grandMTM)>=0?C.green:C.red, big:true },
-                    { label:"Open Positions",    val:open.length,           color:C.accent, count:true },
+                    { label:"Realized P&L (Closed + Open MTM)", val:grandRealized, color:grandRealized>=0?C.green:C.red },
+                    { label:"Expenses",          val:-grandExpenses,  color:C.yellow },
+                    { label:"Software Charges",  val:-grandSoftware,  color:C.purple },
+                    { label:"Interest",          val:-grandInterest,  color:C.red },
+                    { label:"Net P&L",           val:grandNet,        color:grandNet>=0?C.green:C.red, big:true },
+                    { label:"Open Positions",    val:open.length,     color:C.accent, count:true },
                   ].map(s => (
                     <div key={s.label} style={{ background:C.bg, borderRadius:10, padding:"14px 16px",
                       border:`1px solid ${s.big ? s.color+"66" : C.border}`,
@@ -3610,10 +3634,7 @@ export default function BackOffice() {
                   <span style={{ color:C.red, fontWeight:600 }}>₹{grandInterest.toFixed(2)}</span>
                   <span>(Interest)</span>
                   <span>=</span>
-                  <span style={{ color:grandMTM>=0?C.green:C.red, fontWeight:600 }}>₹{grandMTM.toFixed(2)}</span>
-                  <span>(Live MTM)</span>
-                  <span>=</span>
-                  <span style={{ color:(grandNet+grandMTM)>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{(grandNet+grandMTM).toFixed(2)}</span>
+                  <span style={{ color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</span>
                   <span style={{ color:C.muted }}>(Net P&L)</span>
                 </div>
 
@@ -3726,7 +3747,7 @@ export default function BackOffice() {
         <div style={{ marginBottom:8 }}>
           <div style={{ color:C.muted, fontSize:11, marginBottom:3 }}>{label}</div>
           <input type="number" step="any" value={val} onChange={onChange}
-            style={{ width:"100%", background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8,
+            style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`, borderRadius:8,
               padding:"6px 10px", fontSize:12, color: color===C.text ? "#1a202c" : color, outline:"none", boxSizing:"border-box" }}
             disabled={!chargesEdit} />
         </div>
@@ -3999,13 +4020,13 @@ export default function BackOffice() {
                 </div>
 
                 {/* Original message */}
-                <div style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:10, padding:"12px 16px", marginBottom:12 }}>
+                <div style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:10, padding:"12px 16px", marginBottom:12 }}>
                   <div style={{ color:C.muted, fontSize:11, fontWeight:600, marginBottom:6, textTransform:"uppercase", letterSpacing:0.5 }}>Description</div>
                   <div style={{ color:C.text, fontSize:13, lineHeight:1.6 }}>{t.message}</div>
                   {t.attachments && t.attachments.length > 0 && (
                     <div style={{ marginTop:10, display:"flex", gap:8, flexWrap:"wrap" }}>
                       {t.attachments.map((a,i) => (
-                        <span key={i} style={{ background:"#e8f4fd", border:`1px solid #93c5fd`, borderRadius:6, padding:"3px 10px", fontSize:12, color:C.accent }}>
+                        <span key={i} style={{ background:"#e8f4fd", border:`1px solid ${C.accent}44`, borderRadius:6, padding:"3px 10px", fontSize:12, color:C.accent }}>
                           📎 {a}
                         </span>
                       ))}
@@ -4022,7 +4043,7 @@ export default function BackOffice() {
                           display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, flexShrink:0 }}>
                           {r.from==="admin" ? "A" : "C"}
                         </div>
-                        <div style={{ flex:1, background: r.from==="admin"?"#eff6ff":"#f0fdf4", border:`1px solid ${r.from==="admin"?"#bfdbfe":"#bbf7d0"}`, borderRadius:10, padding:"10px 14px" }}>
+                        <div style={{ flex:1, background: r.from==="admin"?C.accent+"15":C.green+"15", border:`1px solid ${r.from==="admin"?C.accent+"44":C.green+"44"}`, borderRadius:10, padding:"10px 14px" }}>
                           <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
                             <span style={{ color:r.from==="admin"?C.accent:C.green, fontWeight:600, fontSize:12 }}>
                               {r.from==="admin" ? "Support Team" : client?.name || "Client"}
@@ -4042,7 +4063,7 @@ export default function BackOffice() {
                     <input value={replyText} onChange={e => setReplyText(e.target.value)}
                       placeholder="Type your reply..."
                       onKeyDown={e => e.key==="Enter" && replyTicket(t.id)}
-                      style={{ ...input, flex:1, background:"#f8fafc" }} />
+                      style={{ ...input, flex:1, background:C.bg }} />
                     <button style={btn(C.accent)} onClick={() => replyTicket(t.id)}>
                       <Icon name="reply" size={14}/> Reply
                     </button>
@@ -4103,12 +4124,12 @@ export default function BackOffice() {
           <div style={{ ...card, padding:"14px 20px", marginBottom:16, display:"flex", gap:12, flexWrap:"wrap", alignItems:"center" }}>
             <span style={{ color:C.muted, fontSize:12, fontWeight:600 }}>FILTER BY:</span>
             <select value={auditClientFilter} onChange={e=>setAuditClientFilter_(e.target.value)}
-              style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
+              style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
               <option value="all">All Clients</option>
               {visibleClients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
             </select>
             <select value={auditActionFilter} onChange={e=>setAuditActionFilter_(e.target.value)}
-              style={{ background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
+              style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, cursor:"pointer" }}>
               <option value="all">All Actions</option>
               <option value="ADDED">Added</option>
               <option value="EDITED">Edited</option>
@@ -4128,7 +4149,7 @@ export default function BackOffice() {
             <div style={{ ...card, padding:0, overflow:"hidden" }}>
               <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
                 <thead>
-                  <tr style={{ background:"#f8fafc" }}>
+                  <tr style={{ background:C.bg }}>
                     {["Date/Time","Admin","Action","Client","Details"].map(h=>(
                       <th key={h} style={{ textAlign:"left", padding:"10px 16px", color:C.muted, fontSize:11,
                         fontWeight:600, textTransform:"uppercase", letterSpacing:0.5, borderBottom:`1px solid ${C.border}` }}>{h}</th>
@@ -4554,7 +4575,7 @@ export default function BackOffice() {
               </div>
             ) : (
               <input type="file" accept=".csv,.txt" onChange={handleFileUpload}
-                style={{ color: C.text, fontSize: 13, background: "#f8fafc", border: `1px solid ${C.border}`,
+                style={{ color: C.text, fontSize: 13, background: C.bg, border: `1px solid ${C.border}`,
                   borderRadius: 8, padding: "10px 14px", width: "100%", boxSizing: "border-box", cursor: "pointer" }} />
             )}
           </div>
@@ -4655,14 +4676,14 @@ export default function BackOffice() {
               File name format: <b style={{color:C.text}}>BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv</b>
             </div>
             <input type="file" accept=".csv" onChange={handleBhavUpload}
-              style={{ color:C.text, fontSize:13, background:"#f8fafc", border:`1px solid ${C.border}`,
+              style={{ color:C.text, fontSize:13, background:C.bg, border:`1px solid ${C.border}`,
                 borderRadius:8, padding:"10px 14px", width:"100%", boxSizing:"border-box", cursor:"pointer" }} />
           </div>
 
           {/* Preview */}
           {bhavPreview && (
             <div style={{ marginBottom:16 }}>
-              <div style={{ background:"#3fb95022", border:`1px solid ${C.green}44`, borderRadius:8, padding:"14px 18px", marginBottom:12 }}>
+              <div style={{ background:C.green+"22", border:`1px solid ${C.green}44`, borderRadius:8, padding:"14px 18px", marginBottom:12 }}>
                 <div style={{ color:C.green, fontWeight:700, marginBottom:10, fontSize:14 }}>✅ Bhavcopy Parsed Successfully</div>
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12, marginBottom:12 }}>
                   <div style={{background:C.bg,borderRadius:8,padding:"10px 14px"}}>
@@ -5039,7 +5060,7 @@ export default function BackOffice() {
           {/* File attachment name (simulated — no actual file upload in browser artifact) */}
           <div style={{ marginBottom:20 }}>
             <label style={{ color:C.muted, fontSize:12, fontWeight:600, display:"block", marginBottom:6, textTransform:"uppercase", letterSpacing:0.5 }}>Attach Files (optional)</label>
-            <div style={{ border:`2px dashed ${C.border}`, borderRadius:10, padding:"16px", textAlign:"center", background:"#f8fafc", cursor:"pointer" }}
+            <div style={{ border:`2px dashed ${C.border}`, borderRadius:10, padding:"16px", textAlign:"center", background:C.bg, cursor:"pointer" }}
               onClick={() => {
                 const name = prompt("Enter file name to attach (e.g. screenshot.png):");
                 if (name) setNewTicket(s=>({...s,attachments:[...(s.attachments||[]),name]}));
@@ -5049,7 +5070,7 @@ export default function BackOffice() {
               {(newTicket.attachments||[]).length > 0 && (
                 <div style={{ display:"flex", gap:8, flexWrap:"wrap", justifyContent:"center", marginTop:10 }}>
                   {newTicket.attachments.map((a,i)=>(
-                    <span key={i} style={{ background:"#eff6ff", border:`1px solid #93c5fd`, borderRadius:6, padding:"4px 10px", fontSize:12, color:C.accent }}>
+                    <span key={i} style={{ background:C.card, border:`1px solid ${C.accent}44`, borderRadius:6, padding:"4px 10px", fontSize:12, color:C.accent }}>
                       📄 {a}
                       <button onClick={e=>{e.stopPropagation();setNewTicket(s=>({...s,attachments:s.attachments.filter((_,j)=>j!==i)}))}}
                         style={{ background:"none",border:"none",color:C.red,cursor:"pointer",marginLeft:4,fontSize:12 }}>✕</button>
