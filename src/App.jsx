@@ -825,6 +825,7 @@ export default function BackOffice() {
   const [angelFeedToken, setAngelFeedToken] = useState(null);
   const [angelLivePrice, setAngelLivePrice] = useState({}); // { "NIFTY_23000_CE_13APR2026": 45.50, ... }
   const [angelLiveMTM,   setAngelLiveMTM]   = useState({}); // { "NIFTY 23000 CE 13APR2026": { ltp, token, exchange } }
+  const [livePositions, setLivePositions]   = useState([]); // from live_positions table (LTP file upload)
   const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
 
@@ -1244,16 +1245,7 @@ export default function BackOffice() {
     return () => clearInterval(keepAlive);
   }, []);
 
-  // ── Reload when user comes back to tab ──
-  useEffect(() => {
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible" && SUPABASE_CONFIGURED) {
-        loadAllData();
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, []);
+  // Tab-switch reload DISABLED — no loading screen when switching tabs
 
   // ── Auto-lock previous month on 1st of every month ──
   useEffect(() => {
@@ -2372,17 +2364,18 @@ export default function BackOffice() {
 
   // ── Colors & Styles (Light Theme) ──
   const C = {
-    bg:      "#f4f6f9",      // page background
-    sidebar: "#ffffff",      // sidebar white
-    card:    "#ffffff",      // card white
-    border:  "#e2e8f0",      // soft border
-    text:    "#1a202c",      // dark text
-    muted:   "#718096",      // grey text
-    accent:  "#3b82f6",      // blue
-    green:   "#16a34a",      // profit green
-    red:     "#dc2626",      // loss red
-    yellow:  "#d97706",      // warning amber
-    purple:  "#7c3aed",      // purple
+    bg:      "#0f1117",
+    sidebar: "#161b27",
+    card:    "#1e2535",
+    border:  "#2d3748",
+    text:    "#e2e8f0",
+    muted:   "#8892a4",
+    accent:  "#3b82f6",
+    green:   "#10b981",
+    red:     "#f87171",
+    yellow:  "#fbbf24",
+    purple:  "#a78bfa",
+    blue:    "#60a5fa",
   };
   const card = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "20px 24px", boxShadow: "0 1px 4px rgba(0,0,0,0.06)" };
   const btn = (color = C.accent) => ({ background: color, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", cursor: "pointer", fontSize: 13, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6 });
