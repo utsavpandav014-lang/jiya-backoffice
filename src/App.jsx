@@ -826,6 +826,8 @@ export default function BackOffice() {
   const [angelLivePrice, setAngelLivePrice] = useState({}); // { "NIFTY_23000_CE_13APR2026": 45.50, ... }
   const [angelLiveMTM,   setAngelLiveMTM]   = useState({}); // { "NIFTY 23000 CE 13APR2026": { ltp, token, exchange } }
   const [livePositions, setLivePositions]   = useState([]); // from live_positions table (LTP file upload)
+  const [manualLTP, setManualLTP]           = useState({}); // { "clientId||contract": ltp } — manual overrides
+  const [editingLTP, setEditingLTP]         = useState(null); // { clientId, contract } currently editing
   const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
 
@@ -1522,6 +1524,13 @@ export default function BackOffice() {
   livePositions.forEach(p => {
     if (p.contract && p.ltp > 0) livePosLookup[p.contract.trim().toUpperCase()] = p.ltp;
   });
+
+  const getBhavCloseForClient = (clientId, contract) => {
+    // Check manual LTP override first
+    const key = `${clientId}||${contract}`;
+    if (manualLTP[key] !== undefined) return manualLTP[key];
+    return getBhavClose(contract);
+  };
 
   const getBhavClose = (contract) => {
     const norm = (s) => (s||"").trim().toUpperCase().replace(/\s+/g," ");
@@ -2909,7 +2918,7 @@ export default function BackOffice() {
             const histTrades  = allClientTrades.filter(t => (t.date||"") < todayStr);
             const todayTrades = allClientTrades.filter(t => (t.date||"") === todayStr);
             const { openPositions: histOpen, closedPositions: histClosed } = applyFIFO(histTrades);
-            const ySnap = closingSnapshot[yesterdayStr] || {};
+            const ySnap = {}; // no closing snapshot in this version — use bhavcopy/LTP for yesterday prices
             const boxARealized = histClosed.reduce((a,c) => a + c.totalPnl, 0);
             const allMonthsA   = [...new Set(histTrades.map(t=>(t.date||"").slice(0,7)).filter(Boolean))];
             const boxAExp = allMonthsA.reduce((a,m)=>a+getMonthlyCharges(cid,m),0);
@@ -3260,12 +3269,17 @@ export default function BackOffice() {
                       </thead>
                       <tbody>
                         {open.map((p,i) => {
-                          const close = getBhavClose(p.contract);
-                          const mtm   = close !== null
+                          const manualKey = `${p.clientId}||${p.contract}`;
+                          const close = manualLTP[manualKey] !== undefined
+                            ? manualLTP[manualKey]
+                            : getBhavClose(p.contract);
+                          const mtm = close !== null && close !== undefined
                             ? (p.side==="SELL" ? (p.avgPrice-close) : (close-p.avgPrice)) * p.netQty
                             : null;
                           const isExp = isExpiring(p.contract);
                           const isEq  = !p.contract.includes("CE") && !p.contract.includes("PE") && !p.contract.includes("FUT");
+                          const isEditing = editingLTP?.clientId===p.clientId && editingLTP?.contract===p.contract;
+                          const hasManual = manualLTP[manualKey] !== undefined;
                           return (
                             <tr key={i} style={{ borderBottom:`1px solid ${C.border}22`, background:isExp?C.red+"11":"transparent" }}>
                               <td style={{ padding:"10px 12px", color:C.accent }}>
@@ -3276,9 +3290,49 @@ export default function BackOffice() {
                               <td style={{ padding:"10px 12px", color:C.text, fontWeight:700 }}>{p.netQty}</td>
                               <td style={{ padding:"10px 12px" }}><span style={badge(p.side==="SELL"?C.red:C.green)}>{p.side}</span></td>
                               <td style={{ padding:"10px 12px", color:C.text }}>₹{p.avgPrice}</td>
-                              <td style={{ padding:"10px 12px", color:close?C.purple:C.muted }}>{close?`₹${close}`:"—"}</td>
+                              <td style={{ padding:"10px 12px" }}>
+                                {isEditing ? (
+                                  <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                                    <input
+                                      autoFocus
+                                      type="number"
+                                      step="0.05"
+                                      defaultValue={close || ""}
+                                      style={{width:80,background:C.bg,border:`1px solid ${C.accent}`,
+                                        borderRadius:6,padding:"4px 8px",color:C.text,fontSize:12,outline:"none"}}
+                                      onKeyDown={e => {
+                                        if (e.key==="Enter") {
+                                          const v = parseFloat(e.target.value);
+                                          if (!isNaN(v) && v > 0) setManualLTP(m=>({...m,[manualKey]:v}));
+                                          setEditingLTP(null);
+                                        }
+                                        if (e.key==="Escape") setEditingLTP(null);
+                                      }}
+                                      onBlur={e => {
+                                        const v = parseFloat(e.target.value);
+                                        if (!isNaN(v) && v > 0) setManualLTP(m=>({...m,[manualKey]:v}));
+                                        setEditingLTP(null);
+                                      }}
+                                    />
+                                    <span style={{color:C.muted,fontSize:10}}>↵</span>
+                                  </div>
+                                ) : (
+                                  <span
+                                    onClick={() => setEditingLTP({clientId:p.clientId,contract:p.contract})}
+                                    title="Click to enter LTP manually"
+                                    style={{
+                                      color: hasManual ? C.yellow : close ? C.purple : C.muted,
+                                      cursor:"pointer",
+                                      borderBottom: close ? "none" : `1px dashed ${C.muted}`,
+                                      padding:"2px 0",
+                                    }}>
+                                    {close ? `₹${close}` : "— click to set"}
+                                    {hasManual && <span style={{fontSize:9,color:C.yellow,marginLeft:4}}>✎</span>}
+                                  </span>
+                                )}
+                              </td>
                               <td style={{ padding:"10px 12px", color:mtm===null?C.muted:mtm>=0?C.green:C.red, fontWeight:600 }}>
-                                {mtm===null?"—":`₹${mtm.toFixed(2)}`}
+                                {mtm===null?"—":`${mtm>=0?"+":""}₹${mtm.toFixed(2)}`}
                               </td>
                               <td style={{ padding:"10px 12px", color:p.bookedPnl>=0?C.green:C.red, fontWeight:600 }}>₹{p.bookedPnl.toLocaleString()}</td>
                             </tr>
