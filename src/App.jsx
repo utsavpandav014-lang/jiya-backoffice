@@ -697,6 +697,46 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
         <DeleteIntradayButton notify={notify} C={C} card={card} btn={btn} />
       )}
 
+      {/* ── Charges PIN Change ── */}
+      {(auth?.role === "admin" || auth?.role === "superadmin") && (() => {
+        const [oldPin, setOldPin] = useState("");
+        const [newPin, setNewPin] = useState("");
+        const [pinMsg, setPinMsg] = useState("");
+        const changePin = () => {
+          const current = (() => { try { return localStorage.getItem("jiya_charges_pin") || "2580"; } catch(e) { return "2580"; } })();
+          if (oldPin !== current) { setPinMsg("❌ Old PIN is wrong"); return; }
+          if (!/^\d{4}$/.test(newPin)) { setPinMsg("❌ New PIN must be exactly 4 digits"); return; }
+          try { localStorage.setItem("jiya_charges_pin", newPin); } catch(e) {}
+          setPinMsg("✅ PIN changed successfully");
+          setOldPin(""); setNewPin("");
+          setTimeout(() => setPinMsg(""), 3000);
+        };
+        return (
+          <div style={{...card, padding:20, marginTop:16}}>
+            <div style={{fontSize:15, fontWeight:700, color:C.text, marginBottom:6}}>🔒 Change Charges Section PIN</div>
+            <div style={{color:C.muted, fontSize:12, marginBottom:14}}>Default PIN is 2580. Change it here anytime.</div>
+            <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end"}}>
+              <div>
+                <div style={{color:C.muted, fontSize:11, marginBottom:4}}>Old PIN</div>
+                <input type="password" maxLength={4} value={oldPin}
+                  onChange={e => { setOldPin(e.target.value.replace(/[^0-9]/g,"")); setPinMsg(""); }}
+                  placeholder="Current PIN"
+                  style={{...input, width:120, fontSize:16, textAlign:"center", letterSpacing:6}}/>
+              </div>
+              <div>
+                <div style={{color:C.muted, fontSize:11, marginBottom:4}}>New PIN</div>
+                <input type="password" maxLength={4} value={newPin}
+                  onChange={e => { setNewPin(e.target.value.replace(/[^0-9]/g,"")); setPinMsg(""); }}
+                  placeholder="New PIN"
+                  style={{...input, width:120, fontSize:16, textAlign:"center", letterSpacing:6}}/>
+              </div>
+              <button onClick={changePin} style={{...btn(C.accent), padding:"10px 20px"}}>Change PIN</button>
+            </div>
+            {pinMsg && <div style={{marginTop:10, fontSize:13, color:pinMsg.startsWith("✅")?C.green:C.red}}>{pinMsg}</div>}
+          </div>
+        );
+      })()}
+
       {/* ── Password Management ── */}
       <PasswordManager state={state} setState={setState} sb={sb} withSync={withSync} notify={notify} C={C} card={card} btn={btn} input={input} />
 
@@ -830,6 +870,9 @@ export default function BackOffice() {
     try { return JSON.parse(localStorage.getItem("jiya_manual_ltp") || "{}"); } catch(e) { return {}; }
   });
 
+  const [chargesPinUnlocked, setChargesPinUnlocked] = useState(false);
+  const [chargesPinInput,    setChargesPinInput]    = useState("");
+  const [chargesPinError,    setChargesPinError]    = useState("");
   const [closingData, setClosingData] = useState(() => {
     try { return JSON.parse(localStorage.getItem("jiya_closing_data") || "{}"); } catch(e) { return {}; }
   });
@@ -2345,23 +2388,23 @@ export default function BackOffice() {
   );
 
   if (!auth) return (
-    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg, #dbeafe 0%, #ede9fe 50%, #fce7f3 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter','Segoe UI',sans-serif" }}>
-      <div style={{ background: "#fff", borderRadius: 24, padding: "52px 44px", width: 420, boxShadow: "0 24px 64px rgba(59,130,246,0.14), 0 4px 16px rgba(0,0,0,0.06)" }}>
+    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg, #0f1117 0%, #1a1f35 50%, #0f1117 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter','Segoe UI',sans-serif" }}>
+      <div style={{ background: "#161b27", borderRadius: 24, padding: "52px 44px", width: 420, boxShadow: "0 24px 64px rgba(0,0,0,0.5), 0 0 0 1px #2d3748" }}>
         <div style={{ textAlign: "center", marginBottom: 40 }}>
           <div style={{ width: 64, height: 64, background: "linear-gradient(135deg, #3b82f6, #6366f1)", borderRadius: 20, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontSize: 28, boxShadow: "0 6px 20px rgba(59,130,246,0.35)" }}>📊</div>
-          <h1 style={{ color: "#1a202c", margin: 0, fontSize: 28, fontWeight: 800, letterSpacing: "-0.5px" }}>JIYA Back Office</h1>
+          <h1 style={{ color: "#e2e8f0", margin: 0, fontSize: 28, fontWeight: 800, letterSpacing: "-0.5px" }}>JIYA Back Office</h1>
           <p style={{ color: "#718096", margin: "8px 0 0", fontSize: 14 }}>Authorized Personnel Only</p>
         </div>
 
         {lockoutUntil && Date.now() < lockoutUntil && (
-          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "12px 16px", marginBottom: 16, color: "#dc2626", fontSize: 13, textAlign: "center" }}>
+          <div style={{ background: "#f871711a", border: "1px solid #f8717144", borderRadius: 10, padding: "12px 16px", marginBottom: 16, color: "#f87171", fontSize: 13, textAlign: "center" }}>
             🔒 Account temporarily locked. Please wait.
           </div>
         )}
 
         {["User ID", "Password"].map((label, i) => (
           <div key={i} style={{ marginBottom: 16 }}>
-            <label style={{ color: "#4a5568", fontSize: 12, fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase" }}>{label}</label>
+            <label style={{ color: "#8892a4", fontSize: 12, fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase" }}>{label}</label>
             <input
               type={i === 1 ? "password" : "text"}
               value={i === 0 ? loginForm.user : loginForm.pass}
@@ -2939,6 +2982,7 @@ export default function BackOffice() {
         const exp2 = allMonths2.reduce((a,m)=>a+getMonthlyCharges(cid,m),0);
         const sw2  = allMonths2.reduce((a,m)=>a+getMonthlyInterest(cid,m+"_SW"),0);
         const int2 = allMonths2.reduce((a,m)=>a+getMonthlyInterest(cid,m),0);
+        // Net P&L = closed FIFO + open MTM - expenses (for Live MTM Box A)
         return closedPnl + openMTM2 - exp2 - sw2 - int2;
       };
 
@@ -3573,10 +3617,13 @@ export default function BackOffice() {
             );
 
             // Grand totals
-            // Closed position P&L (FIFO booked)
-            const closedPnl = filteredClosed.reduce((a,c) => a + c.totalPnl, 0);
-            // Open position MTM (using uploaded LTP / manual LTP)
-            const openMTM = open.reduce((s, pos) => {
+            // Realized P&L = CLOSED positions FIFO only — NO open MTM here
+            const grandRealized = filteredClosed.reduce((a,c) => a + c.totalPnl, 0);
+            const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
+            const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
+            const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
+            // Open MTM shown separately — never added to Realized P&L
+            const grandMTM = open.reduce((s, pos) => {
               const manualKey = `${pos.clientId}||${pos.contract}`;
               const ltp = manualLTP[manualKey] !== undefined
                 ? manualLTP[manualKey]
@@ -3584,12 +3631,6 @@ export default function BackOffice() {
               if (ltp === null || ltp === undefined) return s;
               return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
             }, 0);
-            // Realized P&L = Closed P&L + Open Position MTM
-            const grandRealized = closedPnl + openMTM;
-            const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
-            const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
-            const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
-            const grandMTM = 0; // MTM now included in grandRealized
             const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
 
             return (
@@ -3604,12 +3645,13 @@ export default function BackOffice() {
                 {/* Grand summary cards */}
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
                   {[
-                    { label:"Realized P&L (Closed + Open MTM)", val:grandRealized, color:grandRealized>=0?C.green:C.red },
-                    { label:"Expenses",          val:-grandExpenses,  color:C.yellow },
-                    { label:"Software Charges",  val:-grandSoftware,  color:C.purple },
-                    { label:"Interest",          val:-grandInterest,  color:C.red },
-                    { label:"Net P&L",           val:grandNet,        color:grandNet>=0?C.green:C.red, big:true },
-                    { label:"Open Positions",    val:open.length,     color:C.accent, count:true },
+                    { label:"Realized P&L (Closed)", val:grandRealized,          color:grandRealized>=0?C.green:C.red },
+                    { label:"Open Position MTM",     val:grandMTM,               color:grandMTM>=0?C.green:C.red },
+                    { label:"Expenses",              val:-grandExpenses,          color:C.yellow },
+                    { label:"Software Charges",      val:-grandSoftware,          color:C.purple },
+                    { label:"Interest",              val:-grandInterest,          color:C.red },
+                    { label:"Net P&L (Closed Only)", val:grandNet,               color:grandNet>=0?C.green:C.red, big:true },
+                    { label:"Open Positions",        val:open.length,             color:C.accent, count:true },
                   ].map(s => (
                     <div key={s.label} style={{ background:C.bg, borderRadius:10, padding:"14px 16px",
                       border:`1px solid ${s.big ? s.color+"66" : C.border}`,
@@ -3744,6 +3786,47 @@ export default function BackOffice() {
     }
 
     if (page === "charges" && (auth.role === "admin" || auth.role === "superadmin") && hasFeature(auth?.plan, "charges")) {
+      // ── PIN LOCK ──
+      const CHARGES_PIN = (() => {
+        try { return localStorage.getItem("jiya_charges_pin") || "2580"; } catch(e) { return "2580"; }
+      })();
+      if (!chargesPinUnlocked) return (
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}>
+          <div style={{...card,padding:40,width:340,textAlign:"center"}}>
+            <div style={{fontSize:32,marginBottom:12}}>🔒</div>
+            <div style={{fontSize:18,fontWeight:700,color:C.text,marginBottom:6}}>Charges Section Locked</div>
+            <div style={{color:C.muted,fontSize:13,marginBottom:24}}>Enter 4-digit PIN to access</div>
+            <input
+              type="password"
+              maxLength={4}
+              value={chargesPinInput}
+              onChange={e => { setChargesPinInput(e.target.value.replace(/\D/g,"")); setChargesPinError(""); }}
+              onKeyDown={e => {
+                if (e.key === "Enter") {
+                  if (chargesPinInput === CHARGES_PIN) {
+                    setChargesPinUnlocked(true); setChargesPinInput(""); setChargesPinError("");
+                  } else {
+                    setChargesPinError("❌ Wrong PIN"); setChargesPinInput("");
+                  }
+                }
+              }}
+              placeholder="● ● ● ●"
+              style={{width:"100%",textAlign:"center",fontSize:28,letterSpacing:12,padding:"14px",
+                background:C.bg,border:`2px solid ${chargesPinError?C.red:C.border}`,borderRadius:12,
+                color:C.text,outline:"none",boxSizing:"border-box",marginBottom:8}}
+            />
+            {chargesPinError && <div style={{color:C.red,fontSize:13,marginBottom:8}}>{chargesPinError}</div>}
+            <button onClick={() => {
+              if (chargesPinInput === CHARGES_PIN) {
+                setChargesPinUnlocked(true); setChargesPinInput(""); setChargesPinError("");
+              } else { setChargesPinError("❌ Wrong PIN"); setChargesPinInput(""); }
+            }} style={{...btn(C.accent),width:"100%",padding:"12px",fontSize:15,justifyContent:"center"}}>
+              Unlock
+            </button>
+          </div>
+        </div>
+      );
+      // PIN unlocked — show charges page normally below
       const currentCfg = state.chargesHistory.slice().sort((a,b)=>b.effectiveFrom.localeCompare(a.effectiveFrom))[0] || DEFAULT_CHARGES;
       const numFld = (label, val, onChange, color=C.text) => (
         <div style={{ marginBottom:8 }}>
@@ -4028,7 +4111,7 @@ export default function BackOffice() {
                   {t.attachments && t.attachments.length > 0 && (
                     <div style={{ marginTop:10, display:"flex", gap:8, flexWrap:"wrap" }}>
                       {t.attachments.map((a,i) => (
-                        <span key={i} style={{ background:"#e8f4fd", border:`1px solid ${C.accent}44`, borderRadius:6, padding:"3px 10px", fontSize:12, color:C.accent }}>
+                        <span key={i} style={{ background:`${C.accent}15`, border:`1px solid ${C.accent}44`, borderRadius:6, padding:"3px 10px", fontSize:12, color:C.accent }}>
                           📎 {a}
                         </span>
                       ))}
@@ -4381,7 +4464,7 @@ export default function BackOffice() {
       );
     }
     const overlay = { position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 };
-    const box = { background: "#fff", border: `1px solid ${C.border}`, borderRadius: 16, padding: 32, width: 480, maxWidth: "90vw", boxShadow: "0 20px 60px rgba(0,0,0,0.15)" };
+    const box = { background: "#1e2535", border: `1px solid ${C.border}`, borderRadius: 16, padding: 32, width: 480, maxWidth: "90vw", boxShadow: "0 20px 60px rgba(0,0,0,0.5)" };
     const field = (label, key, obj, setObj, type = "text", opts = null) => (
       <div style={{ marginBottom: 14 }}>
         <label style={{ color: C.muted, fontSize: 12, display: "block", marginBottom: 5 }}>{label}</label>
