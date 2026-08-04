@@ -2663,7 +2663,7 @@ export default function BackOffice() {
 
               {/* Current Month Net P&L */}
               {(() => {
-                const cmPnl  = clientNetPnlForMonth(client.id, currentMonthStr);
+                const cmPnl  = clientNetPnlForMonth(currentClient?.id || auth?.clientId, currentMonthStr);
                 const cmCol  = cmPnl >= 0 ? C.green : C.red;
                 return (
                   <div style={{...card,padding:"20px 22px",borderTop:`3px solid ${cmCol}`,cursor:"pointer"}}
