@@ -870,7 +870,9 @@ export default function BackOffice() {
     try { return JSON.parse(localStorage.getItem("jiya_manual_ltp") || "{}"); } catch(e) { return {}; }
   });
 
-  const [chargesPinUnlocked, setChargesPinUnlocked] = useState(false);
+  const [chargesPinUnlocked, setChargesPinUnlocked] = useState(() => {
+    try { return sessionStorage.getItem("jiya_charges_unlocked") === "1"; } catch(e) { return false; }
+  });
   const [chargesPinInput,    setChargesPinInput]    = useState("");
   const [chargesPinError,    setChargesPinError]    = useState("");
   const [closingData, setClosingData] = useState(() => {
@@ -3804,7 +3806,7 @@ export default function BackOffice() {
               onKeyDown={e => {
                 if (e.key === "Enter") {
                   if (chargesPinInput === CHARGES_PIN) {
-                    setChargesPinUnlocked(true); setChargesPinInput(""); setChargesPinError("");
+                    setChargesPinUnlocked(true); setChargesPinInput(""); setChargesPinError(""); try{sessionStorage.setItem("jiya_charges_unlocked","1");}catch(e){}
                   } else {
                     setChargesPinError("❌ Wrong PIN"); setChargesPinInput("");
                   }
@@ -3818,7 +3820,7 @@ export default function BackOffice() {
             {chargesPinError && <div style={{color:C.red,fontSize:13,marginBottom:8}}>{chargesPinError}</div>}
             <button onClick={() => {
               if (chargesPinInput === CHARGES_PIN) {
-                setChargesPinUnlocked(true); setChargesPinInput(""); setChargesPinError("");
+                setChargesPinUnlocked(true); setChargesPinInput(""); setChargesPinError(""); try{sessionStorage.setItem("jiya_charges_unlocked","1");}catch(e){}
               } else { setChargesPinError("❌ Wrong PIN"); setChargesPinInput(""); }
             }} style={{...btn(C.accent),width:"100%",padding:"12px",fontSize:15,justifyContent:"center"}}>
               Unlock
@@ -3833,7 +3835,7 @@ export default function BackOffice() {
           <div style={{ color:C.muted, fontSize:11, marginBottom:3 }}>{label}</div>
           <input type="number" step="any" value={val} onChange={onChange}
             style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`, borderRadius:8,
-              padding:"6px 10px", fontSize:12, color: color===C.text ? "#1a202c" : color, outline:"none", boxSizing:"border-box" }}
+              padding:"6px 10px", fontSize:12, color: color, outline:"none", boxSizing:"border-box" }}
             disabled={!chargesEdit} />
         </div>
       );
