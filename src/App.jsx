@@ -1936,11 +1936,22 @@ export default function BackOffice() {
   };
 
   const parseBrokerCSV = (text) => {
-    // Normalize line endings (Windows \r\n, Mac \r, Unix \n)
+    // Normalize line endings
     const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim().split("\n");
     if (lines.length < 2) return { rows: [], warnings: ["File appears empty"] };
 
-    const rawHeader = splitCSVLine(lines[0]);
+    // Auto-detect delimiter: tab or comma
+    const firstLine = lines[0];
+    const tabCount   = (firstLine.match(/\t/g) || []).length;
+    const commaCount = (firstLine.match(/,/g) || []).length;
+    const delimiter  = tabCount >= commaCount ? "\t" : ",";
+
+    const splitLine = (line) => {
+      if (delimiter === "\t") return line.split("\t").map(c => c.replace(/"/g,"").trim());
+      return splitCSVLine(line);
+    };
+
+    const rawHeader = splitLine(lines[0]);
     const header = rawHeader.map(h => h.replace(/"/g, "").trim());
     const headerLow = header.map(h => h.toLowerCase().replace(/\s+/g, " ").trim());
     const totalCols = header.length;
@@ -2006,7 +2017,7 @@ export default function BackOffice() {
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
       if (!line.trim()) continue;
-      const cols = splitCSVLine(line);
+      const cols = splitLine(line);
       if (cols.length < 3) continue;
 
       const clientId   = idxUserId >= 0    ? cols[idxUserId]?.replace(/"/g,"").trim()    : "";
