@@ -1770,6 +1770,31 @@ export default function BackOffice() {
   const clientOpenPos = (cid) => openPositions.filter((p) => p.clientId === cid);
   const clientClosedPos = (cid) => closedPositions.filter((p) => p.clientId === cid);
 
+  // ── Shared helpers used across pages ──────────────────────────
+  const currentMonthStr = new Date().toISOString().slice(0,7);
+
+  const clientNetPnlForMonth = (clientId, yearMonth) => {
+    if (!clientId || !yearMonth) return 0;
+    const ct2 = state.trades.filter(t => t.clientId === clientId);
+    const { openPositions: op2, closedPositions: cp2 } = applyFIFO(ct2);
+    const closedPnl2 = cp2.filter(cp => {
+      const dates = (cp.trades||[]).map(t => (t.date||"").slice(0,7)).filter(Boolean).sort();
+      return dates[dates.length-1] === yearMonth;
+    }).reduce((a,c) => a + c.totalPnl, 0);
+    const isCurrentMo = yearMonth === currentMonthStr;
+    const openMTM2 = isCurrentMo ? op2.reduce((s, pos) => {
+      const mk = `${pos.clientId}||${pos.contract}`;
+      const ltp2 = manualLTP[mk] !== undefined ? manualLTP[mk] : getBhavClose(pos.contract);
+      if (ltp2 == null) return s;
+      return s + (pos.side==="SELL" ? (pos.avgPrice-ltp2) : (ltp2-pos.avgPrice)) * pos.netQty;
+    }, 0) : 0;
+    const exp2 = getMonthlyCharges(clientId, yearMonth);
+    const sw2  = getMonthlyInterest(clientId, yearMonth+"_SW");
+    const int2 = getMonthlyInterest(clientId, yearMonth);
+    return closedPnl2 + openMTM2 - exp2 - sw2 - int2;
+  };
+
+
   // ── Data isolation by adminId ──────────────────────
   const visibleClients = (() => {
     if (auth?.role === "superadmin") return state.clients; // JIYA sees all
