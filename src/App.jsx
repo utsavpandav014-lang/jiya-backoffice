@@ -2652,14 +2652,24 @@ export default function BackOffice() {
 
             {/* 3 stat cards */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:24}}>
-              {/* Realized P&L */}
-              <div style={{...card,padding:"20px 22px"}}>
-                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>All-Time Realized</div>
-                <div style={{fontSize:26,fontWeight:800,color:myData.realizedPnl>=0?C.green:C.red,lineHeight:1}}>
-                  {myData.realizedPnl>=0?"+":""}₹{Math.abs(myData.realizedPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
-                </div>
-                <div style={{fontSize:11,color:C.muted,marginTop:6}}>Booked profits/losses</div>
-              </div>
+              {/* This Month Realized P&L (closed only) */}
+              {(() => {
+                const myClosedPnl = clientClosedPos(currentClient?.id || auth?.clientId)
+                  .filter(cp => {
+                    const dates = cp.trades.map(t=>(t.date||"").slice(0,7)).filter(Boolean).sort();
+                    return dates[dates.length-1] === currentMonthStr;
+                  })
+                  .reduce((a,c) => a + c.totalPnl, 0);
+                return (
+                  <div style={{...card,padding:"20px 22px"}}>
+                    <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>This Month Realized</div>
+                    <div style={{fontSize:26,fontWeight:800,color:myClosedPnl>=0?C.green:C.red,lineHeight:1}}>
+                      {myClosedPnl>=0?"+":""}₹{Math.abs(myClosedPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                    </div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:6}}>Closed positions only</div>
+                  </div>
+                );
+              })()}
 
               {/* Current Month Net P&L */}
               {(() => {
@@ -2980,6 +2990,95 @@ export default function BackOffice() {
     );
 
     if (page === "livemtm") {
+      // ── COMING SOON BANNER ──────────────────────────────────
+      return (
+        <div style={{ minHeight:"80vh", display:"flex", alignItems:"center", justifyContent:"center",
+          padding:"40px 20px", position:"relative", overflow:"hidden" }}>
+
+          {/* Blurred background — same live MTM boxes style */}
+          <div style={{ position:"absolute", inset:0, zIndex:0,
+            background:`linear-gradient(135deg, ${C.accent}08 0%, ${C.purple}08 50%, ${C.green}08 100%)` }}>
+            {/* Ghost boxes in background */}
+            {[0,1,2].map(i => (
+              <div key={i} style={{
+                position:"absolute",
+                top: i===0?"10%":i===1?"30%":"55%",
+                left: i===0?"5%":i===1?"35%":"65%",
+                width:240, height:110, borderRadius:16,
+                background: i===0?C.accent+"08":i===1?C.purple+"08":C.green+"08",
+                border:`1px solid ${i===0?C.accent:i===1?C.purple:C.green}18`,
+                filter:"blur(2px)",
+              }}/>
+            ))}
+          </div>
+
+          {/* Main banner */}
+          <div style={{
+            position:"relative", zIndex:1, textAlign:"center",
+            background:`linear-gradient(135deg, ${C.card}ee, ${C.card}cc)`,
+            border:`1px solid ${C.border}`,
+            borderRadius:24, padding:"56px 64px", maxWidth:520,
+            boxShadow:`0 32px 80px rgba(0,0,0,0.4), 0 0 0 1px ${C.border}`,
+            backdropFilter:"blur(20px)",
+          }}>
+
+            {/* Animated icon */}
+            <div style={{
+              width:80, height:80, borderRadius:"50%",
+              background:`linear-gradient(135deg, ${C.accent}, ${C.purple})`,
+              display:"flex", alignItems:"center", justifyContent:"center",
+              fontSize:36, margin:"0 auto 24px",
+              boxShadow:`0 8px 32px ${C.accent}44`,
+              animation:"pulse 2s ease-in-out infinite",
+            }}>📡</div>
+
+            <div style={{ fontSize:32, fontWeight:900, color:C.text,
+              letterSpacing:"-0.5px", marginBottom:8 }}>
+              Live MTM
+            </div>
+
+            <div style={{
+              display:"inline-block",
+              background:`linear-gradient(135deg, ${C.accent}, ${C.purple})`,
+              color:"#fff", fontSize:11, fontWeight:800,
+              letterSpacing:3, textTransform:"uppercase",
+              padding:"6px 18px", borderRadius:20, marginBottom:24,
+            }}>
+              Coming Soon
+            </div>
+
+            <div style={{ color:C.muted, fontSize:15, lineHeight:1.8, marginBottom:32 }}>
+              Live intraday P&L tracking is under development.<br/>
+              Box A · Box B · Box C — real-time calculations<br/>
+              will be available here very soon.
+            </div>
+
+            <div style={{ display:"flex", gap:8, justifyContent:"center", flexWrap:"wrap" }}>
+              {["Real-time MTM","Intraday P&L","Auto Capture","Live LTP"].map(tag => (
+                <span key={tag} style={{
+                  background:C.bg, border:`1px solid ${C.border}`,
+                  borderRadius:20, padding:"5px 14px",
+                  fontSize:12, color:C.muted, fontWeight:500,
+                }}>✦ {tag}</span>
+              ))}
+            </div>
+
+            <div style={{ marginTop:32, paddingTop:24, borderTop:`1px solid ${C.border}`,
+              fontSize:12, color:C.muted }}>
+              For queries contact <span style={{color:C.accent,fontWeight:600}}>JIYA Back Office</span>
+            </div>
+          </div>
+
+          <style>{`
+            @keyframes pulse {
+              0%, 100% { box-shadow: 0 8px 32px ${C.accent}44; transform: scale(1); }
+              50% { box-shadow: 0 8px 48px ${C.accent}88; transform: scale(1.05); }
+            }
+          `}</style>
+        </div>
+      );
+      // eslint-disable-next-line no-unreachable
+
       const showC = auth.role === "client"
         ? state.clients.filter(c => c.id === auth.clientId)
         : visibleClients;
@@ -3564,10 +3663,12 @@ export default function BackOffice() {
               const software = allMonthsForClient.reduce((a,m)=>a+getMonthlyInterest(client.id,m+"_SW"),0);
               grandNet += (realized - expenses - interest - software);
             });
+            const thisMonthNet = visibleClients.reduce((s,c) => s + clientNetPnlForMonth(c.id, currentMonthStr), 0);
             return (
               <span style={{ fontSize:12, color:C.muted, fontWeight:400 }}>
-                All Time Net P&L: <span style={{ color:grandNet>=0?C.green:C.red, fontWeight:600 }}>
-                  ₹{grandNet.toLocaleString("en-IN",{maximumFractionDigits:0})}
+                {new Date().toLocaleString("en-IN",{month:"long",year:"numeric"})} Net P&L:&nbsp;
+                <span style={{ color:thisMonthNet>=0?C.green:C.red, fontWeight:600 }}>
+                  {thisMonthNet>=0?"+":""}₹{Math.abs(thisMonthNet).toLocaleString("en-IN",{maximumFractionDigits:0})}
                 </span>
               </span>
             );
