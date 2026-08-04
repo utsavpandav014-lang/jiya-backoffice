@@ -830,19 +830,10 @@ export default function BackOffice() {
     try { return JSON.parse(localStorage.getItem("jiya_manual_ltp") || "{}"); } catch(e) { return {}; }
   });
 
-  // Save manualLTP to localStorage whenever it changes
-  useEffect(() => {
-    try { localStorage.setItem("jiya_manual_ltp", JSON.stringify(manualLTP)); } catch(e) {}
-  }, [manualLTP]);
   const [closingData, setClosingData] = useState(() => {
     try { return JSON.parse(localStorage.getItem("jiya_closing_data") || "{}"); } catch(e) { return {}; }
   });
-
-  // Save closingData to localStorage whenever it changes
-  useEffect(() => {
-    try { localStorage.setItem("jiya_closing_data", JSON.stringify(closingData)); } catch(e) {}
-  }, [closingData]); // { clientId: boxA } saved from P&L page // { "clientId||contract": ltp } — manual overrides
-  const [editingLTP, setEditingLTP]         = useState(null); // { clientId, contract } currently editing
+  const [editingLTP, setEditingLTP] = useState(null);
   const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
 
@@ -2365,7 +2356,7 @@ export default function BackOffice() {
               value={i === 0 ? loginForm.user : loginForm.pass}
               onChange={(e) => setLoginForm((f) => ({ ...f, [i === 0 ? "user" : "pass"]: e.target.value, error: "" }))}
               onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-              style={{ width: "100%", marginTop: 6, padding: "13px 16px", background: C.bg, border: "1.5px solid #e2e8f0", borderRadius: 12, color: "#1a202c", fontSize: 15, outline: "none", boxSizing: "border-box", transition: "border-color 0.2s" }}
+              style={{ width: "100%", marginTop: 6, padding: "13px 16px", background: "#1e2535", border: "1.5px solid #2d3748", borderRadius: 12, color: "#e2e8f0", fontSize: 15, outline: "none", boxSizing: "border-box", transition: "border-color 0.2s" }}
               placeholder={i === 0 ? "Enter your User ID" : "Enter your password"}
               autoComplete={i === 1 ? "current-password" : "username"}
             />
@@ -2951,7 +2942,7 @@ export default function BackOffice() {
                 showC.forEach(client => {
                   snapshot[client.id] = getNetPnlForClient(client.id);
                 });
-                setClosingData(snapshot);
+                setClosingData(snapshot); try{localStorage.setItem("jiya_closing_data",JSON.stringify(snapshot));}catch(e){}
                 notify("✅ Box A updated from P&L page");
               }}
               style={{...btn(C.accent),fontSize:13,padding:"10px 20px",fontWeight:700}}>
@@ -3221,7 +3212,7 @@ export default function BackOffice() {
                 </button>
                 {Object.keys(manualLTP).length > 0 && (
                   <button style={{...btn(C.muted),fontSize:12}} onClick={() => {
-                    setManualLTP({});
+                    setManualLTP({}); try{localStorage.removeItem("jiya_manual_ltp");}catch(e){}
                     notify("Manual LTP cleared");
                   }}>
                     ✕ Clear Manual LTP ({Object.keys(manualLTP).length})
@@ -3321,14 +3312,14 @@ export default function BackOffice() {
                                       onKeyDown={e => {
                                         if (e.key==="Enter") {
                                           const v = parseFloat(e.target.value);
-                                          if (!isNaN(v) && v > 0) setManualLTP(m=>({...m,[manualKey]:v}));
+                                          if (!isNaN(v) && v > 0) { const next={...manualLTP,[manualKey]:v}; setManualLTP(next); try{localStorage.setItem("jiya_manual_ltp",JSON.stringify(next));}catch(e){} }
                                           setEditingLTP(null);
                                         }
                                         if (e.key==="Escape") setEditingLTP(null);
                                       }}
                                       onBlur={e => {
                                         const v = parseFloat(e.target.value);
-                                        if (!isNaN(v) && v > 0) setManualLTP(m=>({...m,[manualKey]:v}));
+                                        if (!isNaN(v) && v > 0) { const next={...manualLTP,[manualKey]:v}; setManualLTP(next); try{localStorage.setItem("jiya_manual_ltp",JSON.stringify(next));}catch(e){} }
                                         setEditingLTP(null);
                                       }}
                                     />
