@@ -2211,12 +2211,20 @@ export default function BackOffice() {
           await sb.upsert("trades", newTrades.slice(i, i + 500));
         }
       } else {
-        // Append mode: deduplicate by ID
-        const existingIds = new Set(
-          (await sb.select("trades", `?clientId=in.(${[...new Set(newTrades.map(t=>t.clientId))].join(",")})&select=id&limit=10000`) || [])
-            .map(r => r.id)
+        // Append mode: deduplicate by contract+side+qty+price+date+time (not ID — IDs are new each upload)
+        const clientIds = [...new Set(newTrades.map(t=>t.clientId))].join(",");
+        const existing  = await sb.select("trades",
+          `?clientId=in.(${clientIds})&select=contract,side,qty,price,date,time&limit=20000`
+        ) || [];
+        const existingKeys = new Set(
+          existing.map(r => `${r.contract}|${r.side}|${r.qty}|${r.price}|${r.date}|${r.time}`)
         );
-        const toInsert = newTrades.filter(t => !existingIds.has(t.id));
+        const toInsert = newTrades.filter(t =>
+          !existingKeys.has(`${t.contract}|${t.side}|${t.qty}|${t.price}|${t.date}|${t.time}`)
+        );
+        if (toInsert.length < newTrades.length) {
+          console.log(`Dedup: skipped ${newTrades.length - toInsert.length} duplicate trades`);
+        }
         for (let i = 0; i < toInsert.length; i += 500) {
           await sb.upsert("trades", toInsert.slice(i, i + 500));
         }
@@ -2653,20 +2661,25 @@ export default function BackOffice() {
                 <div style={{fontSize:11,color:C.muted,marginTop:6}}>Booked profits/losses</div>
               </div>
 
-              {/* Win Rate */}
-              <div style={{...card,padding:"20px 22px",borderTop:`3px solid ${myWrC}`}}>
-                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Win Rate</div>
-                <div style={{display:"flex",alignItems:"baseline",gap:8}}>
-                  <div style={{fontSize:36,fontWeight:900,color:myWrC,lineHeight:1}}>{winRate}%</div>
-                  <div style={{fontSize:12,color:C.muted}}>12 months</div>
-                </div>
-                <div style={{marginTop:8,height:4,background:C.border,borderRadius:2,overflow:"hidden"}}>
-                  <div style={{height:"100%",width:winRate+"%",background:myWrC,borderRadius:2,transition:"width 1s"}}/>
-                </div>
-                <div style={{fontSize:11,color:C.muted,marginTop:6}}>
-                  This month: <b style={{color:myWrC}}>{dayWR}%</b> daily ({pDays}/{tDays.length} days)
-                </div>
-              </div>
+              {/* Current Month Net P&L */}
+              {(() => {
+                const cmPnl  = clientNetPnlForMonth(client.id, currentMonthStr);
+                const cmCol  = cmPnl >= 0 ? C.green : C.red;
+                return (
+                  <div style={{...card,padding:"20px 22px",borderTop:`3px solid ${cmCol}`,cursor:"pointer"}}
+                    onClick={()=>setPage("pnl")}>
+                    <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>
+                      This Month Net P&L
+                    </div>
+                    <div style={{fontSize:28,fontWeight:900,color:cmCol,lineHeight:1,marginBottom:4}}>
+                      {cmPnl>=0?"+":""}₹{Math.abs(cmPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                    </div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:6}}>
+                      Closed + Open MTM − Expenses →
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Open Positions */}
               <div style={{...card,padding:"20px 22px",cursor:"pointer"}}
@@ -2755,17 +2768,21 @@ export default function BackOffice() {
               <div style={{fontSize:11,color:C.muted}}>Tap to manage →</div>
             </div>
 
-            {/* Win Rate */}
-            <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${wrColor}`}}>
-              <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>Win Rate</div>
-              <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:6}}>
-                <div style={{fontSize:36,fontWeight:800,color:wrColor,lineHeight:1}}>{winRate}%</div>
-                <div style={{fontSize:11,color:C.muted}}>12mo</div>
-              </div>
-              <div style={{height:4,background:C.border,borderRadius:2,overflow:"hidden"}}>
-                <div style={{height:"100%",width:winRate+"%",background:wrColor,borderRadius:2}}/>
-              </div>
-            </div>
+            {/* Current Month Net P&L — All Clients */}
+            {(() => {
+              const totalCmPnl = visibleClients.reduce((s,c) => s + clientNetPnlForMonth(c.id, currentMonthStr), 0);
+              const tcCol = totalCmPnl >= 0 ? C.green : C.red;
+              return (
+                <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${tcCol}`,cursor:"pointer"}}
+                  onClick={()=>setPage("pnl")}>
+                  <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>This Month Net P&L</div>
+                  <div style={{fontSize:36,fontWeight:800,color:tcCol,lineHeight:1,marginBottom:6}}>
+                    {totalCmPnl>=0?"+":""}₹{Math.abs(totalCmPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                  </div>
+                  <div style={{fontSize:11,color:C.muted}}>All clients · Closed+MTM−Exp →</div>
+                </div>
+              );
+            })()}
 
             {/* Open Positions */}
             <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${C.yellow}`,cursor:"pointer"}}
@@ -3384,16 +3401,16 @@ export default function BackOffice() {
                                   </div>
                                 ) : (
                                   <span
-                                    onClick={() => setEditingLTP({clientId:p.clientId,contract:p.contract})}
-                                    title="Click to enter LTP manually"
+                                    onClick={() => { if(auth.role==="admin"||auth.role==="superadmin") setEditingLTP({clientId:p.clientId,contract:p.contract}); }}
+                                    title={auth.role==="admin"||auth.role==="superadmin" ? "Click to enter LTP manually" : ""}
                                     style={{
                                       color: hasManual ? C.yellow : close ? C.purple : C.muted,
-                                      cursor:"pointer",
-                                      borderBottom: close ? "none" : `1px dashed ${C.muted}`,
+                                      cursor: (auth.role==="admin"||auth.role==="superadmin") ? "pointer" : "default",
+                                      borderBottom: (auth.role==="admin"||auth.role==="superadmin") && !close ? `1px dashed ${C.muted}` : "none",
                                       padding:"2px 0",
                                     }}>
-                                    {close ? `₹${close}` : "— click to set"}
-                                    {hasManual && <span style={{fontSize:9,color:C.yellow,marginLeft:4}}>✎</span>}
+                                    {close ? `₹${close}` : (auth.role==="admin"||auth.role==="superadmin") ? "— click to set" : "—"}
+                                    {hasManual && (auth.role==="admin"||auth.role==="superadmin") && <span style={{fontSize:9,color:C.yellow,marginLeft:4}}>✎</span>}
                                   </span>
                                 )}
                               </td>
@@ -3624,16 +3641,20 @@ export default function BackOffice() {
             const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
             const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
             const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
-            // Open MTM shown separately — never added to Realized P&L
-            const grandMTM = open.reduce((s, pos) => {
+            // Open MTM: ONLY show for current month — 0 for all past months (prevents double counting)
+            const currentYearMonth = new Date().toISOString().slice(0,7);
+            const isCurrentMonth   = pnlDateMode === "all" ||
+              (pnlDateMode === "month" && pnlMonth === currentYearMonth);
+            const grandMTM = isCurrentMonth ? open.reduce((s, pos) => {
               const manualKey = `${pos.clientId}||${pos.contract}`;
               const ltp = manualLTP[manualKey] !== undefined
                 ? manualLTP[manualKey]
                 : getBhavClose(pos.contract);
               if (ltp === null || ltp === undefined) return s;
               return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
-            }, 0);
-            const grandNet = grandRealized - grandExpenses - grandSoftware - grandInterest;
+            }, 0) : 0;
+            // Net P&L = Realized (closed) + Open MTM (current month only) - Expenses
+            const grandNet = grandRealized + grandMTM - grandExpenses - grandSoftware - grandInterest;
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
@@ -3652,7 +3673,7 @@ export default function BackOffice() {
                     { label:"Expenses",              val:-grandExpenses,          color:C.yellow },
                     { label:"Software Charges",      val:-grandSoftware,          color:C.purple },
                     { label:"Interest",              val:-grandInterest,          color:C.red },
-                    { label:"Net P&L (Closed Only)", val:grandNet,               color:grandNet>=0?C.green:C.red, big:true },
+                    { label:"Net P&L",               val:grandNet,               color:grandNet>=0?C.green:C.red, big:true },
                     { label:"Open Positions",        val:open.length,             color:C.accent, count:true },
                   ].map(s => (
                     <div key={s.label} style={{ background:C.bg, borderRadius:10, padding:"14px 16px",
