@@ -73,7 +73,7 @@ function applyFIFO(trades) {
       // Add remaining as new open lot
       if (remaining > 0.0001) {
         // Merge with last lot if same side and price (optional optimization)
-        queue.push({ side, qty: remaining, price: +trade.price, date: trade.date });
+        queue.push({ side, qty: remaining, price: +trade.price, date: trade.date, time: trade.time||'' });
       }
     }
 
@@ -879,6 +879,7 @@ export default function BackOffice() {
     try { return JSON.parse(localStorage.getItem("jiya_closing_data") || "{}"); } catch(e) { return {}; }
   });
   const [editingLTP, setEditingLTP] = useState(null);
+  const [expandedPos, setExpandedPos]   = useState({}); // { "clientId||contract": true }
   const [angelMTMStatus, setAngelMTMStatus] = useState("idle"); // idle|fetching|live|error
   const [angelWS,        setAngelWS]        = useState(null);
 
@@ -2115,8 +2116,8 @@ export default function BackOffice() {
       if (price > 100000)                     { skip("price too large (order no?): "+price); continue; }
 
       // Normalize B/S
-      const sideNorm = (rawSide === "B" || rawSide === "BUY")  ? "BUY"
-                     : (rawSide === "S" || rawSide === "SELL") ? "SELL" : "";
+      const sideNorm = ["B","BUY","BOT","BOUGHT"].includes(rawSide)  ? "BUY"
+                     : ["S","SELL","SLD","SOLD"].includes(rawSide) ? "SELL" : "";
       if (!sideNorm) { skip("unknown side: '"+rawSide+"'"); continue; }
 
       const contract = buildContractName({ instrType, symbol, expiry, strike, optType, scriptName });
@@ -3487,10 +3488,22 @@ export default function BackOffice() {
                           const isEq  = !p.contract.includes("CE") && !p.contract.includes("PE") && !p.contract.includes("FUT");
                           const isEditing = editingLTP?.clientId===p.clientId && editingLTP?.contract===p.contract;
                           const hasManual = manualLTP[manualKey] !== undefined;
+                          const posKey   = `${p.clientId}||${p.contract}`;
+                          const isExpand = !!expandedPos[posKey];
+                          const lots     = (p.openLots||p.trades||[]).filter(t => (t.qty||0) > 0);
                           return (
-                            <tr key={i} style={{ borderBottom:`1px solid ${C.border}22`, background:isExp?C.red+"11":"transparent" }}>
+                            <Fragment key={i}>
+                            <tr style={{ borderBottom:`1px solid ${C.border}22`, background:isExp?C.red+"11":"transparent",
+                              cursor: lots.length>0?"pointer":"default" }}
+                              onClick={() => lots.length>0 && setExpandedPos(prev=>({...prev,[posKey]:!prev[posKey]}))}>
                               <td style={{ padding:"10px 12px", color:C.accent }}>
-                                {p.contract}
+                                <span style={{display:"flex",alignItems:"center",gap:6}}>
+                                  {lots.length>0 && (
+                                    <span style={{fontSize:10,color:C.muted,transition:"transform 0.2s",
+                                      display:"inline-block",transform:isExpand?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
+                                  )}
+                                  {p.contract}
+                                </span>
                                 {isExp && <span style={{ ...badge(C.red), marginLeft:6, fontSize:10 }}>EXPIRING</span>}
                                 {isEq  && <span style={{ ...badge(C.blue||"#1f6feb"), marginLeft:6, fontSize:10 }}>EQUITY</span>}
                               </td>
@@ -3543,6 +3556,41 @@ export default function BackOffice() {
                               </td>
                               <td style={{ padding:"10px 12px", color:p.bookedPnl>=0?C.green:C.red, fontWeight:600 }}>₹{p.bookedPnl.toLocaleString()}</td>
                             </tr>
+                            {/* Drill-down: individual lots */}
+                            {isExpand && lots.length > 0 && (
+                              <tr style={{background:C.bg+"aa"}}>
+                                <td colSpan={7} style={{padding:"0 0 0 32px"}}>
+                                  <div style={{padding:"10px 0 10px 0",borderLeft:`2px solid ${C.accent}44`,paddingLeft:12}}>
+                                    <div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",
+                                      letterSpacing:1,marginBottom:8}}>Trade History — {p.contract}</div>
+                                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                                      <thead>
+                                        <tr>
+                                          {["Date","Time","Side","Qty","Price"].map(h=>(
+                                            <th key={h} style={{padding:"4px 10px",textAlign:"left",
+                                              color:C.muted,fontWeight:600,borderBottom:`1px solid ${C.border}33`}}>{h}</th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {lots.sort((a,b)=>((a.date||"")+(a.time||""))<((b.date||"")+(b.time||""))?-1:1).map((lot,li)=>(
+                                          <tr key={li} style={{borderBottom:`1px solid ${C.border}22`}}>
+                                            <td style={{padding:"5px 10px",color:C.text}}>{lot.date}</td>
+                                            <td style={{padding:"5px 10px",color:C.muted}}>{lot.time||"—"}</td>
+                                            <td style={{padding:"5px 10px"}}>
+                                              <span style={{color:lot.side==="BUY"?C.green:C.red,fontWeight:600}}>{lot.side}</span>
+                                            </td>
+                                            <td style={{padding:"5px 10px",color:C.text,fontWeight:600}}>{lot.qty}</td>
+                                            <td style={{padding:"5px 10px",color:C.text}}>₹{lot.price}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                            </Fragment>
                           );
                         })}
                       </tbody>
