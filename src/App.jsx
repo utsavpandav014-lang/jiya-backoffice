@@ -2585,8 +2585,6 @@ export default function BackOffice() {
             instrType:  m.contract.includes("FUT") ? "FUTURES" : "Options",
             scriptName: m.contract,
             scripCode:  "",
-            adminId:    "JIYA",
-            source:     "settlement",   // remark for backend — not a client order
             batchId:    null,
           };
           const r = await fetch(
