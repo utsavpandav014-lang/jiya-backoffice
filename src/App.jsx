@@ -2554,6 +2554,164 @@ export default function BackOffice() {
   ];
   const todayQuote = QUOTES[new Date().getDate() % QUOTES.length];
 
+  const renderSquareOffModal = () => {
+    if (!squareOffModal) return null;
+    const m = squareOffModal;
+      const closeSide = m.side === "BUY" ? "SELL" : "BUY";
+      const sqPrice   = parseFloat(squareOffPrice) || 0;
+      const grossPnl  = sqPrice > 0
+        ? (m.side === "BUY" ? (sqPrice - m.avgPrice) : (m.avgPrice - sqPrice)) * m.qty
+        : 0;
+
+      const doSquareOff = async () => {
+        if (sqPrice <= 0) { notify("Enter a valid settlement price"); return; }
+        setSquareOffLoading(true);
+        try {
+          const today = new Date().toISOString().slice(0,10);
+          const now   = new Date().toTimeString().slice(0,8);
+          const tradeId = `SETTLE_${m.clientId}_${m.contract.replace(/\s+/g,"_")}_${Date.now()}`;
+          const trade = {
+            id:         tradeId,
+            clientId:   m.clientId,
+            contract:   m.contract,
+            side:       closeSide,
+            qty:        m.qty,
+            price:      sqPrice,
+            date:       today,
+            time:       now,
+            exchange:   m.contract.includes("SENSEX")||m.contract.includes("BANKEX") ? "BSE" : "NSE",
+            instrType:  m.contract.includes("FUT") ? "FUTURES" : "Options",
+            scriptName: m.contract,
+            scripCode:  "",
+            adminId:    "JIYA",
+            source:     "settlement",   // remark for backend — not a client order
+            batchId:    null,
+          };
+          const r = await fetch(
+            `${SUPABASE_URL}/rest/v1/trades`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type":  "application/json",
+                "apikey":        SUPABASE_ANON_KEY,
+                "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+                "Prefer":        "return=minimal",
+              },
+              body: JSON.stringify([trade]),
+            }
+          );
+          if (r.ok || r.status === 201) {
+            // Reload trades
+            await loadAllData(true);
+            notify(`✅ Settlement done — ${m.contract} ${closeSide} ${m.qty} @ ₹${sqPrice}`);
+            setSquareOffModal(null);
+            setSquareOffPrice("");
+            setSquareOffConfirm(false);
+          } else {
+            const err = await r.text();
+            notify("❌ Failed: " + err.slice(0,80));
+          }
+        } catch(e) {
+          notify("❌ Error: " + e.message);
+        }
+        setSquareOffLoading(false);
+      };
+
+      return (
+        <div style={overlay} onClick={() => { setSquareOffModal(null); setSquareOffConfirm(false); }}>
+          <div style={{...box, width:460}} onClick={e=>e.stopPropagation()}>
+
+            <div style={{fontSize:18, fontWeight:800, color:C.text, marginBottom:4}}>⚡ Square Off — Settlement</div>
+            <div style={{color:C.muted, fontSize:12, marginBottom:20}}>
+              This will add a {closeSide} order to the trade book with source = "settlement"
+            </div>
+
+            {/* Contract info */}
+            <div style={{background:C.bg, borderRadius:12, padding:"14px 16px", marginBottom:20}}>
+              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>
+                {[
+                  {l:"Client",    v:m.clientId},
+                  {l:"Contract",  v:m.contract},
+                  {l:"Side",      v:m.side, c:m.side==="BUY"?C.green:C.red},
+                  {l:"Qty",       v:m.qty},
+                  {l:"Avg Price", v:`₹${m.avgPrice}`},
+                  {l:"Settlement Side", v:closeSide, c:closeSide==="BUY"?C.green:C.red},
+                ].map(row=>(
+                  <div key={row.l}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:2}}>{row.l}</div>
+                    <div style={{fontSize:13,fontWeight:700,color:row.c||C.text}}>{row.v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Price input */}
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:12,color:C.muted,marginBottom:6,fontWeight:600}}>Settlement Price (₹)</div>
+              <input
+                type="number"
+                step="0.05"
+                autoFocus
+                value={squareOffPrice}
+                onChange={e => { setSquareOffPrice(e.target.value); setSquareOffConfirm(false); }}
+                placeholder="Enter NSE/BSE settlement price"
+                style={{...input, fontSize:18, fontWeight:700, textAlign:"center",
+                  border:`2px solid ${sqPrice>0?C.accent:C.border}`}}
+              />
+            </div>
+
+            {/* P&L Preview */}
+            {sqPrice > 0 && (
+              <div style={{
+                background: grossPnl>=0?C.green+"15":C.red+"15",
+                border:`1px solid ${grossPnl>=0?C.green:C.red}44`,
+                borderRadius:10, padding:"12px 16px", marginBottom:16, textAlign:"center"
+              }}>
+                <div style={{fontSize:11,color:C.muted,marginBottom:4}}>Estimated P&L on this position</div>
+                <div style={{fontSize:24,fontWeight:900,color:grossPnl>=0?C.green:C.red}}>
+                  {grossPnl>=0?"+":""}₹{Math.abs(grossPnl).toLocaleString("en-IN",{maximumFractionDigits:2})}
+                </div>
+                <div style={{fontSize:11,color:C.muted,marginTop:4}}>
+                  ({closeSide} {m.qty} @ ₹{sqPrice} vs avg ₹{m.avgPrice})
+                </div>
+              </div>
+            )}
+
+            {/* Confirmation */}
+            {!squareOffConfirm ? (
+              <div style={{display:"flex",gap:10}}>
+                <button
+                  onClick={() => { if(sqPrice>0) setSquareOffConfirm(true); else notify("Enter settlement price first"); }}
+                  style={{...btn(C.red), flex:1, padding:"12px", fontSize:14, fontWeight:700, justifyContent:"center"}}>
+                  ⚡ Square Off
+                </button>
+                <button onClick={() => { setSquareOffModal(null); setSquareOffPrice(""); }}
+                  style={{...btn(C.muted), padding:"12px 20px"}}>Cancel</button>
+              </div>
+            ) : (
+              <div style={{background:C.red+"15",border:`1px solid ${C.red}44`,borderRadius:12,padding:16}}>
+                <div style={{fontWeight:700,color:C.red,marginBottom:10,fontSize:14}}>
+                  ⚠️ Confirm Settlement Square Off?
+                </div>
+                <div style={{color:C.muted,fontSize:12,marginBottom:14}}>
+                  This will add a <strong style={{color:C.text}}>{closeSide} {m.qty} {m.contract} @ ₹{sqPrice}</strong> settlement order to the trade book. This cannot be undone.
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <button onClick={doSquareOff} disabled={squareOffLoading}
+                    style={{...btn(C.red),flex:1,padding:"11px",fontSize:14,fontWeight:700,
+                      justifyContent:"center",opacity:squareOffLoading?0.6:1}}>
+                    {squareOffLoading ? "⏳ Processing..." : "✅ Yes, Square Off"}
+                  </button>
+                  <button onClick={() => setSquareOffConfirm(false)}
+                    style={{...btn(C.muted),padding:"11px 20px"}}>No, Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+  };
+
   // ── Render Pages ──
   const renderPage = () => {
     const cid = auth.role === "client" ? auth.clientId : null;
@@ -5274,163 +5432,6 @@ export default function BackOffice() {
       );
     }
 
-    if (squareOffModal) {
-      const m = squareOffModal;
-      const closeSide = m.side === "BUY" ? "SELL" : "BUY";
-      const sqPrice   = parseFloat(squareOffPrice) || 0;
-      const grossPnl  = sqPrice > 0
-        ? (m.side === "BUY" ? (sqPrice - m.avgPrice) : (m.avgPrice - sqPrice)) * m.qty
-        : 0;
-
-      const doSquareOff = async () => {
-        if (sqPrice <= 0) { notify("Enter a valid settlement price"); return; }
-        setSquareOffLoading(true);
-        try {
-          const today = new Date().toISOString().slice(0,10);
-          const now   = new Date().toTimeString().slice(0,8);
-          const tradeId = `SETTLE_${m.clientId}_${m.contract.replace(/\s+/g,"_")}_${Date.now()}`;
-          const trade = {
-            id:         tradeId,
-            clientId:   m.clientId,
-            contract:   m.contract,
-            side:       closeSide,
-            qty:        m.qty,
-            price:      sqPrice,
-            date:       today,
-            time:       now,
-            exchange:   m.contract.includes("SENSEX")||m.contract.includes("BANKEX") ? "BSE" : "NSE",
-            instrType:  m.contract.includes("FUT") ? "FUTURES" : "Options",
-            scriptName: m.contract,
-            scripCode:  "",
-            adminId:    "JIYA",
-            source:     "settlement",   // remark for backend — not a client order
-            batchId:    null,
-          };
-          const r = await fetch(
-            `${SUPABASE_URL}/rest/v1/trades`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type":  "application/json",
-                "apikey":        SUPABASE_ANON_KEY,
-                "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
-                "Prefer":        "return=minimal",
-              },
-              body: JSON.stringify([trade]),
-            }
-          );
-          if (r.ok || r.status === 201) {
-            // Reload trades
-            await loadAllData(true);
-            notify(`✅ Settlement done — ${m.contract} ${closeSide} ${m.qty} @ ₹${sqPrice}`);
-            setSquareOffModal(null);
-            setSquareOffPrice("");
-            setSquareOffConfirm(false);
-          } else {
-            const err = await r.text();
-            notify("❌ Failed: " + err.slice(0,80));
-          }
-        } catch(e) {
-          notify("❌ Error: " + e.message);
-        }
-        setSquareOffLoading(false);
-      };
-
-      return (
-        <div style={overlay} onClick={() => { setSquareOffModal(null); setSquareOffConfirm(false); }}>
-          <div style={{...box, width:460}} onClick={e=>e.stopPropagation()}>
-
-            <div style={{fontSize:18, fontWeight:800, color:C.text, marginBottom:4}}>⚡ Square Off — Settlement</div>
-            <div style={{color:C.muted, fontSize:12, marginBottom:20}}>
-              This will add a {closeSide} order to the trade book with source = "settlement"
-            </div>
-
-            {/* Contract info */}
-            <div style={{background:C.bg, borderRadius:12, padding:"14px 16px", marginBottom:20}}>
-              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>
-                {[
-                  {l:"Client",    v:m.clientId},
-                  {l:"Contract",  v:m.contract},
-                  {l:"Side",      v:m.side, c:m.side==="BUY"?C.green:C.red},
-                  {l:"Qty",       v:m.qty},
-                  {l:"Avg Price", v:`₹${m.avgPrice}`},
-                  {l:"Settlement Side", v:closeSide, c:closeSide==="BUY"?C.green:C.red},
-                ].map(row=>(
-                  <div key={row.l}>
-                    <div style={{fontSize:10,color:C.muted,marginBottom:2}}>{row.l}</div>
-                    <div style={{fontSize:13,fontWeight:700,color:row.c||C.text}}>{row.v}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Price input */}
-            <div style={{marginBottom:16}}>
-              <div style={{fontSize:12,color:C.muted,marginBottom:6,fontWeight:600}}>Settlement Price (₹)</div>
-              <input
-                type="number"
-                step="0.05"
-                autoFocus
-                value={squareOffPrice}
-                onChange={e => { setSquareOffPrice(e.target.value); setSquareOffConfirm(false); }}
-                placeholder="Enter NSE/BSE settlement price"
-                style={{...input, fontSize:18, fontWeight:700, textAlign:"center",
-                  border:`2px solid ${sqPrice>0?C.accent:C.border}`}}
-              />
-            </div>
-
-            {/* P&L Preview */}
-            {sqPrice > 0 && (
-              <div style={{
-                background: grossPnl>=0?C.green+"15":C.red+"15",
-                border:`1px solid ${grossPnl>=0?C.green:C.red}44`,
-                borderRadius:10, padding:"12px 16px", marginBottom:16, textAlign:"center"
-              }}>
-                <div style={{fontSize:11,color:C.muted,marginBottom:4}}>Estimated P&L on this position</div>
-                <div style={{fontSize:24,fontWeight:900,color:grossPnl>=0?C.green:C.red}}>
-                  {grossPnl>=0?"+":""}₹{Math.abs(grossPnl).toLocaleString("en-IN",{maximumFractionDigits:2})}
-                </div>
-                <div style={{fontSize:11,color:C.muted,marginTop:4}}>
-                  ({closeSide} {m.qty} @ ₹{sqPrice} vs avg ₹{m.avgPrice})
-                </div>
-              </div>
-            )}
-
-            {/* Confirmation */}
-            {!squareOffConfirm ? (
-              <div style={{display:"flex",gap:10}}>
-                <button
-                  onClick={() => { if(sqPrice>0) setSquareOffConfirm(true); else notify("Enter settlement price first"); }}
-                  style={{...btn(C.red), flex:1, padding:"12px", fontSize:14, fontWeight:700, justifyContent:"center"}}>
-                  ⚡ Square Off
-                </button>
-                <button onClick={() => { setSquareOffModal(null); setSquareOffPrice(""); }}
-                  style={{...btn(C.muted), padding:"12px 20px"}}>Cancel</button>
-              </div>
-            ) : (
-              <div style={{background:C.red+"15",border:`1px solid ${C.red}44`,borderRadius:12,padding:16}}>
-                <div style={{fontWeight:700,color:C.red,marginBottom:10,fontSize:14}}>
-                  ⚠️ Confirm Settlement Square Off?
-                </div>
-                <div style={{color:C.muted,fontSize:12,marginBottom:14}}>
-                  This will add a <strong style={{color:C.text}}>{closeSide} {m.qty} {m.contract} @ ₹{sqPrice}</strong> settlement order to the trade book. This cannot be undone.
-                </div>
-                <div style={{display:"flex",gap:10}}>
-                  <button onClick={doSquareOff} disabled={squareOffLoading}
-                    style={{...btn(C.red),flex:1,padding:"11px",fontSize:14,fontWeight:700,
-                      justifyContent:"center",opacity:squareOffLoading?0.6:1}}>
-                    {squareOffLoading ? "⏳ Processing..." : "✅ Yes, Square Off"}
-                  </button>
-                  <button onClick={() => setSquareOffConfirm(false)}
-                    style={{...btn(C.muted),padding:"11px 20px"}}>No, Cancel</button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    }
-
     if (modal === "addInterest") return (
       <div style={overlay} onClick={() => setModal(null)}>
         <div style={box} onClick={e => e.stopPropagation()}>
@@ -5854,6 +5855,7 @@ export default function BackOffice() {
       {/* Modals */}
       {renderModal()}
       {renderTradeHistoryModal()}
+      {renderSquareOffModal()}
 
       {/* Notification */}
       {notification && (
