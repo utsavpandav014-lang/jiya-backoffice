@@ -3717,6 +3717,36 @@ export default function BackOffice() {
                                 {mtm===null?"—":`${mtm>=0?"+":""}₹${mtm.toFixed(2)}`}
                               </td>
                               <td style={{ padding:"10px 12px", color:p.bookedPnl>=0?C.green:C.red, fontWeight:600 }}>₹{p.bookedPnl.toLocaleString()}</td>
+                              {(auth.role==="admin"||auth.role==="superadmin") && (
+                                <td style={{ padding:"6px 12px" }}>
+                                  <button
+                                    onClick={e => {
+                                      e.stopPropagation();
+                                      setSquareOffPrice("");
+                                      setSquareOffConfirm(false);
+                                      setSquareOffModal({
+                                        clientId: p.clientId,
+                                        contract: p.contract,
+                                        side:     p.side,
+                                        qty:      p.netQty,
+                                        avgPrice: p.avgPrice,
+                                      });
+                                    }}
+                                    style={{
+                                      background: C.red+"22",
+                                      color: C.red,
+                                      border: `1px solid ${C.red}44`,
+                                      borderRadius: 6,
+                                      padding: "4px 10px",
+                                      fontSize: 11,
+                                      fontWeight: 700,
+                                      cursor: "pointer",
+                                      whiteSpace: "nowrap",
+                                    }}>
+                                    ⚡ SQ OFF
+                                  </button>
+                                </td>
+                              )}
                             </tr>
                             {/* Drill-down: individual lots */}
                             {isExpand && lots.length > 0 && (
