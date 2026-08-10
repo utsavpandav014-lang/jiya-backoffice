@@ -2556,6 +2556,8 @@ export default function BackOffice() {
 
   const renderSquareOffModal = () => {
     if (!squareOffModal) return null;
+    const overlay = { position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:9000,display:"flex",alignItems:"center",justifyContent:"center" };
+    const box     = { background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:32,width:480,maxWidth:"90vw",boxShadow:"0 20px 60px rgba(0,0,0,0.5)" };
     const m = squareOffModal;
       const closeSide = m.side === "BUY" ? "SELL" : "BUY";
       const sqPrice   = parseFloat(squareOffPrice) || 0;
