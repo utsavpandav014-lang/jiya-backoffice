@@ -592,6 +592,192 @@ function DeleteIntradayButton({ notify, C, card, btn }) {
   );
 }
 
+function SettlementManager({ settlements, state, notify, loadAllData, C, card, btn, input, SUPABASE_URL, SUPABASE_ANON_KEY, visibleClients }) {
+  const [editId,      setEditId]      = useState(null);   // id being edited
+  const [editPrice,   setEditPrice]   = useState("");
+  const [deleting,    setDeleting]    = useState(null);
+  const [saving,      setSaving]      = useState(false);
+  const [showAdd,     setShowAdd]     = useState(false);
+  const [addForm,     setAddForm]     = useState({ clientId:"", contract:"", side:"SELL", qty:"", price:"", date: new Date().toISOString().slice(0,10) });
+
+  const H = {
+    "Content-Type":  "application/json",
+    "apikey":        SUPABASE_ANON_KEY,
+    "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+    "Prefer":        "return=minimal",
+  };
+
+  const deleteTrade = async (id) => {
+    setDeleting(id);
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/trades?id=eq.${id}`, { method:"DELETE", headers:H });
+    if (r.ok || r.status===204) { notify("🗑 Settlement deleted"); await loadAllData(true); }
+    else notify("❌ Delete failed");
+    setDeleting(null);
+  };
+
+  const saveEdit = async (t) => {
+    const newPrice = parseFloat(editPrice);
+    if (!newPrice || newPrice <= 0) { notify("Enter valid price"); return; }
+    setSaving(true);
+    // Delete old + insert updated
+    await fetch(`${SUPABASE_URL}/rest/v1/trades?id=eq.${t.id}`, { method:"DELETE", headers:H });
+    const updated = { ...t, price: newPrice, id: `SETTLE_${t.clientId}_${t.contract.replace(/\s+/g,"_")}_${Date.now()}` };
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/trades`, { method:"POST", headers:H, body:JSON.stringify([updated]) });
+    if (r.ok || r.status===201) { notify("✅ Price updated"); setEditId(null); await loadAllData(true); }
+    else notify("❌ Update failed");
+    setSaving(false);
+  };
+
+  const addSettlement = async () => {
+    const { clientId, contract, side, qty, price, date } = addForm;
+    if (!clientId||!contract||!qty||!price||!date) { notify("Fill all fields"); return; }
+    setSaving(true);
+    const trade = {
+      id:         `SETTLE_${clientId}_${contract.replace(/\s+/g,"_")}_${Date.now()}`,
+      clientId, contract, side,
+      qty:        parseFloat(qty),
+      price:      parseFloat(price),
+      date, time: "15:30:00",
+      exchange:   contract.includes("SENSEX")||contract.includes("BANKEX") ? "BSE" : "NSE",
+      instrType:  contract.includes("FUT") ? "FUTURES" : "Options",
+      scriptName: contract, scripCode: "", batchId: null,
+    };
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/trades`, { method:"POST", headers:H, body:JSON.stringify([trade]) });
+    if (r.ok || r.status===201) {
+      notify("✅ Settlement added"); setShowAdd(false);
+      setAddForm({ clientId:"", contract:"", side:"SELL", qty:"", price:"", date: new Date().toISOString().slice(0,10) });
+      await loadAllData(true);
+    } else notify("❌ Add failed");
+    setSaving(false);
+  };
+
+  const badge = (c) => ({ background:c+"22", color:c, borderRadius:20, padding:"2px 10px", fontSize:11, fontWeight:700 });
+
+  return (
+    <div style={{ padding:"24px 28px", maxWidth:1100, margin:"0 auto" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
+        <div>
+          <div style={{ fontSize:22, fontWeight:800, color:C.text }}>⚡ Settlement Manager</div>
+          <div style={{ color:C.muted, fontSize:13, marginTop:2 }}>View, edit or delete all manually settled positions</div>
+        </div>
+        <button onClick={() => setShowAdd(s => !s)} style={{ ...btn(C.accent), padding:"10px 20px", fontSize:13 }}>
+          {showAdd ? "✕ Cancel" : "+ Add Settlement"}
+        </button>
+      </div>
+
+      {/* Add Settlement Form */}
+      {showAdd && (
+        <div style={{ ...card, marginBottom:20, padding:20 }}>
+          <div style={{ fontWeight:700, color:C.text, marginBottom:14 }}>Add New Settlement Trade</div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:14 }}>
+            <div>
+              <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>Client</div>
+              <select value={addForm.clientId} onChange={e => setAddForm(f=>({...f,clientId:e.target.value}))}
+                style={{ ...input, cursor:"pointer" }}>
+                <option value="">Select client</option>
+                {visibleClients.map(c => <option key={c.id} value={c.id}>{c.id} — {c.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>Contract</div>
+              <input value={addForm.contract} onChange={e => setAddForm(f=>({...f,contract:e.target.value}))}
+                placeholder="e.g. NIFTY 24500 PE 11AUG2026" style={input}/>
+            </div>
+            <div>
+              <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>Side</div>
+              <select value={addForm.side} onChange={e => setAddForm(f=>({...f,side:e.target.value}))}
+                style={{ ...input, cursor:"pointer" }}>
+                <option value="SELL">SELL</option>
+                <option value="BUY">BUY</option>
+              </select>
+            </div>
+            <div>
+              <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>Qty</div>
+              <input type="number" value={addForm.qty} onChange={e => setAddForm(f=>({...f,qty:e.target.value}))}
+                placeholder="Quantity" style={input}/>
+            </div>
+            <div>
+              <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>Settlement Price (₹)</div>
+              <input type="number" step="0.05" value={addForm.price} onChange={e => setAddForm(f=>({...f,price:e.target.value}))}
+                placeholder="Price" style={input}/>
+            </div>
+            <div>
+              <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>Date</div>
+              <input type="date" value={addForm.date} onChange={e => setAddForm(f=>({...f,date:e.target.value}))}
+                style={input}/>
+            </div>
+          </div>
+          <button onClick={addSettlement} disabled={saving}
+            style={{ ...btn(C.green), padding:"10px 24px", fontWeight:700, opacity:saving?0.6:1 }}>
+            {saving ? "⏳ Saving..." : "✅ Add Settlement"}
+          </button>
+        </div>
+      )}
+
+      {/* Settlements List */}
+      {settlements.length === 0 ? (
+        <div style={{ ...card, textAlign:"center", padding:48, color:C.muted }}>
+          No settlement trades found. Use ⚡ Square Off button on open positions to add them.
+        </div>
+      ) : (
+        <div style={{ ...card, padding:0, overflow:"hidden" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+            <thead>
+              <tr style={{ background:C.bg }}>
+                {["Date","Client","Contract","Side","Qty","Settlement Price","Action"].map(h => (
+                  <th key={h} style={{ padding:"12px 14px", textAlign:"left", color:C.muted,
+                    fontWeight:600, fontSize:11, borderBottom:`1px solid ${C.border}`, textTransform:"uppercase" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {[...settlements].sort((a,b) => (b.date||"").localeCompare(a.date||"")).map((t,i) => (
+                <tr key={t.id} style={{ borderBottom:`1px solid ${C.border}22`,
+                  background: i%2===0 ? "transparent" : C.bg+"66" }}>
+                  <td style={{ padding:"12px 14px", color:C.muted }}>{t.date}</td>
+                  <td style={{ padding:"12px 14px", color:C.accent, fontWeight:600 }}>{t.clientId}</td>
+                  <td style={{ padding:"12px 14px", color:C.text }}>{t.contract}</td>
+                  <td style={{ padding:"12px 14px" }}>
+                    <span style={badge(t.side==="BUY"?C.green:C.red)}>{t.side}</span>
+                  </td>
+                  <td style={{ padding:"12px 14px", color:C.text, fontWeight:600 }}>{t.qty}</td>
+                  <td style={{ padding:"12px 14px" }}>
+                    {editId === t.id ? (
+                      <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                        <input type="number" step="0.05" autoFocus value={editPrice}
+                          onChange={e => setEditPrice(e.target.value)}
+                          style={{ ...input, width:100, fontSize:13, padding:"5px 8px" }}/>
+                        <button onClick={() => saveEdit(t)} disabled={saving}
+                          style={{ ...btn(C.green), padding:"5px 12px", fontSize:12 }}>
+                          {saving ? "..." : "✅"}
+                        </button>
+                        <button onClick={() => setEditId(null)}
+                          style={{ ...btn(C.muted), padding:"5px 10px", fontSize:12 }}>✕</button>
+                      </div>
+                    ) : (
+                      <span style={{ color:C.text, fontWeight:700 }}>₹{t.price}</span>
+                    )}
+                  </td>
+                  <td style={{ padding:"12px 14px" }}>
+                    <div style={{ display:"flex", gap:6 }}>
+                      <button onClick={() => { setEditId(t.id); setEditPrice(String(t.price)); }}
+                        style={{ ...btn(C.yellow), padding:"5px 12px", fontSize:11 }}>✏️ Edit</button>
+                      <button onClick={() => deleteTrade(t.id)} disabled={deleting===t.id}
+                        style={{ ...btn(C.red), padding:"5px 12px", fontSize:11, opacity:deleting===t.id?0.5:1 }}>
+                        {deleting===t.id ? "..." : "🗑 Delete"}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
@@ -2499,6 +2685,7 @@ export default function BackOffice() {
     { id: "trades", label: "Trades & Positions", icon: "trades" },
     { id: "pnl", label: "Profit & Loss", icon: "pnl" },
     { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
+    { id: "settlements", label: "⚡ Settlements", icon: "trade" },
     { id: "charges", label: "Charges", icon: "charges", locked: !hasFeature(auth?.plan, "charges") },
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
     ...(hasFeature(auth?.plan, "audit") ? [{ id: "audit", label: "📋 Audit Log", icon: "ledger" }] : []),
@@ -2760,24 +2947,6 @@ export default function BackOffice() {
 
       // ── Accurate Net P&L per client for a given month (matches P&L page exactly) ──
       // Net P&L = Realized (closed FIFO positions) − Expenses − Software Charges − Interest
-      const clientNetPnlForMonth = (clientId, yearMonth) => {
-        const closedForClient = clientClosedPos(clientId);
-        const realized = closedForClient
-          .filter(cp => cp.trades.some(t => (t.date||"").slice(0,7) === yearMonth))
-          .reduce((a,c) => a + c.totalPnl, 0);
-        const expenses = getMonthlyCharges(clientId, yearMonth);
-        const software  = getMonthlyInterest(clientId, yearMonth + "_SW");
-        const interest  = getMonthlyInterest(clientId, yearMonth);
-        // Include live MTM for open positions
-        const openForClient = clientOpenPos(clientId);
-        const liveMTM = openForClient.reduce((s, pos) => {
-          const close = getBhavClose(pos.contract);
-          if (close === null) return s;
-          return s + (pos.side === "SELL" ? (pos.avgPrice - close) : (close - pos.avgPrice)) * pos.netQty;
-        }, 0);
-        return realized - expenses - software - interest + liveMTM;
-      };
-
       // This Month Net P&L — sum across all visible clients (matches P&L page logic)
       const thisMonthPnl = visibleClients.reduce((sum, c) => sum + clientNetPnlForMonth(c.id, currentMonthStr), 0);
 
@@ -3176,6 +3345,27 @@ export default function BackOffice() {
         </div>
       </div>
     );
+
+    if (page === "settlements" && (auth.role === "admin" || auth.role === "superadmin")) {
+      // Settlement Manager — view, edit, delete, add settlement trades
+      const settlements = state.trades.filter(t => (t.id||"").startsWith("SETTLE_"));
+
+      const [editingSettle,    setEditingSettle]    = [null, ()=>{}]; // handled via local state below
+      const [newSettleForm,    setNewSettleForm]    = [null, ()=>{}];
+
+      return (
+        <SettlementManager
+          settlements={settlements}
+          state={state}
+          notify={notify}
+          loadAllData={loadAllData}
+          C={C} card={card} btn={btn} input={input}
+          SUPABASE_URL={SUPABASE_URL}
+          SUPABASE_ANON_KEY={SUPABASE_ANON_KEY}
+          visibleClients={visibleClients}
+        />
+      );
+    }
 
     if (page === "livemtm") {
       // ── COMING SOON BANNER ──────────────────────────────────
