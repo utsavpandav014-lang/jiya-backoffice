@@ -4216,10 +4216,12 @@ export default function BackOffice() {
             const interestMonths = (state.interest||[]).filter(i => i.clientId === client.id).map(i => i.yearMonth);
             const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(m => m && monthInFilter(m)).sort().reverse();
 
-            // For range/month filter also filter closed trades
-            const filteredClosed = closed.filter(cp =>
-              cp.trades.some(t => monthInFilter((t.date||"").slice(0,7)))
-            );
+            // For range/month filter: use LAST trade date (closing date) — same as monthly breakdown
+            const filteredClosed = closed.filter(cp => {
+              const dates = (cp.trades||[]).map(t => (t.date||"").slice(0,7)).filter(Boolean).sort();
+              const lastMonth = dates[dates.length-1];
+              return lastMonth ? monthInFilter(lastMonth) : false;
+            });
 
             // Grand totals
             // Realized P&L = CLOSED positions FIFO only — NO open MTM here
@@ -4306,10 +4308,11 @@ export default function BackOffice() {
                       <tbody>
                         {allMonths.map(m => {
                           // Realized for this month = P&L from trades closed in this month
-                          const monthRealized = closed
-                            .flatMap(c => c.trades)
-                            .filter(t => (t.date||"").startsWith(m))
-                            .reduce((a,t) => a + t.pnl, 0);
+                          // Realized = contracts whose LAST trade (closing date) falls in this month
+                          const monthRealized = closed.filter(cp => {
+                            const dates = (cp.trades||[]).map(t=>(t.date||"").slice(0,7)).filter(Boolean).sort();
+                            return dates[dates.length-1] === m;
+                          }).reduce((a,c) => a + c.totalPnl, 0);
                           const monthExpenses  = getMonthlyCharges(client.id, m);
                           const monthInterest  = getMonthlyInterest(client.id, m);
                           const monthSoftware  = getMonthlyInterest(client.id, m + "_SW"); // software charges stored with _SW suffix
