@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 import { accountTypeLabel, calculateOwnershipPct, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
+import { buildCarryForwardPreview, verifyCarryForwardPairs } from "./monthEndCarryForward.js";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -217,6 +218,7 @@ const INITIAL_STATE = {
   tokens: [],     // activation tokens
   auditLog: [],   // ledger audit trail — created/edited/deleted entries
   investorAllocations: [], // allocation layer only; never changes broker trades/FIFO
+  carryForwardBatches: [],
 };
 
 // ── Plan feature access ──────────────────────────────
@@ -1533,7 +1535,7 @@ export default function BackOffice() {
         return all;
       };
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, investorAllocations] = await Promise.all([
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, investorAllocations, carryForwardBatches] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         fetchAll("trades",          "?order=date.asc,time.asc"),
         fetchAll("ledger",          "?order=date.asc"),
@@ -1545,6 +1547,7 @@ export default function BackOffice() {
         sb.select("admins",         "?order=id.asc").catch(() => []),
         sb.select("audit_log",      "?order=timestamp.desc&limit=2000").catch(() => []),
         fetchAll("investor_allocations", "?order=effectiveFrom.desc").catch(() => []),
+        fetchAll("carry_forward_batches", "?order=month.desc").catch(() => []),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -1563,6 +1566,7 @@ export default function BackOffice() {
         admins:         Array.isArray(admins) ? admins : [],
         auditLog:       Array.isArray(auditLog) ? auditLog : [],
         investorAllocations: Array.isArray(investorAllocations) ? investorAllocations : [],
+        carryForwardBatches: Array.isArray(carryForwardBatches) ? carryForwardBatches : [],
       }));
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
@@ -1710,6 +1714,9 @@ export default function BackOffice() {
   };
   const [bhavPreview, setBhavPreview] = useState(null); // {date, rows, matched, expiring}
   const [bhavDate, setBhavDate] = useState(new Date().toISOString().slice(0,10));
+  const [carryMonth, setCarryMonth] = useState(new Date().toISOString().slice(0,7));
+  const [carryPreview, setCarryPreview] = useState(null);
+  const [carryExecuting, setCarryExecuting] = useState(false);
 
   // Parse NSE F&O Bhavcopy CSV
   // Key columns: TckrSymb, XpryDt, StrkPric, OptnTp, FinInstrmTp, ClsPric, SttlmPric
@@ -1957,6 +1964,54 @@ export default function BackOffice() {
   // and showing 0 open positions for all past-expiry contracts.
   // Expiry squaring must be done via manual bhavcopy upload only.
   const { openPositions, closedPositions } = applyFIFO(state.trades);
+
+  const prepareCarryForward = () => {
+    const monthEndDate = new Date(Date.UTC(Number(carryMonth.slice(0,4)), Number(carryMonth.slice(5,7)), 0)).toISOString().slice(0,10);
+    const officialPrices = {};
+    for (const row of state.bhavcopy || []) {
+      if (row.bhavDate === monthEndDate && Number(row.closePrice) > 0) officialPrices[row.contract] = Number(row.closePrice);
+    }
+    const preview = buildCarryForwardPreview({ yearMonth:carryMonth, openPositions, closingPrices:officialPrices, existingTrades:state.trades });
+    setCarryPreview(preview);
+    if (preview.duplicate) return notify(`Month ${carryMonth} has already been processed.`, "error");
+    if (preview.missingPrices.length) return notify(`${preview.missingPrices.length} open positions are missing official ${monthEndDate} closing prices.`, "error");
+    if (!preview.entries.length) return notify("No open positions found to carry forward.", "error");
+    notify(`Preview ready: ${preview.entries.length} positions will close on ${preview.monthEndDate} and reopen on ${preview.reopenDate}.`);
+  };
+
+  const executeCarryForward = async () => {
+    if (!carryPreview?.canExecute || carryExecuting) return;
+    const pairErrors = verifyCarryForwardPairs(carryPreview);
+    if (pairErrors.length) return notify(pairErrors[0], "error");
+
+    // Simulate the complete batch through the unchanged FIFO engine before writing anything.
+    const simulated = applyFIFO([...state.trades, ...carryPreview.trades]);
+    const resultErrors = carryPreview.entries.filter(entry => {
+      const reopened = simulated.openPositions.find(p => p.clientId === entry.clientId && p.contract === entry.contract);
+      return !reopened || reopened.side !== entry.side || Number(reopened.netQty) !== Number(entry.qty) || Math.abs(Number(reopened.avgPrice) - Number(entry.closingPrice)) > 0.01;
+    });
+    if (resultErrors.length) return notify(`FIFO safety check failed for ${resultErrors[0].clientId} ${resultErrors[0].contract}. Nothing was saved.`, "error");
+    if (!window.confirm(`FINAL CONFIRMATION\n\nClose ${carryPreview.entries.length} positions on ${carryPreview.monthEndDate} and reopen the same positions on ${carryPreview.reopenDate}?\n\nThis creates ${carryPreview.trades.length} auditable trades.`)) return;
+
+    setCarryExecuting(true);
+    const batch = {
+      id:carryPreview.batchId, month:carryPreview.yearMonth, monthEndDate:carryPreview.monthEndDate, reopenDate:carryPreview.reopenDate,
+      status:"processing", positionCount:carryPreview.entries.length, tradeCount:carryPreview.trades.length,
+      details:carryPreview.entries, error:null, createdBy:auth?.adminId || auth?.role || "JIYA", createdAt:new Date().toISOString(), completedAt:null,
+    };
+    try {
+      await sb.upsert("carry_forward_batches", batch);
+      await sb.upsert("trades", carryPreview.trades);
+      const completed = { ...batch, status:"completed", completedAt:new Date().toISOString() };
+      await sb.upsert("carry_forward_batches", completed);
+      setState(s => ({ ...s, trades:[...s.trades, ...carryPreview.trades], carryForwardBatches:[completed, ...(s.carryForwardBatches||[]).filter(b=>b.id!==completed.id)] }));
+      setCarryPreview(null);
+      notify(`Month-end completed: ${batch.positionCount} positions closed and reopened.`);
+    } catch (error) {
+      try { await sb.upsert("carry_forward_batches", { ...batch, status:"failed", error:error.message }); } catch (_) {}
+      notify(`Carry-forward failed: ${error.message}. Review the batch before retrying.`, "error");
+    } finally { setCarryExecuting(false); }
+  };
 
   // ── Helpers ──
   const clientTrades = (cid) => state.trades.filter((t) => t.clientId === cid);
@@ -2717,6 +2772,7 @@ export default function BackOffice() {
     { id: "pnl", label: "Profit & Loss", icon: "pnl" },
     { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
     { id: "settlements", label: "⚡ Settlements", icon: "trade" },
+    { id: "month_end", label: "↪ Month-End Carry", icon: "trades" },
     { id: "charges", label: "Charges", icon: "charges", locked: !hasFeature(auth?.plan, "charges") },
     { id: "tickets", label: "Support Tickets", icon: "ticket" },
     ...(hasFeature(auth?.plan, "audit") ? [{ id: "audit", label: "📋 Audit Log", icon: "ledger" }] : []),
@@ -3438,6 +3494,60 @@ export default function BackOffice() {
         </div>
       );
     }
+
+    if (page === "month_end" && (auth.role === "admin" || auth.role === "superadmin")) return (
+      <div>
+        <div style={{marginBottom:22}}>
+          <h2 style={{color:C.text,margin:"0 0 6px"}}>Month-End Carry Forward</h2>
+          <div style={{color:C.muted,fontSize:13}}>Square off every FIFO open position at the uploaded official closing rate, then reopen the identical side and quantity on the first day of the next month.</div>
+        </div>
+
+        <div style={{...card,marginBottom:18}}>
+          <div style={{display:"flex",gap:14,alignItems:"end",flexWrap:"wrap"}}>
+            <div style={{minWidth:220}}>
+              <label style={{display:"block",color:C.muted,fontSize:12,marginBottom:5}}>Closing Month</label>
+              <input type="month" value={carryMonth} onChange={e=>{setCarryMonth(e.target.value);setCarryPreview(null);}} style={input}/>
+            </div>
+            <button style={btn(C.accent)} onClick={prepareCarryForward}>Generate Safety Preview</button>
+          </div>
+          <div style={{marginTop:12,color:C.yellow,fontSize:12}}>This screen uses only the uploaded official Bhavcopy close price. Live Angel LTP and manual LTP are not accepted for month-end accounting.</div>
+        </div>
+
+        {carryPreview && <div style={{...card,marginBottom:18,borderColor:carryPreview.canExecute?C.green:C.red}}>
+          <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"start",marginBottom:16}}>
+            <div>
+              <h3 style={{color:C.text,margin:"0 0 5px"}}>Batch {carryPreview.batchId}</h3>
+              <div style={{color:C.muted,fontSize:12}}>Close: <b style={{color:C.text}}>{carryPreview.monthEndDate}</b> · Reopen: <b style={{color:C.text}}>{carryPreview.reopenDate}</b></div>
+            </div>
+            <span style={badge(carryPreview.canExecute?C.green:C.red)}>{carryPreview.canExecute?"READY":"BLOCKED"}</span>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(130px,1fr))",gap:10,marginBottom:16}}>
+            {[['Open positions',carryPreview.entries.length,C.blue],['Synthetic trades',carryPreview.trades.length,C.purple],['Missing prices',carryPreview.missingPrices.length,carryPreview.missingPrices.length?C.red:C.green],['Duplicate month',carryPreview.duplicate?'YES':'NO',carryPreview.duplicate?C.red:C.green]].map(([label,value,color])=><div key={label} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:12}}><div style={{color:C.muted,fontSize:11}}>{label}</div><div style={{color,fontSize:20,fontWeight:800,marginTop:4}}>{value}</div></div>)}
+          </div>
+          {carryPreview.missingPrices.length>0 && <div style={{background:C.red+"10",border:`1px solid ${C.red}33`,borderRadius:8,padding:12,marginBottom:14}}>
+            <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:6}}>Execution blocked—missing closing rates</div>
+            {carryPreview.missingPrices.map((m,i)=><div key={i} style={{color:C.muted,fontSize:11}}>{m.clientId} · {m.contract}</div>)}
+          </div>}
+          <div style={{overflowX:"auto",maxHeight:430}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead><tr>{["Client","Contract","Current Side","Qty","Old Avg","Closing / New Avg","Close Trade","Reopen Trade"].map(h=><th key={h} style={{position:"sticky",top:0,background:C.card,textAlign:"left",padding:9,color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+            <tbody>{carryPreview.entries.map(e=><tr key={e.closeTradeId} style={{borderBottom:`1px solid ${C.border}`}}>
+              <td style={{padding:9,color:C.accent}}>{e.clientId}</td><td style={{padding:9,color:C.text}}>{e.contract}</td><td style={{padding:9,color:e.side==='BUY'?C.green:C.red}}>{e.side}</td>
+              <td style={{padding:9,color:C.text}}>{e.qty}</td><td style={{padding:9,color:C.muted}}>{e.previousAvgPrice}</td><td style={{padding:9,color:C.green,fontWeight:700}}>{e.closingPrice}</td>
+              <td style={{padding:9,color:C.muted,fontFamily:"monospace",fontSize:10}}>{e.closeTradeId}</td><td style={{padding:9,color:C.muted,fontFamily:"monospace",fontSize:10}}>{e.reopenTradeId}</td>
+            </tr>)}</tbody>
+          </table></div>
+          <div style={{display:"flex",justifyContent:"flex-end",marginTop:16}}><button disabled={!carryPreview.canExecute||carryExecuting} style={{...btn(carryPreview.canExecute?C.green:C.muted),opacity:(!carryPreview.canExecute||carryExecuting)?0.55:1}} onClick={executeCarryForward}>{carryExecuting?"Processing…":`Confirm & Carry ${carryPreview.entries.length} Positions`}</button></div>
+        </div>}
+
+        <div style={card}>
+          <h3 style={{color:C.text,marginTop:0}}>Carry-Forward Audit History</h3>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr>{["Batch","Month","Closed","Reopened","Positions","Trades","Status","Admin","Completed"].map(h=><th key={h} style={{textAlign:"left",padding:9,color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+            <tbody>{(state.carryForwardBatches||[]).map(b=><tr key={b.id} style={{borderBottom:`1px solid ${C.border}`}}><td style={{padding:9,color:C.accent}}>{b.id}</td><td style={{padding:9,color:C.text}}>{b.month}</td><td style={{padding:9,color:C.muted}}>{b.monthEndDate}</td><td style={{padding:9,color:C.muted}}>{b.reopenDate}</td><td style={{padding:9,color:C.text}}>{b.positionCount}</td><td style={{padding:9,color:C.text}}>{b.tradeCount}</td><td style={{padding:9}}><span style={badge(b.status==='completed'?C.green:b.status==='failed'?C.red:C.yellow)}>{b.status}</span></td><td style={{padding:9,color:C.muted}}>{b.createdBy}</td><td style={{padding:9,color:C.muted}}>{b.completedAt?new Date(b.completedAt).toLocaleString('en-IN'):'—'}</td></tr>)}</tbody>
+          </table>
+          {!state.carryForwardBatches?.length&&<div style={{textAlign:"center",padding:28,color:C.muted}}>No month-end batch has been executed yet.</div>}
+        </div>
+      </div>
+    );
 
     if (page === "settlements" && (auth.role === "admin" || auth.role === "superadmin")) {
       // Settlement Manager — view, edit, delete, add settlement trades
