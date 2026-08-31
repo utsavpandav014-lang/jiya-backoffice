@@ -12,7 +12,8 @@ export function getMonthBoundary(yearMonth) {
 export function buildCarryForwardPreview({ yearMonth, openPositions, closingPrices, existingTrades = [] }) {
   const { monthEndDate, reopenDate } = getMonthBoundary(yearMonth);
   const batchId = `CF_${yearMonth.replace("-", "_")}`;
-  const duplicate = existingTrades.some(t => t.batchId === batchId || String(t.id || "").includes(batchId));
+  const tradeBatchId = Number(monthEndDate.replaceAll("-", ""));
+  const duplicate = existingTrades.some(t => Number(t.batchId) === tradeBatchId || String(t.id || "").includes(batchId));
   const positions = [...(openPositions || [])].sort((a,b) => `${a.clientId}|${a.contract}`.localeCompare(`${b.clientId}|${b.contract}`));
   const missingPrices = [];
   const entries = [];
@@ -34,7 +35,7 @@ export function buildCarryForwardPreview({ yearMonth, openPositions, closingPric
       price:closingPrice,
       exchange:position.contract.includes("SENSEX") || position.contract.includes("BANKEX") ? "BSE" : "NSE",
       instrType:position.contract.includes("FUT") ? "FUTURES" : "Options",
-      scriptName:position.contract, scripCode:"", batchId,
+      scriptName:position.contract, scripCode:"", batchId:tradeBatchId,
     };
     const closeTrade = { ...common, id:`CF_CLOSE_${batchId}_${sequence}`, side:closeSide, date:monthEndDate, time:"23:59:59" };
     const reopenTrade = { ...common, id:`CF_OPEN_${batchId}_${sequence}`, side:position.side, date:reopenDate, time:"00:00:01" };
@@ -43,7 +44,7 @@ export function buildCarryForwardPreview({ yearMonth, openPositions, closingPric
   });
 
   return {
-    batchId, yearMonth, monthEndDate, reopenDate, entries, trades, missingPrices, duplicate,
+    batchId, tradeBatchId, yearMonth, monthEndDate, reopenDate, entries, trades, missingPrices, duplicate,
     canExecute:positions.length > 0 && entries.length === positions.length && missingPrices.length === 0 && !duplicate,
   };
 }

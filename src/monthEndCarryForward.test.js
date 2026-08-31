@@ -17,6 +17,8 @@ test("creates an opposite close and identical fresh reopen", () => {
   assert.equal(preview.trades[0].price, 2050);
   assert.equal(preview.trades[1].price, 2050);
   assert.equal(preview.trades[1].qty, 500);
+  assert.equal(preview.tradeBatchId, 20260831);
+  assert.equal(preview.trades[0].batchId, 20260831);
   assert.deepEqual(verifyCarryForwardPairs(preview), []);
   assert.equal(preview.canExecute, true);
 });
@@ -28,7 +30,7 @@ test("blocks execution when any closing price is missing", () => {
 });
 
 test("blocks duplicate month processing", () => {
-  const preview = buildCarryForwardPreview({ yearMonth:"2026-08", openPositions:[{clientId:"A",contract:"NIFTY FUT",side:"SELL",netQty:75}], closingPrices:{"NIFTY FUT":100}, existingTrades:[{batchId:"CF_2026_08"}] });
+  const preview = buildCarryForwardPreview({ yearMonth:"2026-08", openPositions:[{clientId:"A",contract:"NIFTY FUT",side:"SELL",netQty:75}], closingPrices:{"NIFTY FUT":100}, existingTrades:[{batchId:20260831}] });
   assert.equal(preview.duplicate, true);
   assert.equal(preview.canExecute, false);
 });
