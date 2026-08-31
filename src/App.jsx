@@ -312,6 +312,13 @@ const sb = {
     if (!r.ok) throw new Error(`UPSERT ${table}: ${await r.text()}`);
     return r.json();
   },
+  async rpc(functionName, args) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${functionName}`, {
+      method: "POST", headers: this.headers, body: JSON.stringify(args)
+    });
+    if (!r.ok) throw new Error(`MONTH-END TRANSACTION: ${await r.text()}`);
+    return r.json();
+  },
   async update(table, id, data) {
     const r = await fetch(`${this.url(table)}?id=eq.${id}`, {
       method: "PATCH", headers: this.headers, body: JSON.stringify(data)
@@ -2044,15 +2051,19 @@ export default function BackOffice() {
       details:carryPreview.entries, error:null, createdBy:auth?.adminId || auth?.role || "JIYA", createdAt:new Date().toISOString(), completedAt:null,
     };
     try {
-      await sb.upsert("carry_forward_batches", batch);
-      await sb.upsert("trades", carryPreview.trades);
-      const completed = { ...batch, status:"completed", completedAt:new Date().toISOString() };
-      await sb.upsert("carry_forward_batches", completed);
+      const result = await sb.rpc("execute_month_end_carry_forward", {
+        p_batch: batch,
+        p_trades: carryPreview.trades,
+      });
+      const completed = {
+        ...batch,
+        status:"completed",
+        completedAt:result?.completedAt || new Date().toISOString(),
+      };
       setState(s => ({ ...s, trades:[...s.trades, ...carryPreview.trades], carryForwardBatches:[completed, ...(s.carryForwardBatches||[]).filter(b=>b.id!==completed.id)] }));
       setCarryPreview(null);
       notify(`Month-end completed: ${batch.positionCount} positions closed and reopened.`);
     } catch (error) {
-      try { await sb.upsert("carry_forward_batches", { ...batch, status:"failed", error:error.message }); } catch (_) {}
       notify(`Carry-forward failed: ${error.message}. Review the batch before retrying.`, "error");
     } finally { setCarryExecuting(false); }
   };
