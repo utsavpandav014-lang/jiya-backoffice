@@ -1994,8 +1994,26 @@ export default function BackOffice() {
   const prepareCarryForward = () => {
     const monthEndDate = new Date(Date.UTC(Number(carryMonth.slice(0,4)), Number(carryMonth.slice(5,7)), 0)).toISOString().slice(0,10);
     const officialPrices = {};
+    // Lowest priority: official Bhavcopy close.
     for (const row of state.bhavcopy || []) {
-      if (row.bhavDate === monthEndDate && Number(row.closePrice) > 0) officialPrices[row.contract] = Number(row.closePrice);
+      if (row.bhavDate === monthEndDate && Number(row.closePrice) > 0) officialPrices[row.contract] = { closePrice:Number(row.closePrice), source:"Bhavcopy Close" };
+    }
+    // Uploaded Trades & Positions closing file. Accept only captures made on the selected month-end in IST.
+    const dateInIST = (value) => {
+      if (!value) return "";
+      const parts = new Intl.DateTimeFormat("en-CA", { timeZone:"Asia/Kolkata", year:"numeric", month:"2-digit", day:"2-digit" }).formatToParts(new Date(value));
+      const get = type => parts.find(p=>p.type===type)?.value;
+      return `${get("year")}-${get("month")}-${get("day")}`;
+    };
+    for (const row of livePositions || []) {
+      if (dateInIST(row.capturedAt) !== monthEndDate || !(Number(row.ltp) > 0)) continue;
+      const record = { closePrice:Number(row.ltp), source:"Uploaded Closing File" };
+      officialPrices[row.contract] = record;
+      if (row.clientId) officialPrices[`${row.clientId}||${row.contract}`] = record;
+    }
+    // Highest priority: client-specific value explicitly confirmed in Trades & Positions.
+    for (const [key, value] of Object.entries(manualLTP || {})) {
+      if (Number(value) > 0) officialPrices[key] = { closePrice:Number(value), source:"Manual Close — Trades & Positions" };
     }
     const preview = buildCarryForwardPreview({ yearMonth:carryMonth, openPositions, closingPrices:officialPrices, existingTrades:state.trades });
     setCarryPreview(preview);
@@ -3536,7 +3554,7 @@ export default function BackOffice() {
             </div>
             <button style={btn(C.accent)} onClick={prepareCarryForward}>Generate Safety Preview</button>
           </div>
-          <div style={{marginTop:12,color:C.yellow,fontSize:12}}>This screen uses only the uploaded official Bhavcopy close price. Live Angel LTP and manual LTP are not accepted for month-end accounting.</div>
+          <div style={{marginTop:12,color:C.yellow,fontSize:12}}>Accepted month-end sources: client-specific manual close, closing file uploaded in Trades & Positions, then Bhavcopy close. Live streaming Angel LTP is never used.</div>
         </div>
 
         {carryPreview && <div style={{...card,marginBottom:18,borderColor:carryPreview.canExecute?C.green:C.red}}>
@@ -3548,17 +3566,17 @@ export default function BackOffice() {
             <span style={badge(carryPreview.canExecute?C.green:C.red)}>{carryPreview.canExecute?"READY":"BLOCKED"}</span>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(130px,1fr))",gap:10,marginBottom:16}}>
-            {[['Open positions',carryPreview.entries.length,C.blue],['Synthetic trades',carryPreview.trades.length,C.purple],['Missing prices',carryPreview.missingPrices.length,carryPreview.missingPrices.length?C.red:C.green],['Duplicate month',carryPreview.duplicate?'YES':'NO',carryPreview.duplicate?C.red:C.green]].map(([label,value,color])=><div key={label} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:12}}><div style={{color:C.muted,fontSize:11}}>{label}</div><div style={{color,fontSize:20,fontWeight:800,marginTop:4}}>{value}</div></div>)}
+            {[['Open positions',carryPreview.positionCount,C.blue],['Synthetic trades',carryPreview.trades.length,C.purple],['Missing prices',carryPreview.missingPrices.length,carryPreview.missingPrices.length?C.red:C.green],['Duplicate month',carryPreview.duplicate?'YES':'NO',carryPreview.duplicate?C.red:C.green]].map(([label,value,color])=><div key={label} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:12}}><div style={{color:C.muted,fontSize:11}}>{label}</div><div style={{color,fontSize:20,fontWeight:800,marginTop:4}}>{value}</div></div>)}
           </div>
           {carryPreview.missingPrices.length>0 && <div style={{background:C.red+"10",border:`1px solid ${C.red}33`,borderRadius:8,padding:12,marginBottom:14}}>
             <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:6}}>Execution blocked—missing closing rates</div>
             {carryPreview.missingPrices.map((m,i)=><div key={i} style={{color:C.muted,fontSize:11}}>{m.clientId} · {m.contract}</div>)}
           </div>}
           <div style={{overflowX:"auto",maxHeight:430}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-            <thead><tr>{["Client","Contract","Current Side","Qty","Old Avg","Closing / New Avg","Close Trade","Reopen Trade"].map(h=><th key={h} style={{position:"sticky",top:0,background:C.card,textAlign:"left",padding:9,color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Client","Contract","Current Side","Qty","Old Avg","Closing / New Avg","Price Source","Close Trade","Reopen Trade"].map(h=><th key={h} style={{position:"sticky",top:0,background:C.card,textAlign:"left",padding:9,color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
             <tbody>{carryPreview.entries.map(e=><tr key={e.closeTradeId} style={{borderBottom:`1px solid ${C.border}`}}>
               <td style={{padding:9,color:C.accent}}>{e.clientId}</td><td style={{padding:9,color:C.text}}>{e.contract}</td><td style={{padding:9,color:e.side==='BUY'?C.green:C.red}}>{e.side}</td>
-              <td style={{padding:9,color:C.text}}>{e.qty}</td><td style={{padding:9,color:C.muted}}>{e.previousAvgPrice}</td><td style={{padding:9,color:C.green,fontWeight:700}}>{e.closingPrice}</td>
+              <td style={{padding:9,color:C.text}}>{e.qty}</td><td style={{padding:9,color:C.muted}}>{e.previousAvgPrice}</td><td style={{padding:9,color:C.green,fontWeight:700}}>{e.closingPrice}</td><td style={{padding:9,color:C.muted}}>{e.closingPriceSource}</td>
               <td style={{padding:9,color:C.muted,fontFamily:"monospace",fontSize:10}}>{e.closeTradeId}</td><td style={{padding:9,color:C.muted,fontFamily:"monospace",fontSize:10}}>{e.reopenTradeId}</td>
             </tr>)}</tbody>
           </table></div>

@@ -20,7 +20,7 @@ export function buildCarryForwardPreview({ yearMonth, openPositions, closingPric
   const trades = [];
 
   positions.forEach((position, index) => {
-    const priceRecord = closingPrices?.[position.contract];
+    const priceRecord = closingPrices?.[`${position.clientId}||${position.contract}`] || closingPrices?.[position.contract];
     const closingPrice = money(typeof priceRecord === "object" ? priceRecord?.closePrice : priceRecord);
     if (!(closingPrice > 0)) {
       missingPrices.push({ clientId:position.clientId, contract:position.contract });
@@ -40,11 +40,11 @@ export function buildCarryForwardPreview({ yearMonth, openPositions, closingPric
     const closeTrade = { ...common, id:`CF_CLOSE_${batchId}_${sequence}`, side:closeSide, date:monthEndDate, time:"23:59:59" };
     const reopenTrade = { ...common, id:`CF_OPEN_${batchId}_${sequence}`, side:position.side, date:reopenDate, time:"00:00:01" };
     trades.push(closeTrade, reopenTrade);
-    entries.push({ clientId:position.clientId, contract:position.contract, side:position.side, qty, previousAvgPrice:Number(position.avgPrice)||0, closingPrice, closeTradeId:closeTrade.id, reopenTradeId:reopenTrade.id });
+    entries.push({ clientId:position.clientId, contract:position.contract, side:position.side, qty, previousAvgPrice:Number(position.avgPrice)||0, closingPrice, closingPriceSource:typeof priceRecord === "object" ? priceRecord.source : "Closing price", closeTradeId:closeTrade.id, reopenTradeId:reopenTrade.id });
   });
 
   return {
-    batchId, tradeBatchId, yearMonth, monthEndDate, reopenDate, entries, trades, missingPrices, duplicate,
+    batchId, tradeBatchId, yearMonth, monthEndDate, reopenDate, positionCount:positions.length, entries, trades, missingPrices, duplicate,
     canExecute:positions.length > 0 && entries.length === positions.length && missingPrices.length === 0 && !duplicate,
   };
 }

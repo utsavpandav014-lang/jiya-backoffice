@@ -34,3 +34,13 @@ test("blocks duplicate month processing", () => {
   assert.equal(preview.duplicate, true);
   assert.equal(preview.canExecute, false);
 });
+
+test("prefers a client-specific validated closing rate", () => {
+  const preview = buildCarryForwardPreview({
+    yearMonth:"2026-08",
+    openPositions:[{clientId:"A",contract:"NIFTY FUT",side:"BUY",netQty:75,avgPrice:100}],
+    closingPrices:{"NIFTY FUT":{closePrice:110,source:"Bhavcopy"},"A||NIFTY FUT":{closePrice:115,source:"Manual Close"}},
+  });
+  assert.equal(preview.entries[0].closingPrice, 115);
+  assert.equal(preview.entries[0].closingPriceSource, "Manual Close");
+});
