@@ -970,13 +970,17 @@ function useCountUp(target, duration = 900) {
   }, [target]);
   return val;
 }
+const formatINR = (value) => new Intl.NumberFormat("en-IN", {
+  style: "currency", currency: "INR", maximumFractionDigits: 2,
+}).format(Number(value) || 0);
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function BackOffice() {
   const [state, setState] = useState(INITIAL_STATE);
   // Keep tradesRef always up to date so polling closures have fresh data
   useEffect(() => { tradesRef.current = state.trades || []; }, [state.trades]);
-  const [dbLoading, setDbLoading] = useState(SUPABASE_CONFIGURED); // show loading if DB configured
+  const [dbLoading, setDbLoading] = useState(false); // financial data loads after authentication
+  const [authBootstrapReady, setAuthBootstrapReady] = useState(false);
   const [dbError, setDbError] = useState(null);
   const [syncStatus, setSyncStatus] = useState("idle"); // "idle"|"saving"|"saved"|"error"
   const [auth, setAuth] = useState(null); // {role:'superadmin'|'admin'|'client', clientId?, adminId?, plan?}
@@ -1465,21 +1469,29 @@ export default function BackOffice() {
     setTimeout(() => setNotification(null), 3500);
   };
 
-  // ── Supabase: Load all data on mount ──
+  const loadAuthBootstrap = async () => {
+    try {
+      const [clients, admins] = await Promise.all([
+        sb.select("clients", "?order=created_at.asc"),
+        sb.select("admins", "?order=id.asc").catch(() => []),
+      ]);
+      const authData = {
+        clients: Array.isArray(clients) ? clients : [],
+        admins: Array.isArray(admins) ? admins : [],
+      };
+      setState(s => ({ ...s, ...authData }));
+      return authData;
+    } catch (error) {
+      console.error("Authentication bootstrap failed:", error);
+      return { clients:[], admins:[] };
+    } finally { setAuthBootstrapReady(true); }
+  };
+
+  // Load only the small authentication dataset on mount. The 39k+ trade book
+  // loads after login so it can never block the login form.
   useEffect(() => {
     if (!SUPABASE_CONFIGURED) return;
-    // Wake up DB first, then load data
-    const init = async () => {
-      try {
-        // Ping to wake up sleeping DB (free tier pauses after inactivity)
-        await fetch(`${SUPABASE_URL}/rest/v1/clients?limit=1`, {
-          headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}` }
-        });
-        await new Promise(r => setTimeout(r, 800)); // wait for wake
-      } catch(e) {}
-      loadAllData();
-    };
-    init();
+    loadAuthBootstrap();
 
     // Keep-alive ping every 4 minutes so DB never sleeps during session
     const keepAlive = setInterval(async () => {
@@ -1599,6 +1611,12 @@ export default function BackOffice() {
       setDbLoading(false);
     }
   };
+
+  // Authenticate first, then hydrate the large financial dataset in background.
+  useEffect(() => {
+    if (!auth || !SUPABASE_CONFIGURED) return;
+    loadAllData();
+  }, [auth]);
 
   // ── Supabase: Generic save with sync indicator ──
   // ── Wake up Supabase (free tier sleeps after inactivity) ──
@@ -1895,7 +1913,7 @@ export default function BackOffice() {
   const [loginAttempts, setLoginAttempts] = useState(0);
   const [lockoutUntil, setLockoutUntil] = useState(null);
 
-  const handleLogin = () => {
+  const handleLogin = async () => {
     // Check lockout
     if (lockoutUntil && Date.now() < lockoutUntil) {
       const secs = Math.ceil((lockoutUntil - Date.now()) / 1000);
@@ -1909,14 +1927,22 @@ export default function BackOffice() {
     // Constant-time comparison to prevent timing attacks
     const isSuperAdmin = userInput === "JIYA" && passInput === "Jiya@3044";
 
+    let authClients = state.clients;
+    let authAdmins = state.admins || [];
+    if (!isSuperAdmin && !authBootstrapReady) {
+      const authData = await loadAuthBootstrap();
+      authClients = authData.clients;
+      authAdmins = authData.admins;
+    }
+
     // Check sub-admin login — JIYA never matches as subAdmin
     const subAdmin = !isSuperAdmin
-      ? (state.admins||[]).find(a => a.username === userInput && a.password === passInput && a.username !== "JIYA")
+      ? authAdmins.find(a => a.username === userInput && a.password === passInput && a.username !== "JIYA")
       : null;
 
     // Check client login — only from correct admin scope
     const client = !isSuperAdmin && !subAdmin
-      ? state.clients.find(c => c.id === userInput && c.password === passInput)
+      ? authClients.find(c => c.id === userInput && c.password === passInput)
       : null;
 
     if (isSuperAdmin) {
@@ -2600,7 +2626,7 @@ export default function BackOffice() {
 
   // ── Login Screen ──
   // ── DB Loading screen ──
-  if (dbLoading) return (
+  if (dbLoading && !auth) return (
     <div style={{ minHeight:"100vh", background:"#0d1117", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Inter',sans-serif", overflow:"hidden", position:"relative" }}>
       <style>{`
         @keyframes pulse-ring {
