@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 import { accountTypeLabel, calculateOwnershipPct, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
 import { buildCarryForwardPreview, verifyCarryForwardPairs } from "./monthEndCarryForward.js";
-import { hasGenuineTradeForMonth, isCarryForwardTrade } from "./monthPnlAttribution.js";
+import { closedPositionSlicesForMonth, closedPositionSlicesInFilter, hasGenuineTradeForMonth, isCarryForwardTrade } from "./monthPnlAttribution.js";
 import { daysRemainingInMonth, targetTrackerState } from "./targetTracker.js";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
@@ -2151,10 +2151,7 @@ export default function BackOffice() {
     if (!clientId || !yearMonth) return 0;
     const ct2 = state.trades.filter(t => t.clientId === clientId);
     const { openPositions: op2, closedPositions: cp2 } = applyFIFO(ct2);
-    const closedPnl2 = cp2.filter(cp => {
-      const dates = (cp.trades||[]).map(t => (t.date||"").slice(0,7)).filter(Boolean).sort();
-      return dates[dates.length-1] === yearMonth;
-    }).reduce((a,c) => a + c.totalPnl, 0);
+    const closedPnl2 = closedPositionSlicesForMonth(cp2, yearMonth).reduce((a,c) => a + c.totalPnl, 0);
     const isCurrentMo = yearMonth === currentMonthStr;
     // A synthetic carry reopen preserves the position but does not activate the
     // new month's P&L. Open MTM starts only after a genuine uploaded/manual trade
@@ -3360,11 +3357,7 @@ export default function BackOffice() {
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:24}}>
               {/* This Month Realized P&L (closed only) */}
               {(() => {
-                const myClosedPnl = clientClosedPos(currentClient?.id || auth?.clientId)
-                  .filter(cp => {
-                    const dates = cp.trades.map(t=>(t.date||"").slice(0,7)).filter(Boolean).sort();
-                    return dates[dates.length-1] === currentMonthStr;
-                  })
+                const myClosedPnl = closedPositionSlicesForMonth(clientClosedPos(currentClient?.id || auth?.clientId), currentMonthStr)
                   .reduce((a,c) => a + c.totalPnl, 0);
                 return (
                   <div style={{...card,padding:"20px 22px"}}>
@@ -4747,11 +4740,7 @@ export default function BackOffice() {
             const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(m => m && monthInFilter(m)).sort().reverse();
 
             // For range/month filter: use LAST trade date (closing date) — same as monthly breakdown
-            const filteredClosed = closed.filter(cp => {
-              const dates = (cp.trades||[]).map(t => (t.date||"").slice(0,7)).filter(Boolean).sort();
-              const lastMonth = dates[dates.length-1];
-              return lastMonth ? monthInFilter(lastMonth) : false;
-            });
+            const filteredClosed = closedPositionSlicesInFilter(closed, monthInFilter);
 
             // Grand totals
             // Realized P&L = CLOSED positions FIFO only — NO open MTM here
@@ -4763,7 +4752,11 @@ export default function BackOffice() {
             const currentYearMonth = new Date().toISOString().slice(0,7);
             const isCurrentMonth   = pnlDateMode === "all" ||
               (pnlDateMode === "month" && pnlMonth === currentYearMonth);
-            const grandMTM = isCurrentMonth ? open.reduce((s, pos) => {
+            const genuineCurrentMonthTrade = hasGenuineTradeForMonth(
+              state.trades.filter(t => t.clientId === client.id),
+              currentYearMonth
+            );
+            const grandMTM = isCurrentMonth && genuineCurrentMonthTrade ? open.reduce((s, pos) => {
               const manualKey = `${pos.clientId}||${pos.contract}`;
               const ltp = manualLTP[manualKey] !== undefined
                 ? manualLTP[manualKey]
@@ -4839,10 +4832,7 @@ export default function BackOffice() {
                         {allMonths.map(m => {
                           // Realized for this month = P&L from trades closed in this month
                           // Realized = contracts whose LAST trade (closing date) falls in this month
-                          const monthRealized = closed.filter(cp => {
-                            const dates = (cp.trades||[]).map(t=>(t.date||"").slice(0,7)).filter(Boolean).sort();
-                            return dates[dates.length-1] === m;
-                          }).reduce((a,c) => a + c.totalPnl, 0);
+                          const monthRealized = closedPositionSlicesForMonth(closed, m).reduce((a,c) => a + c.totalPnl, 0);
                           const monthExpenses  = getMonthlyCharges(client.id, m);
                           const monthInterest  = getMonthlyInterest(client.id, m);
                           const monthSoftware  = getMonthlyInterest(client.id, m + "_SW"); // software charges stored with _SW suffix
@@ -4872,6 +4862,7 @@ export default function BackOffice() {
                                   ))}
                                 </div>
                               </td>
+                              <td style={{ padding:"10px 12px", color:C.purple }}>− ₹{monthSoftware.toFixed(2)}</td>
                               <td style={{ padding:"10px 12px", color:monthNet>=0?C.green:C.red, fontWeight:700, fontSize:14 }}>
                                 ₹{monthNet.toFixed(2)}
                               </td>
