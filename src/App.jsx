@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 import { accountTypeLabel, calculateOwnershipPct, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
 import { buildCarryForwardPreview, verifyCarryForwardPairs } from "./monthEndCarryForward.js";
+import { hasGenuineTradeForMonth, isCarryForwardTrade } from "./monthPnlAttribution.js";
 import { daysRemainingInMonth, targetTrackerState } from "./targetTracker.js";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
@@ -1763,7 +1764,9 @@ export default function BackOffice() {
   // Monthly charges summary per client
   const getMonthlyCharges = (clientId, yearMonth) => {
     return state.trades
-      .filter(t => t.clientId === clientId && (t.date || "").startsWith(yearMonth))
+      // Month-end close/reopen rows are internal accounting entries, not broker trades.
+      // They must never generate transaction charges.
+      .filter(t => t.clientId === clientId && (t.date || "").startsWith(yearMonth) && !isCarryForwardTrade(t))
       .reduce((sum, t) => sum + getTradeCharges(t).total, 0);
   };
 
@@ -2153,7 +2156,11 @@ export default function BackOffice() {
       return dates[dates.length-1] === yearMonth;
     }).reduce((a,c) => a + c.totalPnl, 0);
     const isCurrentMo = yearMonth === currentMonthStr;
-    const openMTM2 = isCurrentMo ? op2.reduce((s, pos) => {
+    // A synthetic carry reopen preserves the position but does not activate the
+    // new month's P&L. Open MTM starts only after a genuine uploaded/manual trade
+    // exists for this client in the new month.
+    const hasGenuineMonthTrade = hasGenuineTradeForMonth(ct2, yearMonth);
+    const openMTM2 = isCurrentMo && hasGenuineMonthTrade ? op2.reduce((s, pos) => {
       const mk = `${pos.clientId}||${pos.contract}`;
       const ltp2 = manualLTP[mk] !== undefined ? manualLTP[mk] : getBhavClose(pos.contract);
       if (ltp2 == null) return s;
