@@ -2133,6 +2133,9 @@ export default function BackOffice() {
   // ── Admin: Add Client ──
   const emptyClient = { id: "", name: "", email: "", phone: "", password: "", accountType: "trading", depositAmount: "", monthlyStrategyCapital: "" };
   const [newClient, setNewClient] = useState(emptyClient);
+  const [editClient, setEditClient] = useState(null);
+  const [editClientOriginalId, setEditClientOriginalId] = useState("");
+  const [editClientSaving, setEditClientSaving] = useState(false);
   const addClient = () => {
     if (!newClient.id || !newClient.name || !newClient.password) return notify("Fill required fields", "error");
     if (state.clients.find((c) => c.id === newClient.id)) return notify("Client ID already exists", "error");
@@ -2146,10 +2149,88 @@ export default function BackOffice() {
     notify("Client added successfully");
   };
 
+  const startEditClient = (client) => {
+    setEditClient({
+      ...client,
+      accountType:client.accountType || "trading",
+      depositAmount:Number(client.depositAmount) || 0,
+      monthlyStrategyCapital:Number(client.monthlyStrategyCapital) || 0,
+      adminId:client.adminId || "",
+    });
+    setEditClientOriginalId(client.id);
+    setModal("editClient");
+  };
+
+  const saveClientAccount = async () => {
+    if (!editClient || editClientSaving) return;
+    const updated = {
+      ...editClient,
+      id:String(editClient.id || "").trim(),
+      name:String(editClient.name || "").trim(),
+      email:String(editClient.email || "").trim(),
+      phone:String(editClient.phone || "").trim(),
+      password:String(editClient.password || ""),
+      accountType:editClient.accountType || "trading",
+      depositAmount:Number(editClient.depositAmount) || 0,
+      monthlyStrategyCapital:Number(editClient.monthlyStrategyCapital) || 0,
+      adminId:editClient.adminId || null,
+    };
+    if (!updated.id || !updated.name || !updated.password) return notify("Client ID, name and password are required", "error");
+    if (!/^[A-Za-z0-9_-]+$/.test(updated.id)) return notify("Client ID may contain only letters, numbers, underscore and hyphen", "error");
+    if (updated.id !== editClientOriginalId && state.clients.some(c=>c.id===updated.id)) return notify("Client ID already exists", "error");
+    const capitalErrors = validateClientCapital(updated);
+    if (capitalErrors.length) return notify(capitalErrors[0], "error");
+
+    const investorCommitted = activeAllocationRows.filter(a=>a.investorClientId===editClientOriginalId).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+    const strategyCommitted = activeAllocationRows.filter(a=>a.strategyClientId===editClientOriginalId).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+    if (investorCommitted > updated.depositAmount) return notify(`Deposited fund cannot be below active allocations (${formatINR(investorCommitted)})`, "error");
+    if (strategyCommitted > updated.monthlyStrategyCapital) return notify(`Strategy capital cannot be below active allocations (${formatINR(strategyCommitted)})`, "error");
+
+    if (updated.id !== editClientOriginalId) {
+      const linkedTrades = state.trades.filter(t=>t.clientId===editClientOriginalId).length;
+      if (!window.confirm(`Change client code ${editClientOriginalId} → ${updated.id}?\n\n${linkedTrades} loaded trades and every linked ledger, interest, position, ticket and allocation record will be updated atomically. FIFO quantities and P&L will not change.`)) return;
+    }
+
+    setEditClientSaving(true);
+    try {
+      const saved = await withSync(() => sb.rpc("update_client_account", { p_original_id:editClientOriginalId, p_client:updated }));
+      if (!saved?.id) throw new Error("Account update was not confirmed by the database");
+      const oldId = editClientOriginalId;
+      setState(s => ({
+        ...s,
+        clients:s.clients.map(c=>c.id===oldId?saved:c),
+        trades:s.trades.map(t=>t.clientId===oldId?{...t,clientId:saved.id}:t),
+        ledger:s.ledger.map(l=>l.clientId===oldId?{...l,clientId:saved.id}:l),
+        tickets:s.tickets.map(t=>t.clientId===oldId?{...t,clientId:saved.id}:t),
+        interest:s.interest.map(i=>i.clientId===oldId?{...i,clientId:saved.id}:i),
+        auditLog:(s.auditLog||[]).map(a=>a.clientId===oldId?{...a,clientId:saved.id}:a),
+        investorAllocations:(s.investorAllocations||[]).map(a=>({
+          ...a,
+          investorClientId:a.investorClientId===oldId?saved.id:a.investorClientId,
+          strategyClientId:a.strategyClientId===oldId?saved.id:a.strategyClientId,
+        })),
+      }));
+      setLivePositions(rows=>rows.map(p=>p.clientId===oldId?{...p,clientId:saved.id}:p));
+      pushAudit("EDITED", saved.id, `Account details updated${oldId!==saved.id?` — code ${oldId} → ${saved.id}`:""}; deposit ${formatINR(saved.depositAmount)}; strategy capital ${formatINR(saved.monthlyStrategyCapital)}`);
+      setEditClient(null);
+      setEditClientOriginalId("");
+      setModal(null);
+      notify(`Account ${saved.id} updated successfully`);
+    } catch (error) {
+      notify(`Account update failed: ${error.message}`, "error");
+    } finally {
+      setEditClientSaving(false);
+    }
+  };
+
   // Investor allocations are an economic layer only. They never write to trades or invoke FIFO.
   const [newAllocation, setNewAllocation] = useState({ investorClientId:"", strategyClientId:"", allocatedAmount:"", effectiveFrom:"", reason:"" });
   const activeAllocationRows = (state.investorAllocations || []).filter(a => a.status !== "closed" && !a.effectiveTo);
-  const addInvestorAllocation = () => {
+  const beginAdditionalStrategy = (investorClientId) => {
+    setNewAllocation({ investorClientId, strategyClientId:"", allocatedAmount:"", effectiveFrom:"", reason:"" });
+    setTimeout(() => document.getElementById("investor-allocation-form")?.scrollIntoView({behavior:"smooth",block:"start"}), 0);
+  };
+  const addInvestorAllocation = async () => {
     const investor = state.clients.find(c => c.id === newAllocation.investorClientId);
     const strategy = state.clients.find(c => c.id === newAllocation.strategyClientId);
     const investorActiveAllocated = activeAllocationRows.filter(a => a.investorClientId === investor?.id).reduce((sum,a) => sum + Number(a.allocatedAmount || 0), 0);
@@ -2157,16 +2238,22 @@ export default function BackOffice() {
     const errors = validateInvestorAllocation({ investorId:investor?.id, strategyId:strategy?.id, allocatedAmount:newAllocation.allocatedAmount, effectiveFrom:newAllocation.effectiveFrom, reason:newAllocation.reason, investorDeposit:investor?.depositAmount, investorActiveAllocated, strategyCapital:strategy?.monthlyStrategyCapital, strategyActiveAllocated });
     if (errors.length) return notify(errors[0], "error");
     const row = {
-      id:`IALLOC_${Date.now()}`, investorClientId:investor.id, strategyClientId:strategy.id,
+      id:`IALLOC_${Date.now()}_${Math.random().toString(36).slice(2,6)}`, investorClientId:investor.id, strategyClientId:strategy.id,
       allocatedAmount:Number(newAllocation.allocatedAmount), strategyCapitalSnapshot:Number(strategy.monthlyStrategyCapital),
       ownershipPct:calculateOwnershipPct(newAllocation.allocatedAmount, strategy.monthlyStrategyCapital),
       effectiveFrom:new Date(newAllocation.effectiveFrom).toISOString(), effectiveTo:null, status:"active", ltpSnapshotStatus:"pending",
       reason:newAllocation.reason.trim(), createdBy:auth?.adminId || auth?.role || "JIYA", createdAt:new Date().toISOString(),
     };
-    setState(s => ({ ...s, investorAllocations:[row, ...(s.investorAllocations || [])] }));
-    withSync(() => sb.upsert("investor_allocations", row));
-    setNewAllocation({ investorClientId:"", strategyClientId:"", allocatedAmount:"", effectiveFrom:"", reason:"" });
-    notify("Investor allocation created. LTP snapshot is pending.");
+    try {
+      const saved = await withSync(() => sb.rpc("create_investor_allocation", { p_allocation:row }));
+      if (!saved?.id) throw new Error("Allocation was not confirmed by the database");
+      setState(s => ({ ...s, investorAllocations:[saved, ...(s.investorAllocations || [])] }));
+      const remaining = Math.max(0, Number(investor.depositAmount||0) - investorActiveAllocated - Number(saved.allocatedAmount||0));
+      setNewAllocation({ investorClientId:investor.id, strategyClientId:"", allocatedAmount:"", effectiveFrom:"", reason:"" });
+      notify(`Strategy allocated. ${formatINR(remaining)} investor fund remains available.`);
+    } catch (error) {
+      notify(`Allocation failed: ${error.message}`, "error");
+    }
   };
 
   // ── Admin: Add Ledger Entry ──
@@ -3475,14 +3562,19 @@ export default function BackOffice() {
                   <td style={{ padding: "12px", color: C.text }}>{c.name}</td>
                   <td style={{ padding:"12px" }}><span style={badge(c.accountType === "investor" ? C.purple : c.accountType === "hybrid" ? C.yellow : C.blue)}>{accountTypeLabel(c.accountType)}</span></td>
                   <td style={{ padding:"12px", color:C.text }}>
-                    {["investor","hybrid"].includes(c.accountType) && <div>Deposit: {formatINR(Number(c.depositAmount)||0)}</div>}
-                    {(c.accountType === "trading" || c.accountType === "hybrid" || !c.accountType) && <div>Strategy: {formatINR(Number(c.monthlyStrategyCapital)||0)}</div>}
+                    <button onClick={()=>startEditClient(c)} title="Click to add or change fund"
+                      style={{background:C.accent+"0b",border:`1px dashed ${C.accent}66`,borderRadius:7,padding:"7px 9px",color:C.text,cursor:"pointer",textAlign:"left",minWidth:150}}>
+                      {["investor","hybrid"].includes(c.accountType) && <div>Deposit: {formatINR(Number(c.depositAmount)||0)}</div>}
+                      {(c.accountType === "trading" || c.accountType === "hybrid" || !c.accountType) && <div>Strategy: {formatINR(Number(c.monthlyStrategyCapital)||0)}</div>}
+                      <div style={{fontSize:10,color:C.accent,marginTop:3}}>✏️ Click to edit fund</div>
+                    </button>
                   </td>
                   <td style={{ padding: "12px", color: C.muted }}>{c.email}</td>
                   <td style={{ padding: "12px", color: C.muted }}>{c.phone}</td>
                   <td style={{ padding: "12px", color: C.muted, fontFamily: "monospace" }}>{c.password}</td>
                   <td style={{ padding: "12px" }}><span style={badge(C.purple)}>{clientOpenPos(c.id).length}</span></td>
                   <td style={{ padding: "12px" }}>
+                    <button style={{ ...btn(C.accent), padding:"5px 10px",marginRight:6 }} onClick={()=>startEditClient(c)} title="Edit every account detail">✏️ Edit</button>
                     <button style={{ ...btn(C.red), padding: "5px 10px" }} onClick={() => { if(!window.confirm("Delete client " + c.name + "? This cannot be undone.")) return; withSync(() => sb.delete("clients", c.id)); setState((s) => ({ ...s, clients: s.clients.filter((x) => x.id !== c.id) })); }}><Icon name="delete" size={14} /></button>
                   </td>
                 </tr>
@@ -3501,22 +3593,50 @@ export default function BackOffice() {
       const ownershipPreview = calculateOwnershipPct(newAllocation.allocatedAmount, selectedStrategy?.monthlyStrategyCapital);
       const investorUsed = activeAllocationRows.filter(a => a.investorClientId === selectedInvestor?.id).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
       const strategyUsed = activeAllocationRows.filter(a => a.strategyClientId === selectedStrategy?.id).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+      const availableStrategies = strategies.filter(c => !activeAllocationRows.some(a=>a.investorClientId===selectedInvestor?.id && a.strategyClientId===c.id));
       return (
         <div>
           <div style={{marginBottom:24}}>
             <h2 style={{color:C.text,margin:"0 0 6px"}}>Investor Control</h2>
             <div style={{color:C.muted,fontSize:13}}>Admin-only allocation records. Investor logins never see strategy codes, allocation percentages or diversification details.</div>
           </div>
+          <div style={{...card,marginBottom:18}}>
+            <h3 style={{color:C.text,margin:"0 0 14px"}}>Investor Fund Allocation</h3>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
+              {investors.map(investor=>{
+                const rows = activeAllocationRows.filter(a=>a.investorClientId===investor.id);
+                const allocated = rows.reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+                const deposit = Number(investor.depositAmount)||0;
+                const remaining = Math.max(0,deposit-allocated);
+                return <div key={investor.id} style={{background:C.bg,border:`1px solid ${selectedInvestor?.id===investor.id?C.accent:C.border}`,borderRadius:10,padding:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"start"}}>
+                    <div><div style={{color:C.text,fontWeight:700}}>{investor.name}</div><div style={{color:C.muted,fontSize:11}}>{investor.id} · {rows.length} strateg{rows.length===1?"y":"ies"}</div></div>
+                    <span style={badge(remaining>0?C.green:C.muted)}>{remaining>0?"Fund Available":"Fully Allocated"}</span>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,margin:"13px 0",fontSize:11}}>
+                    <div><span style={{color:C.muted}}>Total Fund</span><div style={{color:C.text,fontWeight:700,marginTop:3}}>{formatINR(deposit)}</div></div>
+                    <div><span style={{color:C.muted}}>Allocated</span><div style={{color:C.yellow,fontWeight:700,marginTop:3}}>{formatINR(allocated)}</div></div>
+                    <div><span style={{color:C.muted}}>Remaining</span><div style={{color:remaining>0?C.green:C.muted,fontWeight:700,marginTop:3}}>{formatINR(remaining)}</div></div>
+                  </div>
+                  <button disabled={remaining<=0} onClick={()=>beginAdditionalStrategy(investor.id)}
+                    style={{...btn(remaining>0?C.accent:C.muted),width:"100%",justifyContent:"center",opacity:remaining>0?1:0.55}}>
+                    <Icon name="add" size={14}/> Add More Strategy
+                  </button>
+                </div>;
+              })}
+              {!investors.length && <div style={{color:C.muted,fontSize:13}}>Create an Investor or Hybrid account first.</div>}
+            </div>
+          </div>
           <div style={{display:"grid",gridTemplateColumns:"minmax(320px, 0.9fr) minmax(520px, 1.6fr)",gap:18,alignItems:"start"}}>
-            <div style={card}>
-              <h3 style={{color:C.text,marginTop:0}}>Create Allocation</h3>
+            <div id="investor-allocation-form" style={card}>
+              <h3 style={{color:C.text,marginTop:0}}>{investorUsed>0?"Add More Strategy":"Create Allocation"}</h3>
               <label style={{color:C.muted,fontSize:12}}>Investor / Hybrid Account *</label>
-              <select value={newAllocation.investorClientId} onChange={e=>setNewAllocation(s=>({...s,investorClientId:e.target.value}))} style={{...input,margin:"5px 0 14px"}}>
+              <select value={newAllocation.investorClientId} onChange={e=>setNewAllocation(s=>({...s,investorClientId:e.target.value,strategyClientId:"",allocatedAmount:""}))} style={{...input,margin:"5px 0 14px"}}>
                 <option value="">Select investor...</option>{investors.map(c=><option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
               </select>
               <label style={{color:C.muted,fontSize:12}}>Trading Strategy *</label>
               <select value={newAllocation.strategyClientId} onChange={e=>setNewAllocation(s=>({...s,strategyClientId:e.target.value}))} style={{...input,margin:"5px 0 14px"}}>
-                <option value="">Select strategy...</option>{strategies.map(c=><option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
+                <option value="">Select another strategy...</option>{availableStrategies.map(c=><option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
               </select>
               <label style={{color:C.muted,fontSize:12}}>Allocation Amount (₹) *</label>
               <input type="number" min="0" value={newAllocation.allocatedAmount} onChange={e=>setNewAllocation(s=>({...s,allocatedAmount:e.target.value}))} style={{...input,margin:"5px 0 14px"}} />
@@ -3529,7 +3649,7 @@ export default function BackOffice() {
                 <div style={{display:"flex",justifyContent:"space-between",color:C.muted,marginTop:7}}><span>Investor available</span><span>{formatINR(Math.max(0,Number(selectedInvestor?.depositAmount||0)-investorUsed))}</span></div>
                 <div style={{display:"flex",justifyContent:"space-between",color:C.muted,marginTop:7}}><span>Strategy capacity</span><span>{formatINR(Math.max(0,Number(selectedStrategy?.monthlyStrategyCapital||0)-strategyUsed))}</span></div>
               </div>
-              <button style={btn(C.green)} onClick={addInvestorAllocation}><Icon name="check" size={14}/> Create Allocation</button>
+              <button style={btn(C.green)} onClick={addInvestorAllocation}><Icon name="check" size={14}/> {investorUsed>0?"Allocate Remaining Fund":"Create Allocation"}</button>
               <div style={{color:C.yellow,fontSize:11,marginTop:12}}>Existing open positions require an Angel One LTP snapshot at the effective timestamp before P&L sharing can activate.</div>
             </div>
             <div style={card}>
@@ -5348,6 +5468,59 @@ export default function BackOffice() {
         )}
       </div>
     );
+
+    if (modal === "editClient" && editClient) {
+      const investorCommitted = activeAllocationRows.filter(a=>a.investorClientId===editClientOriginalId).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+      const strategyCommitted = activeAllocationRows.filter(a=>a.strategyClientId===editClientOriginalId).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+      return (
+        <div style={overlay} onClick={() => { if(!editClientSaving){setModal(null);setEditClient(null);} }}>
+          <div style={{...box,width:640,maxHeight:"92vh",overflowY:"auto"}} onClick={(e)=>e.stopPropagation()}>
+            <h3 style={{color:C.text,marginTop:0}}>Edit Account — {editClientOriginalId}</h3>
+            <div style={{padding:10,background:C.yellow+"10",border:`1px solid ${C.yellow}33`,borderRadius:8,color:C.muted,fontSize:11,lineHeight:1.5,marginBottom:16}}>
+              Every change is saved to Supabase and audited. Changing the client code atomically updates linked trades, ledger, interest, positions, tickets and investor allocations. FIFO prices, quantities and P&amp;L formulas are not modified.
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 14px"}}>
+              {field("Client ID / Code *","id",editClient,setEditClient)}
+              {field("Full Name *","name",editClient,setEditClient)}
+              {field("Email","email",editClient,setEditClient,"email")}
+              {field("Phone","phone",editClient,setEditClient)}
+              {field("Login Password *","password",editClient,setEditClient,"text")}
+              <div style={{marginBottom:14}}>
+                <label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Assigned Admin</label>
+                <select value={editClient.adminId||""} onChange={e=>setEditClient(s=>({...s,adminId:e.target.value}))} style={input}>
+                  <option value="">JIYA / Superadmin</option>
+                  {(state.admins||[]).map(a=><option key={a.id} value={a.id}>{a.name||a.username} ({a.id})</option>)}
+                </select>
+              </div>
+            </div>
+            <div style={{marginBottom:14}}>
+              <label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Account Type *</label>
+              <select value={editClient.accountType||"trading"} onChange={e=>setEditClient(s=>({...s,accountType:e.target.value}))} style={input}>
+                <option value="trading">Trading Account</option>
+                <option value="investor">Investor Account</option>
+                <option value="hybrid">Hybrid Account</option>
+              </select>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+              <div style={{marginBottom:14}}>
+                <label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Total Deposited Fund (₹){["investor","hybrid"].includes(editClient.accountType)?" *":""}</label>
+                <input type="number" min="0" value={editClient.depositAmount} onChange={e=>setEditClient(s=>({...s,depositAmount:e.target.value}))} style={input}/>
+                {investorCommitted>0 && <div style={{fontSize:10,color:C.yellow,marginTop:4}}>Minimum allowed: {formatINR(investorCommitted)} active investor allocation</div>}
+              </div>
+              <div style={{marginBottom:14}}>
+                <label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Monthly Strategy Capital (₹){["trading","hybrid"].includes(editClient.accountType)?" *":""}</label>
+                <input type="number" min="0" value={editClient.monthlyStrategyCapital} onChange={e=>setEditClient(s=>({...s,monthlyStrategyCapital:e.target.value}))} style={input}/>
+                {strategyCommitted>0 && <div style={{fontSize:10,color:C.yellow,marginTop:4}}>Minimum allowed: {formatINR(strategyCommitted)} active strategy allocation</div>}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:10,marginTop:8}}>
+              <button disabled={editClientSaving} style={{...btn(C.green),opacity:editClientSaving?0.6:1}} onClick={saveClientAccount}><Icon name="check" size={14}/> {editClientSaving?"Saving safely...":"Save All Changes"}</button>
+              <button disabled={editClientSaving} style={btn(C.muted)} onClick={()=>{setModal(null);setEditClient(null);}}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     if (modal === "addClient") return (
       <div style={overlay} onClick={() => setModal(null)}>
