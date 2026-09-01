@@ -984,13 +984,14 @@ const formatINR = (value) => new Intl.NumberFormat("en-IN", {
   style: "currency", currency: "INR", maximumFractionDigits: 2,
 }).format(Number(value) || 0);
 
-function MonthlyTargetTracker({ title, subtitle, pnl, target, pnlAvailable=true, C, card }) {
+function MonthlyTargetTracker({ title, subtitle, pnl, target, pnlAvailable=true, onSetTarget=null, C, card }) {
   const targetAmount = Number(target) || 0;
   if (!(targetAmount > 0)) return (
     <div style={{...card,padding:"18px 20px",marginBottom:20,border:`1px solid ${C.border}`}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
         <div><div style={{color:C.text,fontWeight:800,fontSize:16}}>{title}</div><div style={{color:C.muted,fontSize:11,marginTop:3}}>{subtitle}</div></div>
-        <span style={{padding:"5px 10px",borderRadius:999,background:C.muted+"18",color:C.muted,fontSize:11,fontWeight:700}}>Target not set</span>
+        {onSetTarget ? <button onClick={onSetTarget} style={{padding:"7px 12px",borderRadius:8,border:"none",background:C.accent,color:"#fff",fontSize:11,fontWeight:800,cursor:"pointer"}}>Set this month’s target</button>
+          : <span style={{padding:"5px 10px",borderRadius:999,background:C.muted+"18",color:C.muted,fontSize:11,fontWeight:700}}>Target not set</span>}
       </div>
     </div>
   );
@@ -1631,7 +1632,7 @@ export default function BackOffice() {
         sb.select("audit_log",      "?order=timestamp.desc&limit=2000").catch(() => []),
         fetchAll("investor_allocations", "?order=effectiveFrom.desc").catch(() => []),
         fetchAll("carry_forward_batches", "?order=month.desc").catch(() => []),
-        fetchAll("client_monthly_targets", "?order=month.desc").catch(() => []),
+        sb.rpc("get_monthly_targets", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -2022,7 +2023,7 @@ export default function BackOffice() {
 
     if (isSuperAdmin) {
       setLoginAttempts(0);
-      setAuth({ role: "superadmin", plan: "superadmin" });
+      setAuth({ role: "superadmin", plan: "superadmin", loginUser:userInput, loginSecret:passInput });
       sessionStorage.setItem("jiya_login_time", Date.now().toString());
       setPage("dashboard");
       setLoginForm({ user: "", pass: "", error: "" });
@@ -2035,13 +2036,13 @@ export default function BackOffice() {
         return;
       }
       setLoginAttempts(0);
-      setAuth({ role: "admin", adminId: subAdmin.id, plan: subAdmin.plan || "basic" });
+      setAuth({ role: "admin", adminId: subAdmin.id, plan: subAdmin.plan || "basic", loginUser:userInput, loginSecret:passInput });
       sessionStorage.setItem("jiya_login_time", Date.now().toString());
       setPage("dashboard");
       setLoginForm({ user: "", pass: "", error: "" });
     } else if (client) {
       setLoginAttempts(0);
-      setAuth({ role: "client", clientId: client.id, adminId: client.adminId });
+      setAuth({ role: "client", clientId: client.id, adminId: client.adminId, loginUser:userInput, loginSecret:passInput });
       sessionStorage.setItem("jiya_login_time", Date.now().toString());
       setPage("dashboard");
       setLoginForm({ user: "", pass: "", error: "" });
@@ -2234,6 +2235,9 @@ export default function BackOffice() {
   };
 
   const openTargetEditor = (client, month=currentMonthStr) => {
+    if (auth?.role === "client" && monthlyTargetFor(client.id,month) > 0) {
+      return notify("Your target is locked for this month. Contact JIYA admin to change it.","error");
+    }
     setTargetEditor({clientId:client.id,clientName:client.name||client.id,month,targetAmount:monthlyTargetFor(client.id,month)});
     setModal("monthlyTarget");
   };
@@ -2245,12 +2249,21 @@ export default function BackOffice() {
     if (!Number.isFinite(amount) || amount < 0) return notify("Monthly target cannot be negative", "error");
     setTargetSaving(true);
     try {
-      const saved = await withSync(() => sb.rpc("set_client_monthly_target", {
-        p_client_id:targetEditor.clientId,
-        p_month:targetEditor.month,
-        p_target_amount:amount,
-        p_created_by:auth?.adminId || auth?.role || "JIYA",
-      }));
+      const isClientTarget = auth?.role === "client";
+      if (isClientTarget && amount <= 0) throw new Error("Target must be greater than zero");
+      const saved = await withSync(() => isClientTarget
+        ? sb.rpc("set_own_monthly_target_once", {
+            p_client_id:auth.clientId,
+            p_password:auth.loginSecret,
+            p_target_amount:amount,
+          })
+        : sb.rpc("admin_set_client_monthly_target", {
+            p_client_id:targetEditor.clientId,
+            p_month:targetEditor.month,
+            p_target_amount:amount,
+            p_admin_user:auth?.loginUser||"",
+            p_admin_password:auth?.loginSecret||"",
+          }));
       if (!saved?.clientId) throw new Error("Target update was not confirmed by the database");
       setState(s=>({
         ...s,
@@ -3349,6 +3362,7 @@ export default function BackOffice() {
               pnl={myMonthPnl}
               target={monthlyTargetFor(cid)}
               pnlAvailable={(currentClient?.accountType || "trading") !== "investor"}
+              onSetTarget={(currentClient?.accountType || "trading") !== "investor" && monthlyTargetFor(cid) <= 0 ? ()=>openTargetEditor(currentClient) : null}
               C={C}
               card={card}
             />
@@ -5617,9 +5631,10 @@ export default function BackOffice() {
         <div style={box} onClick={e=>e.stopPropagation()}>
           <h3 style={{color:C.text,marginTop:0}}>Monthly Target — {targetEditor.clientName}</h3>
           <div style={{color:C.muted,fontSize:12,lineHeight:1.55,marginBottom:16}}>The tracker reads the existing JIYA monthly net P&amp;L. Saving a target never changes trades, FIFO, positions, charges, interest or P&amp;L.</div>
-          <div style={{marginBottom:14}}><label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Target Month *</label><input type="month" value={targetEditor.month} onChange={e=>setTargetEditor(s=>({...s,month:e.target.value,targetAmount:monthlyTargetFor(s.clientId,e.target.value)}))} style={input}/></div>
-          <div style={{marginBottom:8}}><label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Monthly Net P&amp;L Target (₹) *</label><input type="number" min="0" value={targetEditor.targetAmount} onChange={e=>setTargetEditor(s=>({...s,targetAmount:e.target.value}))} style={input} placeholder="Example: 40000"/></div>
-          <div style={{color:C.muted,fontSize:10,marginBottom:18}}>Enter ₹0 to remove the target for this month. Previous months remain stored separately.</div>
+          {auth?.role==="client" && <div style={{padding:10,borderRadius:8,background:C.yellow+"12",border:`1px solid ${C.yellow}33`,color:C.yellow,fontSize:11,lineHeight:1.5,marginBottom:14}}>You can submit this month’s target only once. After saving, only JIYA Admin can change it.</div>}
+          <div style={{marginBottom:14}}><label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Target Month *</label><input type="month" disabled={auth?.role==="client"} value={targetEditor.month} onChange={e=>setTargetEditor(s=>({...s,month:e.target.value,targetAmount:monthlyTargetFor(s.clientId,e.target.value)}))} style={{...input,opacity:auth?.role==="client"?0.65:1}}/></div>
+          <div style={{marginBottom:8}}><label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Monthly Net P&amp;L Target (₹) *</label><input type="number" min={auth?.role==="client"?1:0} value={targetEditor.targetAmount} onChange={e=>setTargetEditor(s=>({...s,targetAmount:e.target.value}))} style={input} placeholder="Example: 40000"/></div>
+          <div style={{color:C.muted,fontSize:10,marginBottom:18}}>{auth?.role==="client"?"Check the amount carefully before saving. It becomes locked immediately.":"Enter ₹0 to remove the target for this month. Previous months remain stored separately."}</div>
           <div style={{display:"flex",gap:10}}><button disabled={targetSaving} style={{...btn(C.green),opacity:targetSaving?0.6:1}} onClick={saveMonthlyTarget}><Icon name="check" size={14}/> {targetSaving?"Saving...":"Save Monthly Target"}</button><button disabled={targetSaving} style={btn(C.muted)} onClick={()=>{setModal(null);setTargetEditor(null);}}>Cancel</button></div>
         </div>
       </div>
