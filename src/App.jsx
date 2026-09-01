@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 import { accountTypeLabel, calculateOwnershipPct, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
 import { buildCarryForwardPreview, verifyCarryForwardPairs } from "./monthEndCarryForward.js";
+import { daysRemainingInMonth, targetTrackerState } from "./targetTracker.js";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -219,6 +220,7 @@ const INITIAL_STATE = {
   auditLog: [],   // ledger audit trail — created/edited/deleted entries
   investorAllocations: [], // allocation layer only; never changes broker trades/FIFO
   carryForwardBatches: [],
+  monthlyTargets: [], // presentation goals only; consumes canonical P&L output
 };
 
 // ── Plan feature access ──────────────────────────────
@@ -980,6 +982,67 @@ function useCountUp(target, duration = 900) {
 const formatINR = (value) => new Intl.NumberFormat("en-IN", {
   style: "currency", currency: "INR", maximumFractionDigits: 2,
 }).format(Number(value) || 0);
+
+function MonthlyTargetTracker({ title, subtitle, pnl, target, pnlAvailable=true, C, card }) {
+  const targetAmount = Number(target) || 0;
+  if (!(targetAmount > 0)) return (
+    <div style={{...card,padding:"18px 20px",marginBottom:20,border:`1px solid ${C.border}`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
+        <div><div style={{color:C.text,fontWeight:800,fontSize:16}}>{title}</div><div style={{color:C.muted,fontSize:11,marginTop:3}}>{subtitle}</div></div>
+        <span style={{padding:"5px 10px",borderRadius:999,background:C.muted+"18",color:C.muted,fontSize:11,fontWeight:700}}>Target not set</span>
+      </div>
+    </div>
+  );
+  if (!pnlAvailable) return (
+    <div style={{...card,padding:"18px 20px",marginBottom:20,border:`1px solid ${C.yellow}44`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
+        <div><div style={{color:C.text,fontWeight:800,fontSize:16}}>{title}</div><div style={{color:C.muted,fontSize:11,marginTop:3}}>{subtitle}</div></div>
+        <div style={{textAlign:"right"}}><div style={{color:C.muted,fontSize:10}}>Monthly Target</div><div style={{color:C.text,fontWeight:800}}>{formatINR(targetAmount)}</div></div>
+      </div>
+      <div style={{marginTop:14,padding:12,borderRadius:9,background:C.yellow+"10",color:C.yellow,fontSize:12,fontWeight:700}}>P&amp;L data pending — no estimated or dummy figure is displayed.</div>
+    </div>
+  );
+
+  const value = Number(pnl) || 0;
+  const tracker = targetTrackerState(value, targetAmount);
+  const markerColor = tracker.status==="loss" ? C.red : tracker.status==="caution" ? C.yellow : C.accent;
+  const statusText = tracker.status==="loss" ? "Recovery Zone" : tracker.status==="caution" ? "Target achieved — protect profits" : "Progressing toward target";
+  const daysLeft = daysRemainingInMonth(new Date());
+  const dailyNeeded = tracker.remaining > 0 ? tracker.remaining / Math.max(daysLeft,1) : 0;
+  return (
+    <div style={{...card,padding:"20px 22px",marginBottom:20,border:`1px solid ${markerColor}55`,overflow:"hidden"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",gap:16,flexWrap:"wrap"}}>
+        <div><div style={{color:C.text,fontWeight:850,fontSize:17}}>{title}</div><div style={{color:C.muted,fontSize:11,marginTop:3}}>{subtitle} · Source: existing JIYA monthly net P&amp;L</div></div>
+        <div style={{display:"flex",gap:22,textAlign:"right"}}>
+          <div><div style={{color:C.muted,fontSize:10}}>Current P&amp;L</div><div style={{color:value>=0?C.green:C.red,fontWeight:900,fontSize:18}}>{value>=0?"+":"−"}{formatINR(Math.abs(value))}</div></div>
+          <div><div style={{color:C.muted,fontSize:10}}>Monthly Target</div><div style={{color:C.text,fontWeight:900,fontSize:18}}>{formatINR(targetAmount)}</div></div>
+        </div>
+      </div>
+
+      <div style={{position:"relative",height:76,margin:"18px 4px 2px"}}>
+        <div style={{position:"absolute",left:0,right:0,top:31,height:12,borderRadius:999,background:`linear-gradient(90deg, ${C.red} 0%, ${C.red} 25%, ${C.accent} 25%, ${C.green} 80%, ${C.yellow} 80%, ${C.yellow} 100%)`,opacity:0.82,boxShadow:"inset 0 1px 3px rgba(0,0,0,.35)"}}/>
+        <div style={{position:"absolute",left:"25%",top:25,width:2,height:24,background:"#fff",opacity:.75}}/>
+        <div style={{position:"absolute",left:"80%",top:22,width:2,height:30,background:"#fff",opacity:.9}}/>
+        <div style={{position:"absolute",left:`${tracker.markerPct}%`,top:0,transform:"translateX(-50%)",transition:"left 1.1s cubic-bezier(.2,.8,.2,1)",zIndex:2}}>
+          <div style={{background:markerColor,color:"#fff",fontSize:11,fontWeight:900,padding:"5px 9px",borderRadius:7,whiteSpace:"nowrap",boxShadow:`0 4px 14px ${markerColor}55`}}>{value>=0?"+":"−"}{formatINR(Math.abs(value))}</div>
+          <div style={{width:0,height:0,borderLeft:"6px solid transparent",borderRight:"6px solid transparent",borderTop:`7px solid ${markerColor}`,margin:"0 auto"}}/>
+          <div style={{width:18,height:18,borderRadius:"50%",background:"#fff",border:`5px solid ${markerColor}`,margin:"2px auto 0",boxShadow:`0 0 0 4px ${markerColor}25`}}/>
+        </div>
+        <div style={{position:"absolute",left:0,top:56,color:C.red,fontSize:10,fontWeight:700}}>Loss</div>
+        <div style={{position:"absolute",left:"25%",top:56,transform:"translateX(-50%)",color:C.muted,fontSize:10}}>₹0</div>
+        <div style={{position:"absolute",left:"80%",top:56,transform:"translateX(-50%)",color:C.green,fontSize:10,fontWeight:800}}>Target</div>
+        <div style={{position:"absolute",right:0,top:56,color:C.yellow,fontSize:10,fontWeight:800}}>Caution</div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(120px,1fr))",gap:10,marginTop:8}}>
+        <div style={{background:C.bg,borderRadius:9,padding:10}}><div style={{color:C.muted,fontSize:10}}>Status</div><div style={{color:markerColor,fontWeight:800,fontSize:12,marginTop:3}}>{statusText}</div></div>
+        <div style={{background:C.bg,borderRadius:9,padding:10}}><div style={{color:C.muted,fontSize:10}}>{tracker.status==="caution"?"Profit Buffer":"Target Remaining"}</div><div style={{color:C.text,fontWeight:800,fontSize:12,marginTop:3}}>{formatINR(tracker.status==="caution"?tracker.buffer:tracker.remaining)}</div></div>
+        <div style={{background:C.bg,borderRadius:9,padding:10}}><div style={{color:C.muted,fontSize:10}}>Target Progress</div><div style={{color:markerColor,fontWeight:800,fontSize:12,marginTop:3}}>{tracker.progressPct.toFixed(2)}%</div></div>
+        <div style={{background:C.bg,borderRadius:9,padding:10}}><div style={{color:C.muted,fontSize:10}}>{tracker.remaining>0?`Required / day · ${daysLeft} days left`:"Risk Message"}</div><div style={{color:tracker.status==="caution"?C.yellow:C.text,fontWeight:800,fontSize:12,marginTop:3}}>{tracker.remaining>0?formatINR(dailyNeeded):"Protect achieved profits"}</div></div>
+      </div>
+    </div>
+  );
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function BackOffice() {
@@ -1554,7 +1617,7 @@ export default function BackOffice() {
         return all;
       };
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, investorAllocations, carryForwardBatches] = await Promise.all([
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, investorAllocations, carryForwardBatches, monthlyTargets] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         fetchAll("trades",          "?order=date.asc,time.asc"),
         fetchAll("ledger",          "?order=date.asc"),
@@ -1567,6 +1630,7 @@ export default function BackOffice() {
         sb.select("audit_log",      "?order=timestamp.desc&limit=2000").catch(() => []),
         fetchAll("investor_allocations", "?order=effectiveFrom.desc").catch(() => []),
         fetchAll("carry_forward_batches", "?order=month.desc").catch(() => []),
+        fetchAll("client_monthly_targets", "?order=month.desc").catch(() => []),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -1586,6 +1650,7 @@ export default function BackOffice() {
         auditLog:       Array.isArray(auditLog) ? auditLog : [],
         investorAllocations: Array.isArray(investorAllocations) ? investorAllocations : [],
         carryForwardBatches: Array.isArray(carryForwardBatches) ? carryForwardBatches : [],
+        monthlyTargets: Array.isArray(monthlyTargets) ? monthlyTargets : [],
       }));
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
@@ -2077,6 +2142,7 @@ export default function BackOffice() {
 
   // ── Shared helpers used across pages ──────────────────────────
   const currentMonthStr = new Date().toISOString().slice(0,7);
+  const monthlyTargetFor = (clientId, month=currentMonthStr) => Number((state.monthlyTargets||[]).find(t=>t.clientId===clientId && t.month===month)?.targetAmount)||0;
 
   const clientNetPnlForMonth = (clientId, yearMonth) => {
     if (!clientId || !yearMonth) return 0;
@@ -2136,6 +2202,8 @@ export default function BackOffice() {
   const [editClient, setEditClient] = useState(null);
   const [editClientOriginalId, setEditClientOriginalId] = useState("");
   const [editClientSaving, setEditClientSaving] = useState(false);
+  const [targetEditor, setTargetEditor] = useState(null);
+  const [targetSaving, setTargetSaving] = useState(false);
   const addClient = () => {
     if (!newClient.id || !newClient.name || !newClient.password) return notify("Fill required fields", "error");
     if (state.clients.find((c) => c.id === newClient.id)) return notify("Client ID already exists", "error");
@@ -2159,6 +2227,40 @@ export default function BackOffice() {
     });
     setEditClientOriginalId(client.id);
     setModal("editClient");
+  };
+
+  const openTargetEditor = (client, month=currentMonthStr) => {
+    setTargetEditor({clientId:client.id,clientName:client.name||client.id,month,targetAmount:monthlyTargetFor(client.id,month)});
+    setModal("monthlyTarget");
+  };
+
+  const saveMonthlyTarget = async () => {
+    if (!targetEditor || targetSaving) return;
+    const amount = Number(targetEditor.targetAmount);
+    if (!/^\d{4}-\d{2}$/.test(targetEditor.month||"")) return notify("Select a valid target month", "error");
+    if (!Number.isFinite(amount) || amount < 0) return notify("Monthly target cannot be negative", "error");
+    setTargetSaving(true);
+    try {
+      const saved = await withSync(() => sb.rpc("set_client_monthly_target", {
+        p_client_id:targetEditor.clientId,
+        p_month:targetEditor.month,
+        p_target_amount:amount,
+        p_created_by:auth?.adminId || auth?.role || "JIYA",
+      }));
+      if (!saved?.clientId) throw new Error("Target update was not confirmed by the database");
+      setState(s=>({
+        ...s,
+        monthlyTargets:amount===0
+          ? (s.monthlyTargets||[]).filter(t=>!(t.clientId===targetEditor.clientId&&t.month===targetEditor.month))
+          : [saved,...(s.monthlyTargets||[]).filter(t=>!(t.clientId===saved.clientId&&t.month===saved.month))],
+      }));
+      pushAudit("EDITED",targetEditor.clientId,amount===0?`Monthly target removed for ${targetEditor.month}`:`Monthly target set to ${formatINR(amount)} for ${targetEditor.month}`);
+      setTargetEditor(null);
+      setModal(null);
+      notify(amount===0?"Monthly target removed":"Monthly target saved");
+    } catch(error) {
+      notify(`Target save failed: ${error.message}`,"error");
+    } finally { setTargetSaving(false); }
   };
 
   const saveClientAccount = async () => {
@@ -2209,6 +2311,7 @@ export default function BackOffice() {
           investorClientId:a.investorClientId===oldId?saved.id:a.investorClientId,
           strategyClientId:a.strategyClientId===oldId?saved.id:a.strategyClientId,
         })),
+        monthlyTargets:(s.monthlyTargets||[]).map(t=>t.clientId===oldId?{...t,clientId:saved.id}:t),
       }));
       setLivePositions(rows=>rows.map(p=>p.clientId===oldId?{...p,clientId:saved.id}:p));
       pushAudit("EDITED", saved.id, `Account details updated${oldId!==saved.id?` — code ${oldId} → ${saved.id}`:""}; deposit ${formatINR(saved.depositAmount)}; strategy capital ${formatINR(saved.monthlyStrategyCapital)}`);
@@ -3236,6 +3339,16 @@ export default function BackOffice() {
               </div>
             </div>
 
+            <MonthlyTargetTracker
+              title="Monthly Target Tracker"
+              subtitle={`${currentMonthStr} · ${currentClient?.name || cid}`}
+              pnl={myMonthPnl}
+              target={monthlyTargetFor(cid)}
+              pnlAvailable={(currentClient?.accountType || "trading") !== "investor"}
+              C={C}
+              card={card}
+            />
+
             {/* 3 stat cards */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:24}}>
               {/* This Month Realized P&L (closed only) */}
@@ -3301,6 +3414,11 @@ export default function BackOffice() {
 
       // ── ADMIN / SUPERADMIN DASHBOARD ─────────────────────────
       const adminName = auth?.role === "superadmin" ? "JIYA" : (state.admins||[]).find(a=>a.id===auth?.adminId)?.name || "Admin";
+      const operationalClients = visibleClients.filter(c => (c.accountType || "trading") !== "investor");
+      const pureInvestorClients = visibleClients.filter(c => c.accountType === "investor");
+      const operationalTarget = operationalClients.reduce((sum,c) => sum + monthlyTargetFor(c.id), 0);
+      const operationalPnl = operationalClients.reduce((sum,c) => sum + clientNetPnlForMonth(c.id, currentMonthStr), 0);
+      const investorTarget = pureInvestorClients.reduce((sum,c) => sum + monthlyTargetFor(c.id), 0);
 
       return (
         <div>
@@ -3326,6 +3444,28 @@ export default function BackOffice() {
 
             </div>
           </div>
+
+          <MonthlyTargetTracker
+            title="Firm Operational Target"
+            subtitle={`${currentMonthStr} · Trading + Hybrid accounts · ${operationalClients.length} accounts`}
+            pnl={operationalPnl}
+            target={operationalTarget}
+            pnlAvailable={true}
+            C={C}
+            card={card}
+          />
+
+          {pureInvestorClients.length > 0 && (
+            <MonthlyTargetTracker
+              title="Investor Account Targets"
+              subtitle={`${currentMonthStr} · ${pureInvestorClients.length} investor accounts · kept separate to prevent double-counting`}
+              pnl={0}
+              target={investorTarget}
+              pnlAvailable={false}
+              C={C}
+              card={card}
+            />
+          )}
 
           {/* 4 KPI Cards */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:24}}>
@@ -3554,7 +3694,7 @@ export default function BackOffice() {
         </div>
         <div style={{ ...card }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead><tr>{["Client ID", "Name", "Type", "Fund / Capital", "Email", "Phone", "Password", "Open Pos", "Action"].map((h) => <th key={h} style={{ textAlign: "left", padding: "10px 12px", color: C.muted, borderBottom: `1px solid ${C.border}` }}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Client ID", "Name", "Type", "Fund / Capital", "Monthly Target", "Email", "Phone", "Password", "Open Pos", "Action"].map((h) => <th key={h} style={{ textAlign: "left", padding: "10px 12px", color: C.muted, borderBottom: `1px solid ${C.border}` }}>{h}</th>)}</tr></thead>
             <tbody>
               {state.clients.map((c) => (
                 <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}` }}>
@@ -3567,6 +3707,11 @@ export default function BackOffice() {
                       {["investor","hybrid"].includes(c.accountType) && <div>Deposit: {formatINR(Number(c.depositAmount)||0)}</div>}
                       {(c.accountType === "trading" || c.accountType === "hybrid" || !c.accountType) && <div>Strategy: {formatINR(Number(c.monthlyStrategyCapital)||0)}</div>}
                       <div style={{fontSize:10,color:C.accent,marginTop:3}}>✏️ Click to edit fund</div>
+                    </button>
+                  </td>
+                  <td style={{padding:"12px"}}>
+                    <button onClick={()=>openTargetEditor(c)} style={{background:C.green+"0c",border:`1px dashed ${C.green}66`,borderRadius:7,padding:"7px 9px",color:monthlyTargetFor(c.id)>0?C.green:C.muted,cursor:"pointer",fontWeight:700,whiteSpace:"nowrap"}}>
+                      {monthlyTargetFor(c.id)>0?formatINR(monthlyTargetFor(c.id)):"+ Set Target"}
                     </button>
                   </td>
                   <td style={{ padding: "12px", color: C.muted }}>{c.email}</td>
@@ -5466,6 +5611,19 @@ export default function BackOffice() {
         ) : (
           <input type={type} value={obj[key]} onChange={(e) => setObj((s) => ({ ...s, [key]: e.target.value }))} style={{ ...input }} />
         )}
+      </div>
+    );
+
+    if (modal === "monthlyTarget" && targetEditor) return (
+      <div style={overlay} onClick={()=>{if(!targetSaving){setModal(null);setTargetEditor(null);}}}>
+        <div style={box} onClick={e=>e.stopPropagation()}>
+          <h3 style={{color:C.text,marginTop:0}}>Monthly Target — {targetEditor.clientName}</h3>
+          <div style={{color:C.muted,fontSize:12,lineHeight:1.55,marginBottom:16}}>The tracker reads the existing JIYA monthly net P&amp;L. Saving a target never changes trades, FIFO, positions, charges, interest or P&amp;L.</div>
+          <div style={{marginBottom:14}}><label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Target Month *</label><input type="month" value={targetEditor.month} onChange={e=>setTargetEditor(s=>({...s,month:e.target.value,targetAmount:monthlyTargetFor(s.clientId,e.target.value)}))} style={input}/></div>
+          <div style={{marginBottom:8}}><label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Monthly Net P&amp;L Target (₹) *</label><input type="number" min="0" value={targetEditor.targetAmount} onChange={e=>setTargetEditor(s=>({...s,targetAmount:e.target.value}))} style={input} placeholder="Example: 40000"/></div>
+          <div style={{color:C.muted,fontSize:10,marginBottom:18}}>Enter ₹0 to remove the target for this month. Previous months remain stored separately.</div>
+          <div style={{display:"flex",gap:10}}><button disabled={targetSaving} style={{...btn(C.green),opacity:targetSaving?0.6:1}} onClick={saveMonthlyTarget}><Icon name="check" size={14}/> {targetSaving?"Saving...":"Save Monthly Target"}</button><button disabled={targetSaving} style={btn(C.muted)} onClick={()=>{setModal(null);setTargetEditor(null);}}>Cancel</button></div>
+        </div>
       </div>
     );
 
