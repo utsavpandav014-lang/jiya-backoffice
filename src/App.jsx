@@ -1621,7 +1621,10 @@ export default function BackOffice() {
 
       const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, investorAllocations, carryForwardBatches, monthlyTargets] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
-        fetchAll("trades",          "?order=date.asc,time.asc"),
+        // CRITICAL: id is the unique tie-breaker. Hundreds of broker rows can
+        // share the same date/time; offset pagination without id can skip or
+        // repeat rows between pages and feed an incomplete book into FIFO.
+        fetchAll("trades",          "?order=date.asc,time.asc,id.asc"),
         fetchAll("ledger",          "?order=date.asc"),
         fetchAll("tickets",         "?order=date.desc"),
         fetchAll("interest",        "?order=created_at.asc"),
