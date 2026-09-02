@@ -10,6 +10,20 @@ export function hasGenuineTradeForMonth(trades, yearMonth) {
   );
 }
 
+// A carried position starts the month at its reopen price (zero MTM) and must
+// move as soon as a newer market price is available. No additional broker trade
+// is required to activate that price movement.
+export function openPositionMtm(positions, priceForPosition) {
+  return (positions || []).reduce((sum, position) => {
+    const ltp = priceForPosition(position);
+    if (ltp === null || ltp === undefined || !Number.isFinite(Number(ltp))) return sum;
+    const movement = position.side === "SELL"
+      ? Number(position.avgPrice) - Number(ltp)
+      : Number(ltp) - Number(position.avgPrice);
+    return sum + movement * Number(position.netQty);
+  }, 0);
+}
+
 // FIFO stays untouched. Monthly reporting is derived from the dated match rows
 // emitted by FIFO, never by assigning a contract's all-time total to one month.
 export function closedPositionSlicesForMonth(closedPositions, yearMonth) {

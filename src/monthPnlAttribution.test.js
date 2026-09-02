@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { closedPositionSlicesForMonth, closedPositionSlicesInFilter, hasGenuineTradeForMonth, isCarryForwardTrade } from "./monthPnlAttribution.js";
+import { closedPositionSlicesForMonth, closedPositionSlicesInFilter, hasGenuineTradeForMonth, isCarryForwardTrade, openPositionMtm } from "./monthPnlAttribution.js";
 
 test("recognizes both internal carry-forward trade sides", () => {
   assert.equal(isCarryForwardTrade({id:"CF_CLOSE_CF_2026_08_00001"}), true);
@@ -18,6 +18,15 @@ test("an uploaded trade activates new-month P&L", () => {
     {id:"BROKER_20260901_1",date:"2026-09-01"},
   ];
   assert.equal(hasGenuineTradeForMonth(trades, "2026-09"), true);
+});
+
+test("carried positions receive MTM from current prices without another broker trade", () => {
+  const positions = [
+    {contract:"AXISBANK FUT 29SEP2026",side:"BUY",avgPrice:1272,netQty:1875},
+    {contract:"ITC 250 PE 29SEP2026",side:"BUY",avgPrice:0.75,netQty:1725},
+  ];
+  const prices = {"AXISBANK FUT 29SEP2026":1264.3,"ITC 250 PE 29SEP2026":0.45};
+  assert.ok(Math.abs(openPositionMtm(positions, position => prices[position.contract]) + 14955) < 0.001);
 });
 
 test("attributes FIFO match profit to its actual closing month", () => {

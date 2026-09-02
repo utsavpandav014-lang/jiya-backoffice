@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 import { accountTypeLabel, calculateOwnershipPct, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
 import { buildCarryForwardPreview, verifyCarryForwardPairs } from "./monthEndCarryForward.js";
-import { closedPositionSlicesForMonth, closedPositionSlicesInFilter, hasGenuineTradeForMonth, isCarryForwardTrade } from "./monthPnlAttribution.js";
+import { closedPositionSlicesForMonth, closedPositionSlicesInFilter, isCarryForwardTrade, openPositionMtm } from "./monthPnlAttribution.js";
 import { daysRemainingInMonth, targetTrackerState } from "./targetTracker.js";
 import { investorPnlForMonth as calculateInvestorPnlForMonth } from "./investorPnl.js";
 
@@ -2158,16 +2158,13 @@ export default function BackOffice() {
     const { openPositions: op2, closedPositions: cp2 } = applyFIFO(ct2);
     const closedPnl2 = closedPositionSlicesForMonth(cp2, yearMonth).reduce((a,c) => a + c.totalPnl, 0);
     const isCurrentMo = yearMonth === currentMonthStr;
-    // A synthetic carry reopen preserves the position but does not activate the
-    // new month's P&L. Open MTM starts only after a genuine uploaded/manual trade
-    // exists for this client in the new month.
-    const hasGenuineMonthTrade = hasGenuineTradeForMonth(ct2, yearMonth);
-    const openMTM2 = isCurrentMo && hasGenuineMonthTrade ? op2.reduce((s, pos) => {
+    // The carry reopen is the new month's cost basis. It starts at zero and then
+    // moves with every fresh LTP, even before another broker trade is uploaded.
+    const openMTM2 = isCurrentMo ? openPositionMtm(op2, pos => {
       const mk = `${pos.clientId}||${pos.contract}`;
       const ltp2 = manualLTP[mk] !== undefined ? manualLTP[mk] : getBhavClose(pos.contract);
-      if (ltp2 == null) return s;
-      return s + (pos.side==="SELL" ? (pos.avgPrice-ltp2) : (ltp2-pos.avgPrice)) * pos.netQty;
-    }, 0) : 0;
+      return ltp2;
+    }) : 0;
     const exp2 = getMonthlyCharges(clientId, yearMonth);
     const sw2  = getMonthlyInterest(clientId, yearMonth+"_SW");
     const int2 = getMonthlyInterest(clientId, yearMonth);
@@ -4821,18 +4818,13 @@ export default function BackOffice() {
             const currentYearMonth = new Date().toISOString().slice(0,7);
             const isCurrentMonth   = pnlDateMode === "all" ||
               (pnlDateMode === "month" && pnlMonth === currentYearMonth);
-            const genuineCurrentMonthTrade = hasGenuineTradeForMonth(
-              state.trades.filter(t => t.clientId === client.id),
-              currentYearMonth
-            );
-            const grandMTM = isCurrentMonth && genuineCurrentMonthTrade ? open.reduce((s, pos) => {
+            const grandMTM = isCurrentMonth ? openPositionMtm(open, pos => {
               const manualKey = `${pos.clientId}||${pos.contract}`;
               const ltp = manualLTP[manualKey] !== undefined
                 ? manualLTP[manualKey]
                 : getBhavClose(pos.contract);
-              if (ltp === null || ltp === undefined) return s;
-              return s + (pos.side === "SELL" ? (pos.avgPrice - ltp) : (ltp - pos.avgPrice)) * pos.netQty;
-            }, 0) : 0;
+              return ltp;
+            }) : 0;
             // Net P&L = Realized (closed) + Open MTM (current month only) - Expenses
             const grandNet = grandRealized + grandMTM - grandExpenses - grandSoftware - grandInterest;
 
