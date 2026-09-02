@@ -3,6 +3,7 @@ import { accountTypeLabel, calculateOwnershipPct, validateClientCapital, validat
 import { buildCarryForwardPreview, verifyCarryForwardPairs } from "./monthEndCarryForward.js";
 import { closedPositionSlicesForMonth, closedPositionSlicesInFilter, hasGenuineTradeForMonth, isCarryForwardTrade } from "./monthPnlAttribution.js";
 import { daysRemainingInMonth, targetTrackerState } from "./targetTracker.js";
+import { investorPnlForMonth as calculateInvestorPnlForMonth } from "./investorPnl.js";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -2173,6 +2174,20 @@ export default function BackOffice() {
     return closedPnl2 + openMTM2 - exp2 - sw2 - int2;
   };
 
+  // Investor reporting is an additive ownership view over canonical strategy
+  // results. It never changes trades, FIFO queues, strategy positions or strategy P&L.
+  const investorPnlForMonth = (investorId, yearMonth) => calculateInvestorPnlForMonth({
+    investorId,
+    yearMonth,
+    allocations: state.investorAllocations || [],
+    strategyPnl: clientNetPnlForMonth,
+  });
+
+  const displayedPnlForMonth = (client, yearMonth) =>
+    client?.accountType === "investor"
+      ? investorPnlForMonth(client.id, yearMonth).pnl
+      : clientNetPnlForMonth(client?.id, yearMonth);
+
 
   // ── Data isolation by adminId ──────────────────────
   const visibleClients = (() => {
@@ -3300,7 +3315,8 @@ export default function BackOffice() {
       // ── Accurate Net P&L per client for a given month (matches P&L page exactly) ──
       // Net P&L = Realized (closed FIFO positions) − Expenses − Software Charges − Interest
       // This Month Net P&L — sum across all visible clients (matches P&L page logic)
-      const thisMonthPnl = visibleClients.reduce((sum, c) => sum + clientNetPnlForMonth(c.id, currentMonthStr), 0);
+      const dashboardOperationalClients = visibleClients.filter(c => (c.accountType || "trading") !== "investor");
+      const thisMonthPnl = dashboardOperationalClients.reduce((sum, c) => sum + clientNetPnlForMonth(c.id, currentMonthStr), 0);
 
       // ── Win Rate (12 months) ─────────────────────────────────
       const last12     = Object.entries(monthMap).sort((a, b) => a[0] > b[0] ? -1 : 1).slice(0, 12);
@@ -3320,7 +3336,8 @@ export default function BackOffice() {
       if (auth?.role === "client") {
         const myData   = clientPnlData.find(c => c.id === cid) || { realizedPnl: 0, mtmPnl: 0, openCount: 0 };
         const myTrades = allTrades.filter(t => t.clientId === cid);
-        const myMonthPnl = clientNetPnlForMonth(cid, currentMonthStr);
+        const investorMonthResult = currentClient?.accountType === "investor" ? investorPnlForMonth(cid, currentMonthStr) : null;
+        const myMonthPnl = displayedPnlForMonth(currentClient, currentMonthStr);
 
         // Daily win rate this month
         const dayMap2 = {};
@@ -3364,7 +3381,7 @@ export default function BackOffice() {
               subtitle={`${currentMonthStr} · ${currentClient?.name || cid}`}
               pnl={myMonthPnl}
               target={monthlyTargetFor(cid)}
-              pnlAvailable={(currentClient?.accountType || "trading") !== "investor"}
+              pnlAvailable={!investorMonthResult || investorMonthResult.complete}
               onSetTarget={(currentClient?.accountType || "trading") !== "investor" && monthlyTargetFor(cid) <= 0 ? ()=>openTargetEditor(currentClient) : null}
               C={C}
               card={card}
@@ -3374,22 +3391,23 @@ export default function BackOffice() {
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:24}}>
               {/* This Month Realized P&L (closed only) */}
               {(() => {
-                const myClosedPnl = closedPositionSlicesForMonth(clientClosedPos(currentClient?.id || auth?.clientId), currentMonthStr)
-                  .reduce((a,c) => a + c.totalPnl, 0);
+                const myClosedPnl = investorMonthResult
+                  ? investorMonthResult.pnl
+                  : closedPositionSlicesForMonth(clientClosedPos(currentClient?.id || auth?.clientId), currentMonthStr).reduce((a,c) => a + c.totalPnl, 0);
                 return (
                   <div style={{...card,padding:"20px 22px"}}>
-                    <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>This Month Realized</div>
+                    <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>{investorMonthResult ? "Your Allocated P&L" : "This Month Realized"}</div>
                     <div style={{fontSize:26,fontWeight:800,color:myClosedPnl>=0?C.green:C.red,lineHeight:1}}>
                       {myClosedPnl>=0?"+":""}₹{Math.abs(myClosedPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
                     </div>
-                    <div style={{fontSize:11,color:C.muted,marginTop:6}}>Closed positions only</div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:6}}>{investorMonthResult ? "Combined across your portfolio" : "Closed positions only"}</div>
                   </div>
                 );
               })()}
 
               {/* Current Month Net P&L */}
               {(() => {
-                const cmPnl  = clientNetPnlForMonth(currentClient?.id || auth?.clientId, currentMonthStr);
+                const cmPnl  = myMonthPnl;
                 const cmCol  = cmPnl >= 0 ? C.green : C.red;
                 return (
                   <div style={{...card,padding:"20px 22px",borderTop:`3px solid ${cmCol}`,cursor:"pointer"}}
@@ -3401,7 +3419,7 @@ export default function BackOffice() {
                       {cmPnl>=0?"+":""}₹{Math.abs(cmPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
                     </div>
                     <div style={{fontSize:11,color:C.muted,marginTop:6}}>
-                      Closed + Open MTM − Expenses →
+                      {investorMonthResult ? "Your proportional net result →" : "Closed + Open MTM − Expenses →"}
                     </div>
                   </div>
                 );
@@ -3523,7 +3541,7 @@ export default function BackOffice() {
 
             {/* Current Month Net P&L — All Clients */}
             {(() => {
-              const totalCmPnl = visibleClients.reduce((s,c) => s + clientNetPnlForMonth(c.id, currentMonthStr), 0);
+              const totalCmPnl = operationalClients.reduce((s,c) => s + clientNetPnlForMonth(c.id, currentMonthStr), 0);
               const tcCol = totalCmPnl >= 0 ? C.green : C.red;
               return (
                 <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${tcCol}`,cursor:"pointer"}}
@@ -3532,7 +3550,7 @@ export default function BackOffice() {
                   <div style={{fontSize:36,fontWeight:800,color:tcCol,lineHeight:1,marginBottom:6}}>
                     {totalCmPnl>=0?"+":""}₹{Math.abs(totalCmPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
                   </div>
-                  <div style={{fontSize:11,color:C.muted}}>All clients · Closed+MTM−Exp →</div>
+                  <div style={{fontSize:11,color:C.muted}}>Trading + Hybrid only · Closed+MTM−Exp →</div>
                 </div>
               );
             })()}
@@ -4748,6 +4766,40 @@ export default function BackOffice() {
           </div>
 
           {showClients.map(client => {
+            if (client.accountType === "investor") {
+              const allocationStrategyIds = new Set((state.investorAllocations || [])
+                .filter(a => a.investorClientId === client.id && a.status !== "cancelled")
+                .map(a => a.strategyClientId));
+              const investorMonths = [...new Set([
+                currentMonthStr,
+                ...state.trades.filter(t => allocationStrategyIds.has(t.clientId)).map(t => (t.date || "").slice(0, 7)),
+              ])].filter(m => m && monthInFilter(m)).sort().reverse();
+              const results = investorMonths.map(month => ({ month, ...investorPnlForMonth(client.id, month) }));
+              const total = results.reduce((sum, row) => sum + row.pnl, 0);
+              const pending = results.reduce((sum, row) => sum + row.pendingCount, 0);
+              return (
+                <div key={client.id} style={{ ...card, marginBottom:24 }}>
+                  {isAdmin && <div style={{ color:C.accent, fontWeight:700, fontSize:15, marginBottom:16 }}>
+                    {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
+                  </div>}
+                  <div style={{background:C.bg,borderRadius:10,padding:"18px 20px",border:`1px solid ${total>=0?C.green:C.red}55`,marginBottom:16}}>
+                    <div style={{color:C.muted,fontSize:11,textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>Combined Investor Net P&amp;L</div>
+                    <div style={{color:total>=0?C.green:C.red,fontSize:28,fontWeight:800}}>{total>=0?"+":"−"}₹{Math.abs(total).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:6}}>Your proportional result after Brokerage &amp; Charges</div>
+                  </div>
+                  {pending > 0 && <div style={{padding:"10px 14px",borderRadius:8,background:C.yellow+"12",color:C.yellow,fontSize:12,marginBottom:14}}>
+                    {pending} allocation period requires its effective-time LTP snapshot before that portion can be shown.
+                  </div>}
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                    <thead><tr><th style={{textAlign:"left",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>Month</th><th style={{textAlign:"right",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>Your Net P&amp;L</th></tr></thead>
+                    <tbody>{results.map(row => <tr key={row.month} style={{borderBottom:`1px solid ${C.border}22`}}>
+                      <td style={{padding:"10px 12px",color:C.text,fontWeight:600}}>{row.month}</td>
+                      <td style={{padding:"10px 12px",textAlign:"right",color:row.pnl>=0?C.green:C.red,fontWeight:700}}>{row.complete?(row.pnl>=0?"+":"−")+"₹"+Math.abs(row.pnl).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2}):"Pending snapshot"}</td>
+                    </tr>)}</tbody>
+                  </table>
+                </div>
+              );
+            }
             const closed  = clientClosedPos(client.id);
             const open    = clientOpenPos(client.id);
 
