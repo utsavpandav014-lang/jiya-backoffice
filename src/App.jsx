@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 95341)
-Total output lines: 6781
-
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 import { accountTypeLabel, calculateOwnershipPct, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
 import { buildCarryForwardPreview, verifyCarryForwardPairs } from "./monthEndCarryForward.js";
