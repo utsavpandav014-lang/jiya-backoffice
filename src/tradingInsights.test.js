@@ -24,3 +24,13 @@ test("finds profitable weekday and closing time patterns", () => {
   assert.equal(result.bestTime.hour,10);
   assert.equal(result.weakTime.hour,14);
 });
+
+test("excludes internal carry and out-of-market timestamps from timing patterns", () => {
+  const result=tradingPatterns([{trades:[
+    {date:"2026-09-01",time:"10:00:00 AM",pnl:20,sourceTradeId:"REAL1"},
+    {date:"2026-09-01",time:"07:00:00 PM",pnl:-999,sourceTradeId:"REAL2"},
+    {date:"2026-09-01",time:"03:29:00 PM",pnl:500,sourceTradeId:"CF_CLOSE_1"},
+  ]}]);
+  assert.deepEqual(result.hours.map(row=>row.hour),[10]);
+  assert.equal(result.bestTime.pnl,20);
+});
