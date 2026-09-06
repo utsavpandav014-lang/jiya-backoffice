@@ -37,3 +37,13 @@ test("does not show positions before the allocation start date", () => {
   });
   assert.deepEqual(positions, []);
 });
+
+test("historical view includes an allocation that closed later", () => {
+  const positions=investorPositions({
+    investorId:"INV1",at:"2026-09-10T10:00:00Z",
+    allocations:[{investorClientId:"INV1",strategyClientId:"S1",ownershipPct:50,effectiveFrom:"2026-09-01T00:00:00Z",effectiveTo:"2026-09-20T00:00:00Z",status:"closed"}],
+    strategyPositions:[{clientId:"S1",contract:"NIFTY FUT",side:"BUY",netQty:100,avgPrice:25000}],
+  });
+  assert.equal(positions.length,1);
+  assert.equal(positions[0].netQty,50);
+});
