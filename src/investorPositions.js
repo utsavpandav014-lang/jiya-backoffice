@@ -21,7 +21,7 @@ export function investorPositions({
     const starts = new Date(allocation.effectiveFrom).getTime();
     const ends = allocation.effectiveTo ? new Date(allocation.effectiveTo).getTime() : Infinity;
     return allocation.investorClientId === investorId &&
-      allocation.status !== "closed" && allocation.status !== "cancelled" &&
+      allocation.status !== "cancelled" &&
       Number.isFinite(starts) && starts <= timestamp && timestamp < ends;
   });
 

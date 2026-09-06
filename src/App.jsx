@@ -5,6 +5,7 @@ import { closedPositionSlicesForMonth, closedPositionSlicesInFilter, isCarryForw
 import { daysRemainingInMonth, targetTrackerState } from "./targetTracker.js";
 import { investorPnlForMonth as calculateInvestorPnlForMonth } from "./investorPnl.js";
 import { investorPositions as calculateInvestorPositions } from "./investorPositions.js";
+import { dailyTradingResults, positionsAsOfDate, tradingPatterns } from "./tradingInsights.js";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -69,6 +70,7 @@ function applyFIFO(trades) {
           buyPrice:  +buyPx.toFixed(4),
           pnl: +pnl.toFixed(2),
           date: trade.date,
+          time: trade.time || "",
         });
 
         lot.qty -= matchQty;
@@ -1084,6 +1086,8 @@ export default function BackOffice() {
   const [page, setPage] = useState("dashboard");
   const [modal, setModal] = useState(null);
   const [positionFilter,    setPositionFilter]    = useState("open");
+  const [positionAsOfDate,  setPositionAsOfDate]  = useState(new Date().toISOString().slice(0,10));
+  const [insightsMonth,     setInsightsMonth]     = useState(new Date().toISOString().slice(0,7));
   const [selectedContract,  setSelectedContract]  = useState(null); // for trade history modal
   const [ledgerSearch,   setLedgerSearch]   = useState("");
   const [tradeSearch,    setTradeSearch]    = useState("");
@@ -1617,32 +1621,44 @@ export default function BackOffice() {
       // ── Paginated fetch — loads ALL rows regardless of count ──
       const fetchAll = async (table, query = "") => {
         const PAGE = 1000;
+        const WINDOW = 6;
         let all = [], offset = 0;
         while (true) {
-          const rows = await sb.select(table, `${query}&limit=${PAGE}&offset=${offset}`);
-          if (!Array.isArray(rows) || rows.length === 0) break;
-          all = all.concat(rows);
-          if (rows.length < PAGE) break; // last page
-          offset += PAGE;
+          const pages = await Promise.all(Array.from({length:WINDOW},(_,index) =>
+            sb.select(table, `${query}&limit=${PAGE}&offset=${offset + index * PAGE}`)
+          ));
+          const valid = pages.map(rows => Array.isArray(rows) ? rows : []);
+          all = all.concat(...valid);
+          const lastFull = valid.findLastIndex(rows => rows.length === PAGE);
+          if (lastFull < WINDOW - 1 || valid.some(rows => rows.length < PAGE)) break;
+          offset += PAGE * WINDOW;
         }
         return all;
       };
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, investorAllocations, carryForwardBatches, monthlyTargets] = await Promise.all([
+      const investorAllocations = await sb.rpc("get_investor_allocations", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []);
+      const isClientSession = auth?.role === "client";
+      const relatedTradeIds = isClientSession ? [...new Set([
+        auth.clientId,
+        ...(investorAllocations||[]).filter(a=>a.investorClientId===auth.clientId && a.status!=="cancelled").map(a=>a.strategyClientId),
+      ].filter(Boolean))] : [];
+      const ownFilter = isClientSession ? `?clientId=eq.${encodeURIComponent(auth.clientId)}` : "?";
+      const tradeFilter = isClientSession ? `?clientId=in.(${relatedTradeIds.map(encodeURIComponent).join(",")})` : "?";
+
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, carryForwardBatches, monthlyTargets] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         // CRITICAL: id is the unique tie-breaker. Hundreds of broker rows can
         // share the same date/time; offset pagination without id can skip or
         // repeat rows between pages and feed an incomplete book into FIFO.
-        fetchAll("trades",          "?order=date.asc,time.asc,id.asc"),
-        fetchAll("ledger",          "?order=date.asc"),
-        fetchAll("tickets",         "?order=date.desc"),
-        fetchAll("interest",        "?order=created_at.asc"),
+        fetchAll("trades",          `${tradeFilter}&order=date.asc,time.asc,id.asc`),
+        fetchAll("ledger",          `${ownFilter}&order=date.asc`),
+        fetchAll("tickets",         `${ownFilter}&order=date.desc`),
+        fetchAll("interest",        `${tradeFilter}&order=created_at.asc`),
         fetchAll("charges_history", "?order=created_at.asc"),
         fetchAll("bhavcopy",        "?order=created_at.desc"),
         sb.select("locked_months",  "?order=month.asc").catch(() => []),
         sb.select("admins",         "?order=id.asc").catch(() => []),
         sb.select("audit_log",      "?order=timestamp.desc&limit=2000").catch(() => []),
-        sb.rpc("get_investor_allocations", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
         fetchAll("carry_forward_batches", "?order=month.desc").catch(() => []),
         sb.rpc("get_monthly_targets", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
       ]);
@@ -1763,6 +1779,7 @@ export default function BackOffice() {
   const [pnlDateTo, setPnlDateTo] = useState("");
   const [addInterestForm, setAddInterestForm] = useState({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
   const [tradesClientFilter, setTradesClientFilter] = useState("all");
+  const [insightClientFilter, setInsightClientFilter] = useState("all");
   const [chargesEdit, setChargesEdit] = useState(null); // working copy for charges edit
 
   // Get charges config effective for a given date
@@ -2035,6 +2052,7 @@ export default function BackOffice() {
 
     if (isSuperAdmin) {
       setLoginAttempts(0);
+      setDbLoading(true);
       setAuth({ role: "superadmin", plan: "superadmin", loginUser:userInput, loginSecret:passInput });
       sessionStorage.setItem("jiya_login_time", Date.now().toString());
       setPage("dashboard");
@@ -2048,12 +2066,14 @@ export default function BackOffice() {
         return;
       }
       setLoginAttempts(0);
+      setDbLoading(true);
       setAuth({ role: "admin", adminId: subAdmin.id, plan: subAdmin.plan || "basic", loginUser:userInput, loginSecret:passInput });
       sessionStorage.setItem("jiya_login_time", Date.now().toString());
       setPage("dashboard");
       setLoginForm({ user: "", pass: "", error: "" });
     } else if (client) {
       setLoginAttempts(0);
+      setDbLoading(true);
       setAuth({ role: "client", clientId: client.id, adminId: client.adminId, loginUser:userInput, loginSecret:passInput });
       sessionStorage.setItem("jiya_login_time", Date.now().toString());
       setPage("dashboard");
@@ -2077,7 +2097,11 @@ export default function BackOffice() {
   // Auto-expiry is disabled: it was squaring off positions at price 0
   // and showing 0 open positions for all past-expiry contracts.
   // Expiry squaring must be done via manual bhavcopy upload only.
-  const { openPositions, closedPositions } = applyFIFO(state.trades);
+  const { openPositions, closedPositions } = useMemo(() => applyFIFO(state.trades), [state.trades]);
+  const historicalBook = useMemo(
+    () => positionsAsOfDate(state.trades, positionAsOfDate, applyFIFO),
+    [state.trades, positionAsOfDate]
+  );
 
   const prepareCarryForward = () => {
     const monthEndDate = new Date(Date.UTC(Number(carryMonth.slice(0,4)), Number(carryMonth.slice(5,7)), 0)).toISOString().slice(0,10);
@@ -2167,10 +2191,11 @@ export default function BackOffice() {
     }
     return lookup;
   }, [state.trades]);
-  const investorOpenPos = (investorId) => calculateInvestorPositions({
+  const investorOpenPos = (investorId, strategyPositions=openPositions, at=new Date()) => calculateInvestorPositions({
     investorId,
     allocations:state.investorAllocations || [],
-    strategyPositions:openPositions,
+    strategyPositions,
+    at,
     lotSizeForPosition:position => lotSizeLookup[`${position.clientId}||${position.contract}`] || 1,
   });
 
@@ -2903,7 +2928,7 @@ export default function BackOffice() {
 
   // ── Login Screen ──
   // ── DB Loading screen ──
-  if (dbLoading && !auth) return (
+  if (dbLoading) return (
     <div style={{ minHeight:"100vh", background:"#0d1117", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Inter',sans-serif", overflow:"hidden", position:"relative" }}>
       <style>{`
         @keyframes pulse-ring {
@@ -2973,7 +2998,7 @@ export default function BackOffice() {
 
         {/* Status text */}
         <div style={{ fontSize:12, color:"#3b82f6", letterSpacing:"1px", animation:"blink 1.4s ease-in-out infinite" }}>
-          {dbError ? "⚠ Connection issue — retrying..." : "● ESTABLISHING SECURE CONNECTION"}
+          {dbError ? "⚠ Connection issue — retrying..." : auth ? "● PREPARING YOUR TRADING DESK" : "● ESTABLISHING SECURE CONNECTION"}
         </div>
 
         {/* Error state */}
@@ -3073,6 +3098,7 @@ export default function BackOffice() {
     { id: "ledger", label: "Ledger", icon: "ledger" },
     { id: "trades", label: "Trades & Positions", icon: "trades" },
     { id: "pnl", label: "Profit & Loss", icon: "pnl" },
+    { id: "insights", label: "Performance Insights", icon: "pnl" },
     { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
     { id: "settlements", label: "⚡ Settlements", icon: "trade" },
     { id: "month_end", label: "↪ Month-End Carry", icon: "trades" },
@@ -3091,6 +3117,7 @@ export default function BackOffice() {
     { id: "ledger", label: "My Ledger", icon: "ledger" },
     { id: "trades", label: "My Positions", icon: "trades" },
     { id: "pnl", label: "My P&L", icon: "pnl" },
+    { id: "insights", label: "My Insights", icon: "pnl" },
     { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
     { id: "tickets", label: "Support", icon: "ticket" },
   ];
@@ -3361,6 +3388,7 @@ export default function BackOffice() {
         const investorOpen = currentClient?.accountType === "investor" ? investorOpenPos(cid) : null;
         const myTrades = allTrades.filter(t => t.clientId === cid);
         const investorMonthResult = currentClient?.accountType === "investor" ? investorPnlForMonth(cid, currentMonthStr) : null;
+        const investorMonthExpense = investorMonthResult ? (state.investorAllocations||[]).filter(a=>a.investorClientId===cid && a.status!=="cancelled").reduce((sum,a)=>sum+(Number(a.ownershipPct||0)/100)*(getMonthlyCharges(a.strategyClientId,currentMonthStr)+getMonthlyInterest(a.strategyClientId,currentMonthStr)+getMonthlyInterest(a.strategyClientId,currentMonthStr+"_SW")),0) : 0;
         const myMonthPnl = displayedPnlForMonth(currentClient, currentMonthStr);
 
         // Daily win rate this month
@@ -3411,8 +3439,8 @@ export default function BackOffice() {
               card={card}
             />
 
-            {/* 3 stat cards */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:24}}>
+            {/* Account stat cards */}
+            <div style={{display:"grid",gridTemplateColumns:`repeat(${investorMonthResult?4:3},1fr)`,gap:14,marginBottom:24}}>
               {/* This Month Realized P&L (closed only) */}
               {(() => {
                 const myClosedPnl = investorMonthResult
@@ -3428,6 +3456,12 @@ export default function BackOffice() {
                   </div>
                 );
               })()}
+
+              {investorMonthResult && <div style={{...card,padding:"20px 22px"}}>
+                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>Expense (Charges &amp; Brokerage)</div>
+                <div style={{fontSize:26,fontWeight:800,color:C.yellow,lineHeight:1}}>−₹{Math.abs(investorMonthExpense).toLocaleString("en-IN",{maximumFractionDigits:0})}</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:6}}>Combined portfolio expense</div>
+              </div>}
 
               {/* Current Month Net P&L */}
               {(() => {
@@ -4362,7 +4396,7 @@ export default function BackOffice() {
           </div>
 
           {/* Position filter tabs */}
-          <div style={{ display:"flex", gap:8, marginBottom:20 }}>
+          <div style={{ display:"flex", gap:8, marginBottom:20, alignItems:"center", flexWrap:"wrap" }}>
             {["open","closed","all"].map(f => (
               <button key={f} onClick={() => setPositionFilter(f)}
                 style={{
@@ -4375,16 +4409,23 @@ export default function BackOffice() {
                 {f} Positions
               </button>
             ))}
+            <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8,background:C.card,border:`1px solid ${C.border}`,borderRadius:9,padding:"6px 10px"}}>
+              <span style={{color:C.muted,fontSize:11,fontWeight:700}}>POSITIONS AS ON</span>
+              <input type="date" max={new Date().toISOString().slice(0,10)} value={positionAsOfDate}
+                onChange={e=>setPositionAsOfDate(e.target.value)}
+                style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:"6px 9px",color:C.text,fontSize:12,outline:"none"}}/>
+              {positionAsOfDate !== new Date().toISOString().slice(0,10) && <button onClick={()=>setPositionAsOfDate(new Date().toISOString().slice(0,10))}
+                style={{background:"transparent",border:"none",color:C.accent,cursor:"pointer",fontSize:11,fontWeight:700}}>TODAY</button>}
+            </div>
           </div>
 
           {showClients.map(client => {
             const isInvestorAccount = client.accountType === "investor";
-            const open   = isInvestorAccount ? investorOpenPos(client.id) : clientOpenPos(client.id);
-            const closed = isInvestorAccount ? [] : clientClosedPos(client.id);
-
-            // Charges for this client
-            const clientTrades = state.trades.filter(t => t.clientId === client.id);
-            const totalCharges = clientTrades.reduce((s,t) => s + getTradeCharges(t).total, 0);
+            const historicalAt = new Date(`${positionAsOfDate}T23:59:59+05:30`);
+            const open   = isInvestorAccount
+              ? investorOpenPos(client.id, historicalBook.openPositions, historicalAt)
+              : historicalBook.openPositions.filter(p=>p.clientId===client.id);
+            const closed = isInvestorAccount ? [] : historicalBook.closedPositions.filter(p=>p.clientId===client.id);
 
             return (
               <div key={client.id} style={{ marginBottom:32 }}>
@@ -4394,9 +4435,7 @@ export default function BackOffice() {
                     <div style={{ color:C.accent, fontWeight:700, fontSize:15 }}>
                       {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
                     </div>
-                    <div style={{ color:C.yellow, fontSize:12, fontWeight:600 }}>
-                      Total Charges: ₹{totalCharges.toFixed(2)}
-                    </div>
+                    <div style={{color:C.muted,fontSize:11}}>End-of-day view · {positionAsOfDate}</div>
                   </div>
                 )}
 
@@ -4490,7 +4529,7 @@ export default function BackOffice() {
                                 {mtm===null?"—":`${mtm>=0?"+":""}₹${mtm.toFixed(2)}`}
                               </td>
                               {!isInvestorAccount && <td style={{ padding:"10px 12px", color:p.bookedPnl>=0?C.green:C.red, fontWeight:600 }}>₹{p.bookedPnl.toLocaleString()}</td>}
-                              {(auth.role==="admin"||auth.role==="superadmin") && !isInvestorAccount && (
+                              {(auth.role==="admin"||auth.role==="superadmin") && !isInvestorAccount && positionAsOfDate===new Date().toISOString().slice(0,10) && (
                                 <td style={{ padding:"6px 12px" }}>
                                   <button
                                     onClick={e => {
@@ -4690,6 +4729,93 @@ export default function BackOffice() {
       );
     }
 
+    if (page === "insights") {
+      const isAdmin = auth.role === "admin" || auth.role === "superadmin";
+      const selectedClients = isAdmin
+        ? (insightClientFilter === "all" ? visibleClients : visibleClients.filter(c=>c.id===insightClientFilter))
+        : [currentClient].filter(Boolean);
+      const allocationActiveForMatch = (allocation, match) => {
+        const stamp = new Date(`${match.date}T${match.time || "15:30:00"}+05:30`).getTime();
+        const starts = new Date(allocation.effectiveFrom).getTime();
+        const ends = allocation.effectiveTo ? new Date(allocation.effectiveTo).getTime() : Infinity;
+        return Number.isFinite(stamp) && starts <= stamp && stamp < ends && allocation.status !== "cancelled" && allocation.status !== "closed";
+      };
+      const insightClosed = [];
+      const chargeRows = [];
+      for (const client of selectedClients) {
+        if (client.accountType === "investor") {
+          const allocations = (state.investorAllocations||[]).filter(a=>a.investorClientId===client.id);
+          const matches = [];
+          for (const allocation of allocations) {
+            const ownership = Number(allocation.ownershipPct||0)/100;
+            for (const position of closedPositions.filter(p=>p.clientId===allocation.strategyClientId)) {
+              for (const match of position.trades||[]) if (allocationActiveForMatch(allocation,match)) matches.push({...match,pnl:Number(match.pnl||0)*ownership});
+            }
+            for (const trade of state.trades.filter(t=>t.clientId===allocation.strategyClientId)) {
+              if (allocationActiveForMatch(allocation,trade)) chargeRows.push({date:trade.date,amount:getTradeCharges(trade).total*ownership});
+            }
+          }
+          insightClosed.push({clientId:client.id,contract:"Combined portfolio",trades:matches});
+        } else {
+          insightClosed.push(...closedPositions.filter(p=>p.clientId===client.id));
+          for (const trade of state.trades.filter(t=>t.clientId===client.id)) chargeRows.push({date:trade.date,amount:getTradeCharges(trade).total});
+        }
+      }
+      const daily = dailyTradingResults(insightClosed,()=>chargeRows).filter(row=>row.date.startsWith(insightsMonth));
+      const patterns = tradingPatterns(insightClosed);
+      const [iy,im] = insightsMonth.split("-").map(Number);
+      const monthDays = iy&&im ? new Date(iy,im,0).getDate() : 0;
+      const firstDay = iy&&im ? new Date(iy,im-1,1).getDay() : 0;
+      const dailyMap = Object.fromEntries(daily.map(row=>[row.date,row]));
+      const monthNet = daily.reduce((sum,row)=>sum+row.netPnl,0);
+      const profitableDays = daily.filter(row=>row.netPnl>=0).length;
+      const dayRate = daily.length ? profitableDays*100/daily.length : 0;
+      const sampleWarning = patterns.weekdays.reduce((s,row)=>s+row.trades,0) < 10;
+      return <div>
+        <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:20}}>
+          <div><h2 style={{color:C.text,margin:"0 0 5px"}}>Performance Insights</h2><div style={{color:C.muted,fontSize:12}}>Personal analytics calculated from actual FIFO-closed trades.</div></div>
+          <div style={{display:"flex",gap:8}}>
+            {isAdmin && <select value={insightClientFilter} onChange={e=>setInsightClientFilter(e.target.value)} style={{...input,width:230}}><option value="all">All visible accounts</option>{visibleClients.map(c=><option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}</select>}
+            <input type="month" value={insightsMonth} onChange={e=>setInsightsMonth(e.target.value)} style={{...input,width:150}}/>
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(150px,1fr))",gap:12,marginBottom:18}}>
+          {[
+            ["Month Net P&L",`${monthNet>=0?"+":"−"}${formatINR(Math.abs(monthNet))}`,monthNet>=0?C.green:C.red],
+            ["Profitable Days",`${profitableDays} / ${daily.length}`,C.green],
+            ["Daily Win Rate",`${dayRate.toFixed(1)}%`,C.accent],
+            ["Booked Trades",daily.reduce((s,r)=>s+r.matches,0),C.purple],
+          ].map(([label,value,color])=><div key={label} style={{...card,padding:16}}><div style={{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:1}}>{label}</div><div style={{color,fontSize:22,fontWeight:850,marginTop:7}}>{value}</div></div>)}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(420px,1.35fr) minmax(320px,1fr)",gap:18}}>
+          <div style={card}>
+            <div style={{color:C.text,fontWeight:800,marginBottom:14}}>P&L Calendar · {insightsMonth}</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:6}}>
+              {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=><div key={d} style={{color:C.muted,fontSize:10,textAlign:"center",padding:5,fontWeight:700}}>{d}</div>)}
+              {Array.from({length:firstDay},(_,i)=><div key={`blank-${i}`}/>)}
+              {Array.from({length:monthDays},(_,i)=>{
+                const day=String(i+1).padStart(2,"0"), key=`${insightsMonth}-${day}`, row=dailyMap[key];
+                return <div key={key} title={row?`Gross ${formatINR(row.grossPnl)} · Charges ${formatINR(row.charges)}`:"No booked trade"} style={{minHeight:66,borderRadius:9,padding:8,border:`1px solid ${row?(row.netPnl>=0?C.green:C.red)+"55":C.border}`,background:row?(row.netPnl>=0?C.green:C.red)+"12":C.bg}}>
+                  <div style={{color:C.muted,fontSize:10}}>{i+1}</div><div style={{color:row?(row.netPnl>=0?C.green:C.red):C.muted,fontSize:11,fontWeight:800,marginTop:12}}>{row?`${row.netPnl>=0?"+":"−"}₹${Math.abs(row.netPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}`:"—"}</div>
+                </div>;
+              })}
+            </div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={card}><div style={{color:C.text,fontWeight:800,marginBottom:12}}>Data-based observations</div>
+              {sampleWarning && <div style={{color:C.yellow,fontSize:11,marginBottom:10}}>Early pattern: fewer than 10 booked trades. Confidence will improve as more history is added.</div>}
+              {patterns.bestTime ? <>
+                <div style={{background:C.green+"12",borderRadius:9,padding:12,marginBottom:8}}><div style={{color:C.green,fontWeight:800,fontSize:12}}>Most profitable booking time</div><div style={{color:C.text,fontSize:13,marginTop:4}}>{patterns.bestTime.label} · {patterns.bestTime.winRate}% profitable · {formatINR(patterns.bestTime.pnl)} net booked</div></div>
+                <div style={{background:C.red+"12",borderRadius:9,padding:12,marginBottom:8}}><div style={{color:C.red,fontWeight:800,fontSize:12}}>Weakest booking time</div><div style={{color:C.text,fontSize:13,marginTop:4}}>{patterns.weakTime.label} · {patterns.weakTime.winRate}% profitable · {formatINR(patterns.weakTime.pnl)} net booked</div></div>
+                <div style={{background:C.accent+"12",borderRadius:9,padding:12}}><div style={{color:C.accent,fontWeight:800,fontSize:12}}>Strongest weekday</div><div style={{color:C.text,fontSize:13,marginTop:4}}>{patterns.bestDay.label} · {patterns.bestDay.winRate}% profitable</div></div>
+              </>:<div style={{color:C.muted,fontSize:13}}>Insights will appear after positions are booked.</div>}
+            </div>
+            <div style={card}><div style={{color:C.text,fontWeight:800,marginBottom:10}}>Weekday consistency</div>{patterns.weekdays.map(row=><div key={row.label} style={{display:"grid",gridTemplateColumns:"80px 1fr 54px",gap:8,alignItems:"center",marginBottom:8,fontSize:11}}><span style={{color:C.muted}}>{row.label}</span><div style={{height:7,background:C.bg,borderRadius:9,overflow:"hidden"}}><div style={{width:`${row.winRate}%`,height:"100%",background:row.winRate>=50?C.green:C.red}}/></div><span style={{color:row.winRate>=50?C.green:C.red,fontWeight:800,textAlign:"right"}}>{row.winRate}%</span></div>)}</div>
+          </div>
+        </div>
+      </div>;
+    }
+
     if (page === "pnl") {
       const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
       const allClients = isAdmin ? state.clients : [currentClient];
@@ -4799,26 +4925,44 @@ export default function BackOffice() {
                 currentMonthStr,
                 ...state.trades.filter(t => allocationStrategyIds.has(t.clientId)).map(t => (t.date || "").slice(0, 7)),
               ])].filter(m => m && monthInFilter(m)).sort().reverse();
-              const results = investorMonths.map(month => ({ month, ...investorPnlForMonth(client.id, month) }));
+              const results = investorMonths.map(month => {
+                const pnlResult = investorPnlForMonth(client.id, month);
+                const [year,monthNo] = month.split("-").map(Number);
+                const marketOpen = Date.UTC(year,monthNo-1,1,3,45);
+                const monthEnd = Date.UTC(year,monthNo,1)-1;
+                const expense = (state.investorAllocations||[]).filter(a=>a.investorClientId===client.id && a.status!=="cancelled" && new Date(a.effectiveFrom).getTime()<=marketOpen && (!a.effectiveTo || new Date(a.effectiveTo).getTime()>=monthEnd)).reduce((sum,a)=>{
+                  const ownership=Number(a.ownershipPct||0)/100;
+                  return sum + ownership*(getMonthlyCharges(a.strategyClientId,month)+getMonthlyInterest(a.strategyClientId,month)+getMonthlyInterest(a.strategyClientId,month+"_SW"));
+                },0);
+                return {month,...pnlResult,expense,gross:pnlResult.pnl+expense};
+              });
               const total = results.reduce((sum, row) => sum + row.pnl, 0);
+              const totalExpense = results.reduce((sum,row)=>sum+row.expense,0);
+              const totalGross = results.reduce((sum,row)=>sum+row.gross,0);
               const pending = results.reduce((sum, row) => sum + row.pendingCount, 0);
+              const investorOpen = investorOpenPos(client.id);
               return (
                 <div key={client.id} style={{ ...card, marginBottom:24 }}>
                   {isAdmin && <div style={{ color:C.accent, fontWeight:700, fontSize:15, marginBottom:16 }}>
                     {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
                   </div>}
-                  <div style={{background:C.bg,borderRadius:10,padding:"18px 20px",border:`1px solid ${total>=0?C.green:C.red}55`,marginBottom:16}}>
-                    <div style={{color:C.muted,fontSize:11,textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>Combined Investor Net P&amp;L</div>
-                    <div style={{color:total>=0?C.green:C.red,fontSize:28,fontWeight:800}}>{total>=0?"+":"−"}₹{Math.abs(total).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-                    <div style={{color:C.muted,fontSize:11,marginTop:6}}>Your proportional result after Brokerage &amp; Charges</div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(150px,1fr))",gap:12,marginBottom:16}}>
+                    {[
+                      ["Gross Allocated P&L",totalGross,totalGross>=0?C.green:C.red,false],
+                      ["Expense (Charges & Brokerage)",-totalExpense,C.yellow,false],
+                      ["Net P&L",total,total>=0?C.green:C.red,false],
+                      ["Open Positions",investorOpen.length,C.accent,true],
+                    ].map(([label,value,color,count])=><div key={label} style={{background:C.bg,borderRadius:10,padding:"16px 18px",border:`1px solid ${label==="Net P&L"?color+"66":C.border}`}}><div style={{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>{label}</div><div style={{color,fontSize:20,fontWeight:800}}>{count?value:`${value>=0?"+":"−"}₹${Math.abs(value).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}`}</div></div>)}
                   </div>
                   {pending > 0 && <div style={{padding:"10px 14px",borderRadius:8,background:C.yellow+"12",color:C.yellow,fontSize:12,marginBottom:14}}>
                     {pending} allocation period requires its effective-time LTP snapshot before that portion can be shown.
                   </div>}
                   <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                    <thead><tr><th style={{textAlign:"left",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>Month</th><th style={{textAlign:"right",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>Your Net P&amp;L</th></tr></thead>
+                    <thead><tr>{["Month","Gross Allocated P&L","Expense (Charges & Brokerage)","Net P&L"].map((heading,index)=><th key={heading} style={{textAlign:index?"right":"left",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{heading}</th>)}</tr></thead>
                     <tbody>{results.map(row => <tr key={row.month} style={{borderBottom:`1px solid ${C.border}22`}}>
                       <td style={{padding:"10px 12px",color:C.text,fontWeight:600}}>{row.month}</td>
+                      <td style={{padding:"10px 12px",textAlign:"right",color:row.gross>=0?C.green:C.red,fontWeight:600}}>{formatINR(row.gross)}</td>
+                      <td style={{padding:"10px 12px",textAlign:"right",color:C.yellow,fontWeight:600}}>− {formatINR(row.expense)}</td>
                       <td style={{padding:"10px 12px",textAlign:"right",color:row.pnl>=0?C.green:C.red,fontWeight:700}}>{row.complete?(row.pnl>=0?"+":"−")+"₹"+Math.abs(row.pnl).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2}):"Pending snapshot"}</td>
                     </tr>)}</tbody>
                   </table>
