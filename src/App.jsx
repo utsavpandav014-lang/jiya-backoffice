@@ -2106,7 +2106,3016 @@ export default function BackOffice() {
     const preview = buildCarryForwardPreview({ yearMonth:carryMonth, openPositions, closingPrices:officialPrices, existingTrades:state.trades });
     setCarryPreview(preview);
     if (preview.duplicate) return notify(`Month ${carryMonth} has already been processed.`, "error");
-    if (preview.missingPrices.lengt…45341 tokens truncated…)), C.red)}
+    if (preview.missingPrices.length) return notify(`${preview.missingPrices.length} open positions are missing official ${monthEndDate} closing prices.`, "error");
+    if (!preview.entries.length) return notify("No open positions found to carry forward.", "error");
+    notify(`Preview ready: ${preview.entries.length} positions will close on ${preview.monthEndDate} and reopen on ${preview.reopenDate}.`);
+  };
+
+  const executeCarryForward = async () => {
+    if (!carryPreview?.canExecute || carryExecuting) return;
+    const pairErrors = verifyCarryForwardPairs(carryPreview);
+    if (pairErrors.length) return notify(pairErrors[0], "error");
+
+    // Simulate the complete batch through the unchanged FIFO engine before writing anything.
+    const simulated = applyFIFO([...state.trades, ...carryPreview.trades]);
+    const resultErrors = carryPreview.entries.filter(entry => {
+      const reopened = simulated.openPositions.find(p => p.clientId === entry.clientId && p.contract === entry.contract);
+      return !reopened || reopened.side !== entry.side || Number(reopened.netQty) !== Number(entry.qty) || Math.abs(Number(reopened.avgPrice) - Number(entry.closingPrice)) > 0.01;
+    });
+    if (resultErrors.length) return notify(`FIFO safety check failed for ${resultErrors[0].clientId} ${resultErrors[0].contract}. Nothing was saved.`, "error");
+    if (!window.confirm(`FINAL CONFIRMATION\n\nClose ${carryPreview.entries.length} positions on ${carryPreview.monthEndDate} and reopen the same positions on ${carryPreview.reopenDate}?\n\nThis creates ${carryPreview.trades.length} auditable trades.`)) return;
+
+    setCarryExecuting(true);
+    const batch = {
+      id:carryPreview.batchId, month:carryPreview.yearMonth, monthEndDate:carryPreview.monthEndDate, reopenDate:carryPreview.reopenDate,
+      status:"processing", positionCount:carryPreview.entries.length, tradeCount:carryPreview.trades.length,
+      details:carryPreview.entries, error:null, createdBy:auth?.adminId || auth?.role || "JIYA", createdAt:new Date().toISOString(), completedAt:null,
+    };
+    try {
+      const result = await sb.rpc("execute_month_end_carry_forward", {
+        p_batch: batch,
+        p_trades: carryPreview.trades,
+      });
+      const completed = {
+        ...batch,
+        status:"completed",
+        completedAt:result?.completedAt || new Date().toISOString(),
+      };
+      setState(s => ({ ...s, trades:[...s.trades, ...carryPreview.trades], carryForwardBatches:[completed, ...(s.carryForwardBatches||[]).filter(b=>b.id!==completed.id)] }));
+      setCarryPreview(null);
+      notify(`Month-end completed: ${batch.positionCount} positions closed and reopened.`);
+    } catch (error) {
+      notify(`Carry-forward failed: ${error.message}. Review the batch before retrying.`, "error");
+    } finally { setCarryExecuting(false); }
+  };
+
+  // ── Helpers ──
+  const clientTrades = (cid) => state.trades.filter((t) => t.clientId === cid);
+  const clientLedger = (cid) => state.ledger.filter((l) => l.clientId === cid);
+  const clientTickets = (cid) => state.tickets.filter((t) => t.clientId === cid);
+  const clientOpenPos = (cid) => openPositions.filter((p) => p.clientId === cid);
+  const clientClosedPos = (cid) => closedPositions.filter((p) => p.clientId === cid);
+
+  const lotSizeLookup = useMemo(() => {
+    const lookup = {};
+    for (const trade of state.trades || []) {
+      if (isCarryForwardTrade(trade)) continue;
+      const qty = Math.abs(Math.round(Number(trade.qty) || 0));
+      if (!qty) continue;
+      const key = `${trade.clientId}||${trade.contract}`;
+      lookup[key] = lookup[key] ? gcdQuantity(lookup[key], qty) : qty;
+    }
+    return lookup;
+  }, [state.trades]);
+  const investorOpenPos = (investorId) => calculateInvestorPositions({
+    investorId,
+    allocations:state.investorAllocations || [],
+    strategyPositions:openPositions,
+    lotSizeForPosition:position => lotSizeLookup[`${position.clientId}||${position.contract}`] || 1,
+  });
+
+  // ── Shared helpers used across pages ──────────────────────────
+  const currentMonthStr = new Date().toISOString().slice(0,7);
+  const monthlyTargetFor = (clientId, month=currentMonthStr) => Number((state.monthlyTargets||[]).find(t=>t.clientId===clientId && t.month===month)?.targetAmount)||0;
+
+  const clientNetPnlForMonth = (clientId, yearMonth) => {
+    if (!clientId || !yearMonth) return 0;
+    const ct2 = state.trades.filter(t => t.clientId === clientId);
+    const { openPositions: op2, closedPositions: cp2 } = applyFIFO(ct2);
+    const closedPnl2 = closedPositionSlicesForMonth(cp2, yearMonth).reduce((a,c) => a + c.totalPnl, 0);
+    const isCurrentMo = yearMonth === currentMonthStr;
+    // The carry reopen is the new month's cost basis. It starts at zero and then
+    // moves with every fresh LTP, even before another broker trade is uploaded.
+    const openMTM2 = isCurrentMo ? openPositionMtm(op2, pos => {
+      const mk = `${pos.clientId}||${pos.contract}`;
+      const ltp2 = manualLTP[mk] !== undefined ? manualLTP[mk] : getBhavClose(pos.contract);
+      return ltp2;
+    }) : 0;
+    const exp2 = getMonthlyCharges(clientId, yearMonth);
+    const sw2  = getMonthlyInterest(clientId, yearMonth+"_SW");
+    const int2 = getMonthlyInterest(clientId, yearMonth);
+    return closedPnl2 + openMTM2 - exp2 - sw2 - int2;
+  };
+
+  // Investor reporting is an additive ownership view over canonical strategy
+  // results. It never changes trades, FIFO queues, strategy positions or strategy P&L.
+  const investorPnlForMonth = (investorId, yearMonth) => calculateInvestorPnlForMonth({
+    investorId,
+    yearMonth,
+    allocations: state.investorAllocations || [],
+    strategyPnl: clientNetPnlForMonth,
+  });
+
+  const displayedPnlForMonth = (client, yearMonth) =>
+    client?.accountType === "investor"
+      ? investorPnlForMonth(client.id, yearMonth).pnl
+      : clientNetPnlForMonth(client?.id, yearMonth);
+
+
+  // ── Data isolation by adminId ──────────────────────
+  const visibleClients = (() => {
+    if (auth?.role === "superadmin") return state.clients; // JIYA sees all
+    if ((auth?.role === "admin" || auth?.role === "superadmin")) {
+      // Sub-admin sees only clients with matching adminId
+      return state.clients.filter(c => c.adminId === auth.adminId);
+    }
+    // Client sees only themselves
+    return state.clients.filter(c => c.id === auth?.clientId);
+  })();
+
+  const visibleTrades = (() => {
+    if (auth?.role === "superadmin") return state.trades;
+    if ((auth?.role === "admin" || auth?.role === "superadmin")) {
+      // Get client IDs belonging to this admin
+      const myClientIds = state.clients.filter(c => c.adminId === auth.adminId).map(c => c.id);
+      return state.trades.filter(t => myClientIds.includes(t.clientId));
+    }
+    return state.trades.filter(t => t.clientId === auth?.clientId);
+  })();
+
+  const currentClient = auth?.role === "client" ? state.clients.find((c) => c.id === auth.clientId) : null;
+
+  const ledgerWithBalance = (cid) => {
+    let bal = 0;
+    return clientLedger(cid)
+      .sort((a, b) => new Date(a.date) - new Date(b.date))
+      .map((l) => { bal += l.credit - l.debit; return { ...l, balance: bal }; });
+  };
+
+  // ── Admin: Add Client ──
+  const emptyClient = { id: "", name: "", email: "", phone: "", password: "", accountType: "trading", depositAmount: "", monthlyStrategyCapital: "" };
+  const [newClient, setNewClient] = useState(emptyClient);
+  const [editClient, setEditClient] = useState(null);
+  const [editClientOriginalId, setEditClientOriginalId] = useState("");
+  const [editClientSaving, setEditClientSaving] = useState(false);
+  const [targetEditor, setTargetEditor] = useState(null);
+  const [targetSaving, setTargetSaving] = useState(false);
+  const addClient = () => {
+    if (!newClient.id || !newClient.name || !newClient.password) return notify("Fill required fields", "error");
+    if (state.clients.find((c) => c.id === newClient.id)) return notify("Client ID already exists", "error");
+    const capitalErrors = validateClientCapital(newClient);
+    if (capitalErrors.length) return notify(capitalErrors[0], "error");
+    const client = { ...newClient, depositAmount: Number(newClient.depositAmount) || 0, monthlyStrategyCapital: Number(newClient.monthlyStrategyCapital) || 0, created_at: new Date().toISOString() };
+    setState((s) => ({ ...s, clients: [...s.clients, client] }));
+    withSync(() => sb.upsert("clients", client));
+    setNewClient(emptyClient);
+    setModal(null);
+    notify("Client added successfully");
+  };
+
+  const startEditClient = (client) => {
+    setEditClient({
+      ...client,
+      accountType:client.accountType || "trading",
+      depositAmount:Number(client.depositAmount) || 0,
+      monthlyStrategyCapital:Number(client.monthlyStrategyCapital) || 0,
+      adminId:client.adminId || "",
+    });
+    setEditClientOriginalId(client.id);
+    setModal("editClient");
+  };
+
+  const openTargetEditor = (client, month=currentMonthStr) => {
+    if (auth?.role === "client" && monthlyTargetFor(client.id,month) > 0) {
+      return notify("Your target is locked for this month. Contact JIYA admin to change it.","error");
+    }
+    setTargetEditor({clientId:client.id,clientName:client.name||client.id,month,targetAmount:monthlyTargetFor(client.id,month)});
+    setModal("monthlyTarget");
+  };
+
+  const saveMonthlyTarget = async () => {
+    if (!targetEditor || targetSaving) return;
+    const amount = Number(targetEditor.targetAmount);
+    if (!/^\d{4}-\d{2}$/.test(targetEditor.month||"")) return notify("Select a valid target month", "error");
+    if (!Number.isFinite(amount) || amount < 0) return notify("Monthly target cannot be negative", "error");
+    setTargetSaving(true);
+    try {
+      const isClientTarget = auth?.role === "client";
+      if (isClientTarget && amount <= 0) throw new Error("Target must be greater than zero");
+      const saved = await withSync(() => isClientTarget
+        ? sb.rpc("set_own_monthly_target_once", {
+            p_client_id:auth.clientId,
+            p_password:auth.loginSecret,
+            p_target_amount:amount,
+          })
+        : sb.rpc("admin_set_client_monthly_target", {
+            p_client_id:targetEditor.clientId,
+            p_month:targetEditor.month,
+            p_target_amount:amount,
+            p_admin_user:auth?.loginUser||"",
+            p_admin_password:auth?.loginSecret||"",
+          }));
+      if (!saved?.clientId) throw new Error("Target update was not confirmed by the database");
+      setState(s=>({
+        ...s,
+        monthlyTargets:amount===0
+          ? (s.monthlyTargets||[]).filter(t=>!(t.clientId===targetEditor.clientId&&t.month===targetEditor.month))
+          : [saved,...(s.monthlyTargets||[]).filter(t=>!(t.clientId===saved.clientId&&t.month===saved.month))],
+      }));
+      pushAudit("EDITED",targetEditor.clientId,amount===0?`Monthly target removed for ${targetEditor.month}`:`Monthly target set to ${formatINR(amount)} for ${targetEditor.month}`);
+      setTargetEditor(null);
+      setModal(null);
+      notify(amount===0?"Monthly target removed":"Monthly target saved");
+    } catch(error) {
+      notify(`Target save failed: ${error.message}`,"error");
+    } finally { setTargetSaving(false); }
+  };
+
+  const saveClientAccount = async () => {
+    if (!editClient || editClientSaving) return;
+    const updated = {
+      ...editClient,
+      id:String(editClient.id || "").trim(),
+      name:String(editClient.name || "").trim(),
+      email:String(editClient.email || "").trim(),
+      phone:String(editClient.phone || "").trim(),
+      password:String(editClient.password || ""),
+      accountType:editClient.accountType || "trading",
+      depositAmount:Number(editClient.depositAmount) || 0,
+      monthlyStrategyCapital:Number(editClient.monthlyStrategyCapital) || 0,
+      adminId:editClient.adminId || null,
+    };
+    if (!updated.id || !updated.name || !updated.password) return notify("Client ID, name and password are required", "error");
+    if (!/^[A-Za-z0-9_-]+$/.test(updated.id)) return notify("Client ID may contain only letters, numbers, underscore and hyphen", "error");
+    if (updated.id !== editClientOriginalId && state.clients.some(c=>c.id===updated.id)) return notify("Client ID already exists", "error");
+    const capitalErrors = validateClientCapital(updated);
+    if (capitalErrors.length) return notify(capitalErrors[0], "error");
+
+    const investorCommitted = activeAllocationRows.filter(a=>a.investorClientId===editClientOriginalId).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+    const strategyCommitted = activeAllocationRows.filter(a=>a.strategyClientId===editClientOriginalId).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+    if (investorCommitted > updated.depositAmount) return notify(`Deposited fund cannot be below active allocations (${formatINR(investorCommitted)})`, "error");
+    if (strategyCommitted > updated.monthlyStrategyCapital) return notify(`Strategy capital cannot be below active allocations (${formatINR(strategyCommitted)})`, "error");
+
+    if (updated.id !== editClientOriginalId) {
+      const linkedTrades = state.trades.filter(t=>t.clientId===editClientOriginalId).length;
+      if (!window.confirm(`Change client code ${editClientOriginalId} → ${updated.id}?\n\n${linkedTrades} loaded trades and every linked ledger, interest, position, ticket and allocation record will be updated atomically. FIFO quantities and P&L will not change.`)) return;
+    }
+
+    setEditClientSaving(true);
+    try {
+      const saved = await withSync(() => sb.rpc("update_client_account", { p_original_id:editClientOriginalId, p_client:updated }));
+      if (!saved?.id) throw new Error("Account update was not confirmed by the database");
+      const oldId = editClientOriginalId;
+      setState(s => ({
+        ...s,
+        clients:s.clients.map(c=>c.id===oldId?saved:c),
+        trades:s.trades.map(t=>t.clientId===oldId?{...t,clientId:saved.id}:t),
+        ledger:s.ledger.map(l=>l.clientId===oldId?{...l,clientId:saved.id}:l),
+        tickets:s.tickets.map(t=>t.clientId===oldId?{...t,clientId:saved.id}:t),
+        interest:s.interest.map(i=>i.clientId===oldId?{...i,clientId:saved.id}:i),
+        auditLog:(s.auditLog||[]).map(a=>a.clientId===oldId?{...a,clientId:saved.id}:a),
+        investorAllocations:(s.investorAllocations||[]).map(a=>({
+          ...a,
+          investorClientId:a.investorClientId===oldId?saved.id:a.investorClientId,
+          strategyClientId:a.strategyClientId===oldId?saved.id:a.strategyClientId,
+        })),
+        monthlyTargets:(s.monthlyTargets||[]).map(t=>t.clientId===oldId?{...t,clientId:saved.id}:t),
+      }));
+      setLivePositions(rows=>rows.map(p=>p.clientId===oldId?{...p,clientId:saved.id}:p));
+      pushAudit("EDITED", saved.id, `Account details updated${oldId!==saved.id?` — code ${oldId} → ${saved.id}`:""}; deposit ${formatINR(saved.depositAmount)}; strategy capital ${formatINR(saved.monthlyStrategyCapital)}`);
+      setEditClient(null);
+      setEditClientOriginalId("");
+      setModal(null);
+      notify(`Account ${saved.id} updated successfully`);
+    } catch (error) {
+      notify(`Account update failed: ${error.message}`, "error");
+    } finally {
+      setEditClientSaving(false);
+    }
+  };
+
+  // Investor allocations are an economic layer only. They never write to trades or invoke FIFO.
+  const [newAllocation, setNewAllocation] = useState({ investorClientId:"", strategyClientId:"", allocatedAmount:"", effectiveFrom:"", reason:"" });
+  const activeAllocationRows = (state.investorAllocations || []).filter(a => a.status !== "closed" && !a.effectiveTo);
+  const beginAdditionalStrategy = (investorClientId) => {
+    setNewAllocation({ investorClientId, strategyClientId:"", allocatedAmount:"", effectiveFrom:"", reason:"" });
+    setTimeout(() => document.getElementById("investor-allocation-form")?.scrollIntoView({behavior:"smooth",block:"start"}), 0);
+  };
+  const addInvestorAllocation = async () => {
+    const investor = state.clients.find(c => c.id === newAllocation.investorClientId);
+    const strategy = state.clients.find(c => c.id === newAllocation.strategyClientId);
+    const investorActiveAllocated = activeAllocationRows.filter(a => a.investorClientId === investor?.id).reduce((sum,a) => sum + Number(a.allocatedAmount || 0), 0);
+    const strategyActiveAllocated = activeAllocationRows.filter(a => a.strategyClientId === strategy?.id).reduce((sum,a) => sum + Number(a.allocatedAmount || 0), 0);
+    const errors = validateInvestorAllocation({ investorId:investor?.id, strategyId:strategy?.id, allocatedAmount:newAllocation.allocatedAmount, effectiveFrom:newAllocation.effectiveFrom, reason:newAllocation.reason, investorDeposit:investor?.depositAmount, investorActiveAllocated, strategyCapital:strategy?.monthlyStrategyCapital, strategyActiveAllocated });
+    if (errors.length) return notify(errors[0], "error");
+    const row = {
+      id:`IALLOC_${Date.now()}_${Math.random().toString(36).slice(2,6)}`, investorClientId:investor.id, strategyClientId:strategy.id,
+      allocatedAmount:Number(newAllocation.allocatedAmount), strategyCapitalSnapshot:Number(strategy.monthlyStrategyCapital),
+      ownershipPct:calculateOwnershipPct(newAllocation.allocatedAmount, strategy.monthlyStrategyCapital),
+      effectiveFrom:new Date(newAllocation.effectiveFrom).toISOString(), effectiveTo:null, status:"active", ltpSnapshotStatus:"pending",
+      reason:newAllocation.reason.trim(), createdBy:auth?.adminId || auth?.role || "JIYA", createdAt:new Date().toISOString(),
+    };
+    try {
+      const saved = await withSync(() => sb.rpc("create_investor_allocation", { p_allocation:row }));
+      if (!saved?.id) throw new Error("Allocation was not confirmed by the database");
+      setState(s => ({ ...s, investorAllocations:[saved, ...(s.investorAllocations || [])] }));
+      const remaining = Math.max(0, Number(investor.depositAmount||0) - investorActiveAllocated - Number(saved.allocatedAmount||0));
+      setNewAllocation({ investorClientId:investor.id, strategyClientId:"", allocatedAmount:"", effectiveFrom:"", reason:"" });
+      notify(`Strategy allocated. ${formatINR(remaining)} investor fund remains available.`);
+    } catch (error) {
+      notify(`Allocation failed: ${error.message}`, "error");
+    }
+  };
+
+  // ── Admin: Add Ledger Entry ──
+  const [newLedger, setNewLedger] = useState({ clientId: "", date: "", description: "", credit: "", debit: "", ledgerType: "all" });
+  const [ledgerClientFilter, setLedgerClientFilter] = useState("all");
+  const [ledgerTabFilter, setLedgerTabFilter] = useState("all");
+  const [editLedgerEntry, setEditLedgerEntry] = useState(null);
+  const [auditFilterClient, setAuditFilterClient] = useState("all");
+  const [auditFilterAction, setAuditFilterAction] = useState("all");
+
+  const addLedger = () => {
+    if (!newLedger.clientId || !newLedger.date || !newLedger.description) return notify("Fill required fields", "error");
+    const entry = {
+      id: "L" + Date.now(),
+      ...newLedger,
+      credit:      +newLedger.credit || 0,
+      debit:       +newLedger.debit  || 0,
+      ledgerType:  newLedger.ledgerType || "all",
+      // Audit fields
+      createdBy:   auth?.role === "superadmin" ? "JIYA" : (state.admins||[]).find(a=>a.id===auth?.adminId)?.name || "Admin",
+      createdAt:   new Date().toISOString(),
+    };
+    setState((s) => ({ ...s, ledger: [...s.ledger, entry] }));
+    withSync(() => sb.upsert("ledger", entry));
+    pushAudit("ADDED", entry.clientId, `${entry.credit>0?`₹${entry.credit} credit`:`₹${entry.debit} debit`} — "${entry.narration||entry.description||""}"`);
+    setNewLedger({ clientId: "", date: "", description: "", credit: "", debit: "", ledgerType: "all" });
+    setModal(null);
+    notify("Ledger entry added");
+    addBell(`New ledger entry added for ${newLedger.clientId}`, "ledger", "ledger");
+  };
+
+  // ── Audit trail helper ──
+  const currentActorName = () =>
+    auth?.role === "superadmin" ? "JIYA" : (state.admins||[]).find(a=>a.id===auth?.adminId)?.name || "Admin";
+
+  const pushAudit = (action, clientId, details) => {
+    const entry = {
+      id:        "AUD_" + Date.now() + "_" + Math.random().toString(36).slice(2,6),
+      action,                     // "ADDED" | "EDITED" | "DELETED"
+      clientId,
+      details,                    // human readable string
+      actor:     currentActorName(),
+      timestamp: new Date().toISOString(),
+    };
+    setState(s => ({ ...s, auditLog: [entry, ...(s.auditLog||[])].slice(0, 2000) }));
+    withSync(() => sb.upsert("audit_log", entry));
+  };
+
+  const saveLedgerEdit = () => {
+    if (!editLedgerEntry) return;
+    const before = state.ledger.find(l => l.id === editLedgerEntry.id);
+    const updated = { ...editLedgerEntry, credit: +editLedgerEntry.credit || 0, debit: +editLedgerEntry.debit || 0 };
+    setState(s => ({ ...s, ledger: s.ledger.map(l => l.id === updated.id ? updated : l) }));
+    withSync(() => sb.upsert("ledger", updated));
+    // Audit: log what changed
+    if (before) {
+      const changes = [];
+      if (before.credit !== updated.credit) changes.push(`Credit ₹${before.credit} → ₹${updated.credit}`);
+      if (before.debit  !== updated.debit)  changes.push(`Debit ₹${before.debit} → ₹${updated.debit}`);
+      if (before.narration !== updated.narration) changes.push(`Note changed`);
+      pushAudit("EDITED", updated.clientId, changes.join(", ") || "Entry updated");
+    }
+    setEditLedgerEntry(null);
+    setModal(null);
+    notify("Entry updated");
+  };
+
+  const deleteLedgerEntry = (id) => {
+    const entry = state.ledger.find(l => l.id === id);
+    setState(s => ({ ...s, ledger: s.ledger.filter(l => l.id !== id) }));
+    withSync(() => sb.delete("ledger", id));
+    if (entry) {
+      const amt = entry.credit > 0 ? `₹${entry.credit} credit` : `₹${entry.debit} debit`;
+      pushAudit("DELETED", entry.clientId, `Removed ${amt} — "${entry.narration||""}"`);
+    }
+    notify("Entry deleted");
+  };
+
+  // ── Trade Upload (Broker Master File) ──
+  const [uploadFile, setUploadFile] = useState(null);
+  const [uploadPreview, setUploadPreview] = useState(null);
+  const [uploadMode, setUploadMode] = useState("append");
+  const [uploadHistory, setUploadHistory] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("jiya_upload_history") || "[]"); }
+    catch(e) { return []; }
+  });
+  const [uploadTradeDate, setUploadTradeDate] = useState(new Date().toISOString().slice(0,10));
+  const [ltpFile, setLtpFile] = useState(null);
+  const [ltpPreview, setLtpPreview] = useState(null);
+  const [ltpUploading, setLtpUploading] = useState(false);
+
+  // Normalize expiry date to standard format: DDMMMYYYY (e.g. 02APR2026)
+  // Handles: "02APR2026", "02-Apr-26", "02-Apr-2026", "2026-04-02", "02/04/2026" etc.
+  const normalizeExpiry = (raw) => {
+    if (!raw) return "";
+    const s = raw.trim();
+
+    const MONTHS = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+
+    // Already standard: "02APR2026"
+    if (/^\d{2}[A-Z]{3}\d{4}$/.test(s)) return s;
+
+    // "02APR26" → "02APR2026"
+    if (/^\d{2}[A-Z]{3}\d{2}$/.test(s)) {
+      return s.slice(0,5) + "20" + s.slice(5);
+    }
+
+    // "02-Apr-26" or "02-Apr-2026"
+    const m1 = s.match(/^(\d{1,2})[-\/]([A-Za-z]{3})[-\/](\d{2,4})$/);
+    if (m1) {
+      const dd = m1[1].padStart(2,"0");
+      const mon = m1[2].toUpperCase();
+      const yr = m1[3].length === 2 ? "20"+m1[3] : m1[3];
+      return `${dd}${mon}${yr}`;
+    }
+
+    // "2026-04-02" (ISO format)
+    const m2 = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m2) {
+      const yr = m2[1], mo = parseInt(m2[2])-1, dd = m2[3];
+      return `${dd}${MONTHS[mo]}${yr}`;
+    }
+
+    // "02/04/2026" (DD/MM/YYYY)
+    const m3 = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (m3) {
+      const dd = m3[1], mo = parseInt(m3[2])-1, yr = m3[3];
+      return `${dd}${MONTHS[mo]}${yr}`;
+    }
+
+    // Fallback: uppercase as-is
+    return s.toUpperCase();
+  };
+
+  // Build contract name — always produces consistent format
+  // e.g. "SENSEX 72300 PE 02APR2026"
+  const buildContractName = (row) => {
+    const type    = (row.instrType || "").toUpperCase().trim();
+    const symbol  = (row.symbol   || "").trim().toUpperCase();
+    const expiry  = normalizeExpiry(row.expiry  || "");
+    const strike  = (row.strike   || "").trim();
+    const optType = (row.optType  || "").trim().toUpperCase();
+
+    if (["OPTIONS","OPTION","OPT","OPTIDX","OPTSTK"].includes(type)) {
+      // Normalize strike: "280.00" → "280", "23800.00" → "23800"
+      const strikeClean = strike.replace(/\.0+$/, '').replace(/\.00$/, '');
+      return `${symbol} ${strikeClean} ${optType} ${expiry}`.replace(/\s+/g," ").trim();
+    } else if (["FUTURE","FUT","FUTURES","FUTIDX","FUTSTK"].includes(type)) {
+      return `${symbol} FUT ${expiry}`.replace(/\s+/g," ").trim();
+    } else {
+      return symbol;
+    }
+  };
+
+  // Smart CSV splitter — handles quoted fields with commas inside
+  const splitCSVLine = (line) => {
+    const result = [];
+    let current = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQuotes = !inQuotes; }
+      else if (ch === "," && !inQuotes) { result.push(current.trim()); current = ""; }
+      else { current += ch; }
+    }
+    result.push(current.trim());
+    return result;
+  };
+
+  const parseBrokerCSV = (text) => {
+    // Normalize line endings
+    const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim().split("\n");
+    if (lines.length < 2) return { rows: [], warnings: ["File appears empty"] };
+
+    // Auto-detect delimiter: tab or comma
+    const firstLine = lines[0];
+    const tabCount   = (firstLine.match(/\t/g) || []).length;
+    const commaCount = (firstLine.match(/,/g) || []).length;
+    const delimiter  = tabCount >= commaCount ? "\t" : ",";
+
+    const splitLine = (line) => {
+      if (delimiter === "\t") return line.split("\t").map(c => c.replace(/"/g,"").trim());
+      return splitCSVLine(line);
+    };
+
+    const rawHeader = splitLine(lines[0]);
+    const header = rawHeader.map(h => h.replace(/"/g, "").trim());
+    const headerLow = header.map(h => h.toLowerCase().replace(/\s+/g, " ").trim());
+    const totalCols = header.length;
+
+    // ── Smart column detector — finds by EXACT header name first, then partial ──
+    const findIdx = (exactMatches, partialMatches) => {
+      // Try exact match first (case insensitive)
+      for (const ex of exactMatches) {
+        const i = headerLow.findIndex(h => h === ex.toLowerCase());
+        if (i !== -1) return i;
+      }
+      // Try partial match
+      for (const pt of partialMatches) {
+        const i = headerLow.findIndex(h => h.includes(pt.toLowerCase()));
+        if (i !== -1) return i;
+      }
+      return -1;
+    };
+
+    const idxUserId    = findIdx(["User","User Id","User ID"],           ["user"]);
+    const idxExchange  = findIdx(["Exchange"],                            ["exchange"]);
+    const idxInstrType = findIdx(["Instrument Type","InstrumentType"],    ["instrument type","instr type"]);
+    const idxSymbol    = findIdx(["Symbol","Symbol/Scr"],                 ["symbol"]);
+    const idxExpiry    = findIdx(["Ser/Exp/Group","Ser/Exp/Gr","Expiry"], ["ser/exp","expiry"]);
+    const idxStrike    = findIdx(["Strike Price","StrikePrice"],          ["strike"]);
+    const idxOptType   = findIdx(["Option Type","Option Typ"],            ["option"]);
+    const idxScriptName= findIdx(["Scrip Name","Script Name"],            ["scrip","script name"]);
+    const idxSide      = findIdx(["B/S","Buy/Sell"],                      ["b/s"]);
+    const idxQty       = findIdx(["Quantity","Qty"],                      ["quantity","qty"]);
+    const idxPrice     = findIdx(["Price","Trade Price","Order Price"],    ["price"]);
+    const idxTime      = findIdx(["Time","Trade Time"],                   ["time"]);
+
+    const warnings = [];
+
+    // Show detected mapping clearly
+    const mapInfo = [
+      `User=[${idxUserId}]"${header[idxUserId]}"`,
+      `InstrType=[${idxInstrType}]"${header[idxInstrType]}"`,
+      `Symbol=[${idxSymbol}]"${header[idxSymbol]}"`,
+      `Expiry=[${idxExpiry}]"${header[idxExpiry]}"`,
+      `Strike=[${idxStrike}]"${header[idxStrike]}"`,
+      `OptType=[${idxOptType}]"${header[idxOptType]}"`,
+      `B/S=[${idxSide}]"${header[idxSide]}"`,
+      `Qty=[${idxQty}]"${header[idxQty]}"`,
+      `Price=[${idxPrice}]"${header[idxPrice]}"`,
+      `Time=[${idxTime}]"${header[idxTime]}"`,
+    ].join(" | ");
+    warnings.push(`ℹ️ ${totalCols} columns. Mapping: ${mapInfo}`);
+
+    if (idxUserId  === -1) warnings.push("❌ CRITICAL: 'User' column not found!");
+    if (idxSide    === -1) warnings.push("❌ CRITICAL: 'B/S' column not found!");
+    if (idxQty     === -1) warnings.push("❌ CRITICAL: 'Quantity' column not found!");
+    if (idxPrice   === -1) warnings.push("❌ CRITICAL: 'Price' column not found!");
+    if (idxSymbol  === -1) warnings.push("❌ CRITICAL: 'Symbol' column not found!");
+    if (idxStrike  === -1) warnings.push("⚠️ Strike Price column not found");
+    if (idxOptType === -1) warnings.push("⚠️ Option Type column not found");
+    if (idxExpiry  === -1) warnings.push("⚠️ Expiry column not found");
+
+    const rows = [];
+    let skippedRows = 0;
+    let skippedReasons = {};
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim()) continue;
+      const cols = splitLine(line);
+      if (cols.length < 3) continue;
+
+      const clientId   = idxUserId >= 0    ? cols[idxUserId]?.replace(/"/g,"").trim()    : "";
+      const rawSide    = idxSide >= 0      ? cols[idxSide]?.replace(/"/g,"").trim().toUpperCase() : "";
+      const rawQty     = idxQty >= 0       ? cols[idxQty]?.replace(/"/g,"").trim()       : "";
+      const rawPrice   = idxPrice >= 0     ? cols[idxPrice]?.replace(/"/g,"").trim()     : "";
+      const time       = idxTime >= 0      ? cols[idxTime]?.replace(/"/g,"").trim()      : "";
+      const exchange   = idxExchange >= 0  ? cols[idxExchange]?.replace(/"/g,"").trim()  : "";
+      const instrType  = idxInstrType >= 0 ? cols[idxInstrType]?.replace(/"/g,"").trim() : "";
+      const symbol     = idxSymbol >= 0    ? cols[idxSymbol]?.replace(/"/g,"").trim()    : "";
+      const expiry     = idxExpiry >= 0    ? cols[idxExpiry]?.replace(/"/g,"").trim()    : "";
+      const strike     = idxStrike >= 0    ? cols[idxStrike]?.replace(/"/g,"").trim()    : "";
+      const optType    = idxOptType >= 0   ? cols[idxOptType]?.replace(/"/g,"").trim()   : "";
+      const scriptName = idxScriptName >= 0? cols[idxScriptName]?.replace(/"/g,"").trim(): "";
+
+      const qty   = parseFloat(rawQty);
+      const price = parseFloat(rawPrice);
+
+      // Skip & track reason
+      const skip = (reason) => { skippedRows++; skippedReasons[reason] = (skippedReasons[reason]||0)+1; return true; };
+
+      if (!clientId)                          { skip("no clientId"); continue; }
+      if (isNaN(qty) || qty <= 0)             { skip("invalid qty: "+rawQty); continue; }
+      if (isNaN(price) || price <= 0)         { skip("invalid price: "+rawPrice); continue; }
+      if (price > 100000)                     { skip("price too large (order no?): "+price); continue; }
+
+      // Normalize B/S
+      const sideNorm = ["B","BUY","BOT","BOUGHT"].includes(rawSide)  ? "BUY"
+                     : ["S","SELL","SLD","SOLD"].includes(rawSide) ? "SELL" : "";
+      if (!sideNorm) { skip("unknown side: '"+rawSide+"'"); continue; }
+
+      const contract = buildContractName({ instrType, symbol, expiry, strike, optType, scriptName });
+
+      // Use time field for intra-day ordering; use uploadBatch for inter-day ordering
+      const tradeDate = uploadTradeDate || new Date().toISOString().slice(0,10);
+
+      rows.push({
+        id: `T${Date.now()}_${i}_${Math.random().toString(36).slice(2,6)}`,
+        clientId, contract, side: sideNorm, qty, price,
+        time, date: tradeDate, exchange, instrType, scriptName,
+      });
+    }
+
+    if (skippedRows > 0) {
+      const reasons = Object.entries(skippedReasons).map(([r,c])=>`${r}(×${c})`).join(", ");
+      warnings.push(`⚠️ Skipped ${skippedRows} rows — reasons: ${reasons}`);
+    }
+
+    return { rows, warnings };
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setUploadFile(file);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result;
+      const result = parseBrokerCSV(text);
+      setUploadPreview(result);
+    };
+    reader.readAsText(file);
+  };
+
+  // ── Undo last upload by batchId ──
+  const undoUpload = async (entry) => {
+    if (!window.confirm(
+      "Undo this upload?\n" +
+      entry.tradeCount + " trades from " + entry.filename + "\n" +
+      "This will remove those trades permanently."
+    )) return;
+
+    const { batchId, mode, month } = entry;
+
+    // Remove from local state
+    setState(s => ({ ...s, trades: s.trades.filter(t => t.batchId !== batchId) }));
+
+    // Remove from Supabase
+    withSync(async () => {
+      // Delete in batches by batchId
+      while (true) {
+        const existing = await sb.select("trades", `?batchId=eq.${batchId}&limit=1000&select=id`);
+        if (!Array.isArray(existing) || existing.length === 0) break;
+        const ids = existing.map(r => r.id).join(",");
+        await fetch(`${sb.url("trades")}?id=in.(${ids})`, {
+          method: "DELETE",
+          headers: { ...sb.headers, "Prefer": "" }
+        });
+        if (existing.length < 1000) break;
+      }
+    });
+
+    // Remove from history
+    setUploadHistory(prev => {
+      const updated = prev.filter(h => h.batchId !== batchId);
+      try { localStorage.setItem("jiya_upload_history", JSON.stringify(updated)); } catch(e) {}
+      return updated;
+    });
+
+    notify("✅ Upload undone — " + entry.tradeCount + " trades removed");
+  };
+
+  const confirmUpload = () => {
+    if (!uploadPreview || !uploadPreview.rows.length) return notify("No valid trades to import", "error");
+    const batchId = Date.now();
+    const newTrades = uploadPreview.rows.map(t => ({ ...t, batchId }));
+    const clientsInFile = [...new Set(newTrades.map((t) => t.clientId))];
+    const unknownClients = clientsInFile.filter((cid) => !state.clients.find((c) => c.id === cid));
+
+    setState((s) => ({
+      ...s,
+      trades: uploadMode === "replace"
+        ? [
+            // Keep locked month trades + add new current month trades
+            ...s.trades.filter(t => {
+              const m = (t.date || "").slice(0, 7);
+              return (s.lockedMonths || []).includes(m);
+            }),
+            ...newTrades
+          ]
+        : [...s.trades, ...newTrades],
+    }));
+
+    withSync(async () => {
+      if (uploadMode === "replace") {
+        // Delete trades for same months as in uploaded file — NOT current calendar month
+        const uploadedMonths = [...new Set(newTrades.map(t => (t.date||"").slice(0,7)).filter(Boolean))];
+        const lockedMonths   = state.lockedMonths || [];
+        const monthsToDelete = uploadedMonths.filter(m => !lockedMonths.includes(m));
+        for (const month of monthsToDelete) {
+          while (true) {
+            const existing = await sb.select("trades",
+              `?date=gte.${month}-01&date=lte.${month}-31&limit=1000&select=id`
+            );
+            if (!Array.isArray(existing) || existing.length === 0) break;
+            const ids = existing.map(r => r.id).join(",");
+            await fetch(`${sb.url("trades")}?id=in.(${ids})`, {
+              method: "DELETE",
+              headers: { ...sb.headers, "Prefer": "" }
+            });
+            if (existing.length < 1000) break;
+          }
+        }
+        // Replace mode: insert all directly
+        for (let i = 0; i < newTrades.length; i += 500) {
+          await sb.upsert("trades", newTrades.slice(i, i + 500));
+        }
+      } else {
+        // Append mode: deduplicate by contract+side+qty+price+date+time (not ID — IDs are new each upload)
+        const clientIds = [...new Set(newTrades.map(t=>t.clientId))].join(",");
+        const existing  = await sb.select("trades",
+          `?clientId=in.(${clientIds})&select=contract,side,qty,price,date,time&limit=20000`
+        ) || [];
+        const existingKeys = new Set(
+          existing.map(r => `${r.contract}|${r.side}|${r.qty}|${r.price}|${r.date}|${r.time}`)
+        );
+        const toInsert = newTrades.filter(t =>
+          !existingKeys.has(`${t.contract}|${t.side}|${t.qty}|${t.price}|${t.date}|${t.time}`)
+        );
+        if (toInsert.length < newTrades.length) {
+          console.log(`Dedup: skipped ${newTrades.length - toInsert.length} duplicate trades`);
+        }
+        for (let i = 0; i < toInsert.length; i += 500) {
+          await sb.upsert("trades", toInsert.slice(i, i + 500));
+        }
+      }
+    });
+
+    setUploadFile(null);
+    setUploadPreview(null);
+    setModal(null);
+    const warn = unknownClients.length ? ` ⚠️ Unknown client IDs: ${unknownClients.join(", ")}` : "";
+    notify(`${newTrades.length} trades imported for ${clientsInFile.length} clients.${warn}`);
+    addBell(`${newTrades.length} trades uploaded (${clientsInFile.length} clients)`, "trade", "trades");
+
+    // ── Save to upload history (keep last 5) ──
+    const histEntry = {
+      batchId,
+      timestamp:  new Date().toISOString(),
+      mode:       uploadMode,
+      tradeCount: newTrades.length,
+      clients:    clientsInFile.length,
+      filename:   uploadFile?.name || "unknown",
+      month:      new Date().toISOString().slice(0,7),
+    };
+    setUploadHistory(prev => {
+      const updated = [histEntry, ...prev].slice(0, 5); // keep last 5
+      try { localStorage.setItem("jiya_upload_history", JSON.stringify(updated)); } catch(e) {}
+      return updated;
+    });
+  };
+
+  // ── Support Tickets ──
+  const [newTicket, setNewTicket] = useState({ subject: "", issueType: "", description: "", attachments: [] });
+  const [ticketFilter, setTicketFilter] = useState("all"); // all | open | closed | answered
+  const createTicket = () => {
+    if (!newTicket.issueType || !newTicket.description) return notify("Fill all required fields", "error");
+    const ticket = {
+      id: "TK" + Date.now(),
+      clientId: auth.clientId,
+      subject: newTicket.issueType,
+      issueType: newTicket.issueType,
+      message: newTicket.description,
+      attachments: newTicket.attachments || [],
+      status: "open",
+      date: new Date().toISOString().slice(0, 10),
+      replies: []
+    };
+    setState((s) => ({ ...s, tickets: [...s.tickets, ticket] }));
+    withSync(() => sb.upsert("tickets", ticket));
+    setNewTicket({ subject: "", issueType: "", description: "", attachments: [] });
+    setModal(null);
+    notify("Ticket submitted successfully");
+  };
+
+  const [replyText, setReplyText] = useState("");
+  const replyTicket = (ticketId) => {
+    if (!replyText.trim()) return;
+    const reply = { from: "admin", text: replyText, date: new Date().toISOString().slice(0, 10) };
+    setState((s) => ({
+      ...s,
+      tickets: s.tickets.map((t) => t.id === ticketId
+        ? { ...t, replies: [...t.replies, reply], status: "answered" }
+        : t)
+    }));
+    const updatedTicket = state.tickets.find(t => t.id === ticketId);
+    if (updatedTicket) {
+      const newReplies = [...(updatedTicket.replies || []), reply];
+      withSync(() => sb.upsert("tickets", { ...updatedTicket, replies: newReplies, status: "answered" }));
+    }
+    setReplyText("");
+    notify("Reply sent");
+  };
+
+  // ── Login Screen ──
+  // ── DB Loading screen ──
+  if (dbLoading && !auth) return (
+    <div style={{ minHeight:"100vh", background:"#0d1117", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Inter',sans-serif", overflow:"hidden", position:"relative" }}>
+      <style>{`
+        @keyframes pulse-ring {
+          0%   { transform: scale(0.8); opacity:1; }
+          100% { transform: scale(2.2); opacity:0; }
+        }
+        @keyframes fade-up {
+          from { opacity:0; transform:translateY(16px); }
+          to   { opacity:1; transform:translateY(0); }
+        }
+        @keyframes blink {
+          0%,100% { opacity:1; } 50% { opacity:0.2; }
+        }
+        @keyframes ticker {
+          0%   { transform:translateX(0); }
+          100% { transform:translateX(-50%); }
+        }
+        @keyframes bar-grow {
+          from { transform:scaleY(0); }
+          to   { transform:scaleY(1); }
+        }
+        @keyframes shimmer {
+          0%   { background-position: -400px 0; }
+          100% { background-position:  400px 0; }
+        }
+      `}</style>
+
+      {/* Background grid */}
+      <div style={{ position:"absolute", inset:0, backgroundImage:"linear-gradient(rgba(59,130,246,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.04) 1px,transparent 1px)", backgroundSize:"40px 40px", pointerEvents:"none" }}/>
+
+      {/* Animated bars — fake chart in background */}
+      <div style={{ position:"absolute", bottom:0, left:0, right:0, height:180, display:"flex", alignItems:"flex-end", gap:3, padding:"0 40px", opacity:0.12 }}>
+        {[0.4,0.7,0.5,0.9,0.6,0.8,0.3,0.95,0.55,0.75,0.45,0.85,0.65,0.5,0.7,0.4,0.9,0.6,0.8,0.35,0.7,0.5,0.88,0.6,0.45,0.75,0.55,0.9,0.4,0.7].map((h,i) => (
+          <div key={i} style={{ flex:1, background:"#3b82f6", borderRadius:"3px 3px 0 0", height:`${h*100}%`, transformOrigin:"bottom", animation:`bar-grow 0.6s ease-out ${i*0.04}s both` }}/>
+        ))}
+      </div>
+
+      {/* Center content */}
+      <div style={{ position:"relative", textAlign:"center", animation:"fade-up 0.5s ease-out both" }}>
+
+        {/* Pulse ring + logo */}
+        <div style={{ position:"relative", width:88, height:88, margin:"0 auto 28px" }}>
+          <div style={{ position:"absolute", inset:0, borderRadius:"50%", border:"2px solid #3b82f6", animation:"pulse-ring 1.6s ease-out infinite" }}/>
+          <div style={{ position:"absolute", inset:0, borderRadius:"50%", border:"2px solid #3b82f6", animation:"pulse-ring 1.6s ease-out 0.5s infinite" }}/>
+          <div style={{ position:"relative", width:88, height:88, borderRadius:"50%", background:"linear-gradient(135deg,#1e3a8a,#1e2761)", display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 0 32px rgba(59,130,246,0.3)" }}>
+            <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+              <polyline points="4,28 12,18 20,22 28,10 36,14" stroke="#3b82f6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <circle cx="36" cy="14" r="3" fill="#10b981"/>
+            </svg>
+          </div>
+        </div>
+
+        {/* Brand */}
+        <div style={{ fontSize:28, fontWeight:800, color:"#ffffff", letterSpacing:"-0.5px", marginBottom:6, animation:"fade-up 0.5s ease-out 0.15s both", opacity:0 }}>
+          JIYA <span style={{ color:"#3b82f6" }}>Back Office</span>
+        </div>
+        <div style={{ fontSize:13, color:"#475569", letterSpacing:"3px", textTransform:"uppercase", marginBottom:36, animation:"fade-up 0.5s ease-out 0.25s both", opacity:0 }}>
+          Professional Trading Portal
+        </div>
+
+        {/* Progress bar */}
+        <div style={{ width:240, margin:"0 auto 16px", animation:"fade-up 0.5s ease-out 0.35s both", opacity:0 }}>
+          <div style={{ height:3, background:"#1e2761", borderRadius:2, overflow:"hidden" }}>
+            <div style={{ height:"100%", background:"linear-gradient(90deg,#1e3a8a,#3b82f6,#10b981)", backgroundSize:"200% 100%", animation:"shimmer 1.4s linear infinite", borderRadius:2 }}/>
+          </div>
+        </div>
+
+        {/* Status text */}
+        <div style={{ fontSize:12, color:"#3b82f6", letterSpacing:"1px", animation:"blink 1.4s ease-in-out infinite" }}>
+          {dbError ? "⚠ Connection issue — retrying..." : "● ESTABLISHING SECURE CONNECTION"}
+        </div>
+
+        {/* Error state */}
+        {dbError && (
+          <div style={{ marginTop:24, background:"#1c1c2e", border:"1px solid #ef444433", borderRadius:10, padding:"16px 24px", maxWidth:380, animation:"fade-up 0.3s ease-out both" }}>
+            <div style={{ color:"#ef4444", fontWeight:600, fontSize:13, marginBottom:8 }}>Connection failed</div>
+            <div style={{ color:"#94a3b8", fontSize:12, marginBottom:14 }}>{dbError}</div>
+            <button onClick={() => { setDbLoading(false); setDbError(null); }}
+              style={{ background:"#1e3a8a", color:"#93c5fd", border:"1px solid #3b82f6", borderRadius:6, padding:"8px 18px", cursor:"pointer", fontSize:12, fontWeight:600 }}>
+              Continue offline
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Bottom ticker */}
+      <div style={{ position:"absolute", bottom:0, left:0, right:0, height:32, background:"#0a0e17", borderTop:"1px solid #1e2761", overflow:"hidden", display:"flex", alignItems:"center" }}>
+        <div style={{ display:"flex", gap:40, whiteSpace:"nowrap", animation:"ticker 18s linear infinite", fontSize:11, color:"#334155", fontFamily:"monospace" }}>
+          {["SENSEX  81,245.30  +0.42%","NIFTY  24,812.55  +0.38%","BANKNIFTY  53,124.80  +0.21%","FINNIFTY  23,445.60  -0.12%","MIDCPNIFTY  12,234.15  +0.55%",
+            "SENSEX  81,245.30  +0.42%","NIFTY  24,812.55  +0.38%","BANKNIFTY  53,124.80  +0.21%","FINNIFTY  23,445.60  -0.12%","MIDCPNIFTY  12,234.15  +0.55%"].map((t,i) => (
+            <span key={i} style={{ color: t.includes("-") ? "#ef4444" : "#10b981" }}>{t}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  if (!auth) return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg, #0f1117 0%, #1a1f35 50%, #0f1117 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter','Segoe UI',sans-serif" }}>
+      <div style={{ background: "#161b27", borderRadius: 24, padding: "52px 44px", width: 420, boxShadow: "0 24px 64px rgba(0,0,0,0.5), 0 0 0 1px #2d3748" }}>
+        <div style={{ textAlign: "center", marginBottom: 40 }}>
+          <div style={{ width: 64, height: 64, background: "linear-gradient(135deg, #3b82f6, #6366f1)", borderRadius: 20, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontSize: 28, boxShadow: "0 6px 20px rgba(59,130,246,0.35)" }}>📊</div>
+          <h1 style={{ color: "#e2e8f0", margin: 0, fontSize: 28, fontWeight: 800, letterSpacing: "-0.5px" }}>JIYA Back Office</h1>
+          <p style={{ color: "#718096", margin: "8px 0 0", fontSize: 14 }}>Authorized Personnel Only</p>
+        </div>
+
+        {lockoutUntil && Date.now() < lockoutUntil && (
+          <div style={{ background: "#f871711a", border: "1px solid #f8717144", borderRadius: 10, padding: "12px 16px", marginBottom: 16, color: "#f87171", fontSize: 13, textAlign: "center" }}>
+            🔒 Account temporarily locked. Please wait.
+          </div>
+        )}
+
+        {["User ID", "Password"].map((label, i) => (
+          <div key={i} style={{ marginBottom: 16 }}>
+            <label style={{ color: "#8892a4", fontSize: 12, fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase" }}>{label}</label>
+            <input
+              type={i === 1 ? "password" : "text"}
+              value={i === 0 ? loginForm.user : loginForm.pass}
+              onChange={(e) => setLoginForm((f) => ({ ...f, [i === 0 ? "user" : "pass"]: e.target.value, error: "" }))}
+              onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+              style={{ width: "100%", marginTop: 6, padding: "13px 16px", background: "#1e2535", border: "1.5px solid #2d3748", borderRadius: 12, color: "#e2e8f0", fontSize: 15, outline: "none", boxSizing: "border-box", transition: "border-color 0.2s" }}
+              placeholder={i === 0 ? "Enter your User ID" : "Enter your password"}
+              autoComplete={i === 1 ? "current-password" : "username"}
+            />
+          </div>
+        ))}
+        {loginForm.error && (
+          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 14px", marginBottom: 14, color: "#dc2626", fontSize: 13 }}>
+            ⚠️ {loginForm.error}
+          </div>
+        )}
+        <button onClick={handleLogin} style={{ width: "100%", padding: "15px", background: "linear-gradient(135deg, #3b82f6, #6366f1)", border: "none", borderRadius: 14, color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 16px rgba(59,130,246,0.3)", letterSpacing: 0.3 }}>
+          Sign In →
+        </button>
+        <p style={{ color: "#cbd5e0", fontSize: 11, textAlign: "center", marginTop: 24 }}>
+          This is a secured system. Unauthorized access is prohibited.
+        </p>
+      </div>
+    </div>
+  );
+
+  // ── Colors & Styles (Light Theme) ──
+  const C = {
+    bg:      "#0f1117",
+    sidebar: "#161b27",
+    card:    "#1e2535",
+    border:  "#2d3748",
+    text:    "#e2e8f0",
+    muted:   "#8892a4",
+    accent:  "#3b82f6",
+    green:   "#10b981",
+    red:     "#f87171",
+    yellow:  "#fbbf24",
+    purple:  "#a78bfa",
+    blue:    "#60a5fa",
+  };
+  const card = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "20px 24px", boxShadow: "0 1px 4px rgba(0,0,0,0.06)" };
+  const btn = (color = C.accent) => ({ background: color, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", cursor: "pointer", fontSize: 13, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6 });
+  const input = { width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px", color: C.text, fontSize: 14, outline: "none", boxSizing: "border-box" };
+  const badge = (color) => ({ background: color + "18", color: color, padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600 });
+
+  // ── Sidebar ──
+  const adminPages = [
+    { id: "dashboard", label: "Dashboard", icon: "dashboard" },
+    { id: "clients", label: "Clients", icon: "clients" },
+    { id: "investors", label: "Investor Control", icon: "clients" },
+    { id: "ledger", label: "Ledger", icon: "ledger" },
+    { id: "trades", label: "Trades & Positions", icon: "trades" },
+    { id: "pnl", label: "Profit & Loss", icon: "pnl" },
+    { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
+    { id: "settlements", label: "⚡ Settlements", icon: "trade" },
+    { id: "month_end", label: "↪ Month-End Carry", icon: "trades" },
+    { id: "charges", label: "Charges", icon: "charges", locked: !hasFeature(auth?.plan, "charges") },
+    { id: "tickets", label: "Support Tickets", icon: "ticket" },
+    ...(hasFeature(auth?.plan, "audit") ? [{ id: "audit", label: "📋 Audit Log", icon: "ledger" }] : []),
+    { id: "settings", label: "⚙️ Settings", icon: "dashboard" },
+    // Super admin only
+    ...(auth?.role === "superadmin" ? [
+      { id: "manage_admins", label: "👥 Manage Admins", icon: "clients" },
+      { id: "manage_tokens", label: "🔑 Tokens", icon: "dashboard" },
+    ] : []),
+  ];
+  const clientPages = [
+    { id: "dashboard", label: "Dashboard", icon: "dashboard" },
+    { id: "ledger", label: "My Ledger", icon: "ledger" },
+    { id: "trades", label: "My Positions", icon: "trades" },
+    { id: "pnl", label: "My P&L", icon: "pnl" },
+    { id: "livemtm", label: "📡 Live MTM", icon: "pnl" },
+    { id: "tickets", label: "Support", icon: "ticket" },
+  ];
+  const pages = (auth.role === "admin" || auth.role === "superadmin") ? adminPages : clientPages;
+
+  // ── Dashboard Data ──
+  const QUOTES = [
+    { text: "The stock market is a device for transferring money from the impatient to the patient.", author: "Warren Buffett" },
+    { text: "In investing, what is comfortable is rarely profitable.", author: "Robert Arnott" },
+    { text: "The four most dangerous words in investing are: 'This time it's different.'", author: "Sir John Templeton" },
+    { text: "Risk comes from not knowing what you're doing.", author: "Warren Buffett" },
+    { text: "The market is a pendulum that forever swings between unsustainable optimism and unjustified pessimism.", author: "Benjamin Graham" },
+    { text: "It's not whether you're right or wrong, but how much money you make when you're right.", author: "George Soros" },
+    { text: "The goal of a successful trader is to make the best trades. Money is secondary.", author: "Alexander Elder" },
+    { text: "An investment in knowledge pays the best interest.", author: "Benjamin Franklin" },
+    { text: "The biggest risk of all is not taking one.", author: "Mellody Hobson" },
+    { text: "Price is what you pay. Value is what you get.", author: "Warren Buffett" },
+    { text: "Markets can remain irrational longer than you can remain solvent.", author: "John Maynard Keynes" },
+    { text: "October: This is one of the peculiarly dangerous months to speculate in stocks.", author: "Mark Twain" },
+    { text: "Wide diversification is only required when investors do not understand what they are doing.", author: "Warren Buffett" },
+    { text: "Every day is a new opportunity. You can build on yesterday's success or put its failures behind.", author: "Bob Feller" },
+    { text: "The secret to investing is to figure out the value of something — and then pay a lot less.", author: "Joel Greenblatt" },
+    { text: "Successful investing is about managing risk, not avoiding it.", author: "Benjamin Graham" },
+    { text: "Time in the market beats timing the market.", author: "Ken Fisher" },
+    { text: "Do not save what is left after spending; instead spend what is left after saving.", author: "Warren Buffett" },
+    { text: "The individual investor should act consistently as an investor and not as a speculator.", author: "Benjamin Graham" },
+    { text: "Patience is the most underrated skill in trading.", author: "Unknown" },
+    { text: "Bulls make money, bears make money, pigs get slaughtered.", author: "Wall Street Proverb" },
+    { text: "Cut your losses short and let your profits run.", author: "Jesse Livermore" },
+    { text: "The trend is your friend until it ends.", author: "Ed Seykota" },
+    { text: "Trade what you see, not what you think.", author: "Unknown" },
+    { text: "Compound interest is the eighth wonder of the world.", author: "Albert Einstein" },
+    { text: "You get recessions, you have stock market declines. If you don't understand that's going to happen, you're not ready.", author: "Peter Lynch" },
+    { text: "Know what you own, and know why you own it.", author: "Peter Lynch" },
+    { text: "The market is not your mother. It consists of tough men and women who look for ways to take money away from you.", author: "Alexander Elder" },
+    { text: "Be fearful when others are greedy and greedy when others are fearful.", author: "Warren Buffett" },
+    { text: "In the short run, the market is a voting machine. In the long run, it is a weighing machine.", author: "Benjamin Graham" },
+  ];
+  const todayQuote = QUOTES[new Date().getDate() % QUOTES.length];
+
+  const renderSquareOffModal = () => {
+    if (!squareOffModal) return null;
+    const overlay = { position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:9000,display:"flex",alignItems:"center",justifyContent:"center" };
+    const box     = { background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:32,width:480,maxWidth:"90vw",boxShadow:"0 20px 60px rgba(0,0,0,0.5)" };
+    const m = squareOffModal;
+      const closeSide = m.side === "BUY" ? "SELL" : "BUY";
+      const sqPrice   = parseFloat(squareOffPrice) || 0;
+      const grossPnl  = sqPrice > 0
+        ? (m.side === "BUY" ? (sqPrice - m.avgPrice) : (m.avgPrice - sqPrice)) * m.qty
+        : 0;
+
+      const doSquareOff = async () => {
+        if (sqPrice <= 0) { notify("Enter a valid settlement price"); return; }
+        setSquareOffLoading(true);
+        try {
+          const today = new Date().toISOString().slice(0,10);
+          const now   = new Date().toTimeString().slice(0,8);
+          const tradeId = `SETTLE_${m.clientId}_${m.contract.replace(/\s+/g,"_")}_${Date.now()}`;
+          const trade = {
+            id:         tradeId,
+            clientId:   m.clientId,
+            contract:   m.contract,
+            side:       closeSide,
+            qty:        m.qty,
+            price:      sqPrice,
+            date:       today,
+            time:       now,
+            exchange:   m.contract.includes("SENSEX")||m.contract.includes("BANKEX") ? "BSE" : "NSE",
+            instrType:  m.contract.includes("FUT") ? "FUTURES" : "Options",
+            scriptName: m.contract,
+            scripCode:  "",
+            batchId:    null,
+          };
+          const r = await fetch(
+            `${SUPABASE_URL}/rest/v1/trades`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type":  "application/json",
+                "apikey":        SUPABASE_ANON_KEY,
+                "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+                "Prefer":        "return=minimal",
+              },
+              body: JSON.stringify([trade]),
+            }
+          );
+          if (r.ok || r.status === 201) {
+            // Reload trades
+            await loadAllData(true);
+            notify(`✅ Settlement done — ${m.contract} ${closeSide} ${m.qty} @ ₹${sqPrice}`);
+            setSquareOffModal(null);
+            setSquareOffPrice("");
+            setSquareOffConfirm(false);
+          } else {
+            const err = await r.text();
+            notify("❌ Failed: " + err.slice(0,80));
+          }
+        } catch(e) {
+          notify("❌ Error: " + e.message);
+        }
+        setSquareOffLoading(false);
+      };
+
+      return (
+        <div style={overlay} onClick={() => { setSquareOffModal(null); setSquareOffConfirm(false); }}>
+          <div style={{...box, width:460}} onClick={e=>e.stopPropagation()}>
+
+            <div style={{fontSize:18, fontWeight:800, color:C.text, marginBottom:4}}>⚡ Square Off — Settlement</div>
+            <div style={{color:C.muted, fontSize:12, marginBottom:20}}>
+              This will add a {closeSide} order to the trade book with source = "settlement"
+            </div>
+
+            {/* Contract info */}
+            <div style={{background:C.bg, borderRadius:12, padding:"14px 16px", marginBottom:20}}>
+              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>
+                {[
+                  {l:"Client",    v:m.clientId},
+                  {l:"Contract",  v:m.contract},
+                  {l:"Side",      v:m.side, c:m.side==="BUY"?C.green:C.red},
+                  {l:"Qty",       v:m.qty},
+                  {l:"Avg Price", v:`₹${m.avgPrice}`},
+                  {l:"Settlement Side", v:closeSide, c:closeSide==="BUY"?C.green:C.red},
+                ].map(row=>(
+                  <div key={row.l}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:2}}>{row.l}</div>
+                    <div style={{fontSize:13,fontWeight:700,color:row.c||C.text}}>{row.v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Price input */}
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:12,color:C.muted,marginBottom:6,fontWeight:600}}>Settlement Price (₹)</div>
+              <input
+                type="number"
+                step="0.05"
+                autoFocus
+                value={squareOffPrice}
+                onChange={e => { setSquareOffPrice(e.target.value); setSquareOffConfirm(false); }}
+                placeholder="Enter NSE/BSE settlement price"
+                style={{...input, fontSize:18, fontWeight:700, textAlign:"center",
+                  border:`2px solid ${sqPrice>0?C.accent:C.border}`}}
+              />
+            </div>
+
+            {/* P&L Preview */}
+            {sqPrice > 0 && (
+              <div style={{
+                background: grossPnl>=0?C.green+"15":C.red+"15",
+                border:`1px solid ${grossPnl>=0?C.green:C.red}44`,
+                borderRadius:10, padding:"12px 16px", marginBottom:16, textAlign:"center"
+              }}>
+                <div style={{fontSize:11,color:C.muted,marginBottom:4}}>Estimated P&L on this position</div>
+                <div style={{fontSize:24,fontWeight:900,color:grossPnl>=0?C.green:C.red}}>
+                  {grossPnl>=0?"+":""}₹{Math.abs(grossPnl).toLocaleString("en-IN",{maximumFractionDigits:2})}
+                </div>
+                <div style={{fontSize:11,color:C.muted,marginTop:4}}>
+                  ({closeSide} {m.qty} @ ₹{sqPrice} vs avg ₹{m.avgPrice})
+                </div>
+              </div>
+            )}
+
+            {/* Confirmation */}
+            {!squareOffConfirm ? (
+              <div style={{display:"flex",gap:10}}>
+                <button
+                  onClick={() => { if(sqPrice>0) setSquareOffConfirm(true); else notify("Enter settlement price first"); }}
+                  style={{...btn(C.red), flex:1, padding:"12px", fontSize:14, fontWeight:700, justifyContent:"center"}}>
+                  ⚡ Square Off
+                </button>
+                <button onClick={() => { setSquareOffModal(null); setSquareOffPrice(""); }}
+                  style={{...btn(C.muted), padding:"12px 20px"}}>Cancel</button>
+              </div>
+            ) : (
+              <div style={{background:C.red+"15",border:`1px solid ${C.red}44`,borderRadius:12,padding:16}}>
+                <div style={{fontWeight:700,color:C.red,marginBottom:10,fontSize:14}}>
+                  ⚠️ Confirm Settlement Square Off?
+                </div>
+                <div style={{color:C.muted,fontSize:12,marginBottom:14}}>
+                  This will add a <strong style={{color:C.text}}>{closeSide} {m.qty} {m.contract} @ ₹{sqPrice}</strong> settlement order to the trade book. This cannot be undone.
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <button onClick={doSquareOff} disabled={squareOffLoading}
+                    style={{...btn(C.red),flex:1,padding:"11px",fontSize:14,fontWeight:700,
+                      justifyContent:"center",opacity:squareOffLoading?0.6:1}}>
+                    {squareOffLoading ? "⏳ Processing..." : "✅ Yes, Square Off"}
+                  </button>
+                  <button onClick={() => setSquareOffConfirm(false)}
+                    style={{...btn(C.muted),padding:"11px 20px"}}>No, Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+  };
+
+  // ── Render Pages ──
+  const renderPage = () => {
+    const cid = auth.role === "client" ? auth.clientId : null;
+
+    if (page === "dashboard") {
+      // ── Calculations (DO NOT TOUCH) ──────────────────────────
+      const clientPnlData = visibleClients.map(client => {
+        const closed = clientClosedPos(client.id);
+        const open   = clientOpenPos(client.id);
+        const realizedPnl = closed.reduce((a, c) => a + c.totalPnl, 0);
+        const mtmPnl = open.reduce((p, pos) => {
+          const close = getBhavClose(pos.contract);
+          if (close === null) return p;
+          return p + (pos.side === "SELL" ? (pos.avgPrice - close) : (close - pos.avgPrice)) * pos.netQty;
+        }, 0);
+        return {
+          id: client.id,
+          name: client.name,
+          realizedPnl: +realizedPnl.toFixed(2),
+          mtmPnl:      +mtmPnl.toFixed(2),
+          totalPnl:    +(realizedPnl + mtmPnl).toFixed(2),
+          openCount:   open.length,
+        };
+      }).filter(c => c.realizedPnl !== 0 || c.mtmPnl !== 0 || c.openCount > 0);
+
+      const totalRealized = clientPnlData.reduce((a, c) => a + c.realizedPnl, 0);
+      const totalMtm      = clientPnlData.reduce((a, c) => a + c.mtmPnl, 0);
+      const maxAbs        = Math.max(...clientPnlData.map(c => Math.abs(c.totalPnl)), 1);
+      const now           = new Date();
+      const currentMonthStr = now.toISOString().slice(0, 7);
+      const greeting      = now.getHours() < 12 ? "Good morning" : now.getHours() < 17 ? "Good afternoon" : "Good evening";
+      const fmtCcy        = (n) => (n < 0 ? "−" : "+") + "₹" + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+      const fmtAbs        = (n) => "₹" + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+
+      // ── This Month P&L (raw trade value — used only for Win Rate, DO NOT TOUCH) ──
+      const allTrades = visibleTrades || state.trades;
+      const monthMap  = {};
+      allTrades.forEach(t => {
+        const m = (t.date || "").slice(0, 7);
+        if (!m) return;
+        if (!monthMap[m]) monthMap[m] = { buyVal: 0, sellVal: 0 };
+        const v = (t.price || 0) * (t.qty || 0);
+        if (t.side === "BUY")  monthMap[m].buyVal  += v;
+        if (t.side === "SELL") monthMap[m].sellVal += v;
+      });
+
+      // ── Accurate Net P&L per client for a given month (matches P&L page exactly) ──
+      // Net P&L = Realized (closed FIFO positions) − Expenses − Software Charges − Interest
+      // This Month Net P&L — sum across all visible clients (matches P&L page logic)
+      const dashboardOperationalClients = visibleClients.filter(c => (c.accountType || "trading") !== "investor");
+      const thisMonthPnl = dashboardOperationalClients.reduce((sum, c) => sum + clientNetPnlForMonth(c.id, currentMonthStr), 0);
+
+      // ── Win Rate (12 months) ─────────────────────────────────
+      const last12     = Object.entries(monthMap).sort((a, b) => a[0] > b[0] ? -1 : 1).slice(0, 12);
+      const profMonths = last12.filter(([, v]) => (v.sellVal - v.buyVal) > 0).length;
+      const winRate    = last12.length > 0 ? Math.round(profMonths / last12.length * 100) : 0;
+      const wrColor    = winRate >= 60 ? C.green : winRate >= 40 ? C.yellow : C.red;
+
+      // ── 6-month chart data ───────────────────────────────────
+      const months6 = [];
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        months6.push(d.toISOString().slice(0, 7));
+      }
+      const CHART_COLORS = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4"];
+
+      // ── CLIENT DASHBOARD ─────────────────────────────────────
+      if (auth?.role === "client") {
+        const myData   = clientPnlData.find(c => c.id === cid) || { realizedPnl: 0, mtmPnl: 0, openCount: 0 };
+        const investorOpen = currentClient?.accountType === "investor" ? investorOpenPos(cid) : null;
+        const myTrades = allTrades.filter(t => t.clientId === cid);
+        const investorMonthResult = currentClient?.accountType === "investor" ? investorPnlForMonth(cid, currentMonthStr) : null;
+        const myMonthPnl = displayedPnlForMonth(currentClient, currentMonthStr);
+
+        // Daily win rate this month
+        const dayMap2 = {};
+        myTrades.filter(t=>(t.date||"").slice(0,7)===currentMonthStr).forEach(t=>{
+          const d=t.date||""; if(!d) return;
+          if(!dayMap2[d]) dayMap2[d]={buyVal:0,sellVal:0};
+          const v=(t.price||0)*(t.qty||0);
+          if(t.side==="BUY") dayMap2[d].buyVal+=v; else dayMap2[d].sellVal+=v;
+        });
+        const tDays   = Object.values(dayMap2).filter(d=>d.buyVal>0||d.sellVal>0);
+        const pDays   = tDays.filter(d=>(d.sellVal-d.buyVal)>0).length;
+        const dayWR   = tDays.length>0 ? Math.round(pDays/tDays.length*100) : 0;
+        const myWrC   = winRate>=60?C.green:winRate>=40?C.yellow:C.red;
+
+        return (
+          <div style={{maxWidth:960,margin:"0 auto"}}>
+            {/* Greeting header */}
+            <div style={{marginBottom:24,padding:"24px 28px",
+              background:`linear-gradient(135deg, ${C.accent}18 0%, ${C.accent}05 100%)`,
+              borderRadius:16,border:`1px solid ${C.accent}20`,
+              display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+              <div>
+                <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:6}}>
+                  {greeting}
+                </div>
+                <div style={{fontSize:22,fontWeight:800,color:C.text,marginBottom:2}}>
+                  {currentClient?.name || "Client"}
+                </div>
+                <div style={{fontSize:12,color:C.muted}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:11,color:C.muted,marginBottom:4}}>This Month P&L</div>
+                <div style={{fontSize:28,fontWeight:800,color:myMonthPnl>=0?C.green:C.red}}>
+                  {myMonthPnl>=0?"+":""}₹{Math.abs(myMonthPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                </div>
+              </div>
+            </div>
+
+            <MonthlyTargetTracker
+              title="Monthly Target Tracker"
+              subtitle={`${currentMonthStr} · ${currentClient?.name || cid}`}
+              pnl={myMonthPnl}
+              target={monthlyTargetFor(cid)}
+              pnlAvailable={!investorMonthResult || investorMonthResult.complete}
+              onSetTarget={(currentClient?.accountType || "trading") !== "investor" && monthlyTargetFor(cid) <= 0 ? ()=>openTargetEditor(currentClient) : null}
+              C={C}
+              card={card}
+            />
+
+            {/* 3 stat cards */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:24}}>
+              {/* This Month Realized P&L (closed only) */}
+              {(() => {
+                const myClosedPnl = investorMonthResult
+                  ? investorMonthResult.pnl
+                  : closedPositionSlicesForMonth(clientClosedPos(currentClient?.id || auth?.clientId), currentMonthStr).reduce((a,c) => a + c.totalPnl, 0);
+                return (
+                  <div style={{...card,padding:"20px 22px"}}>
+                    <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>{investorMonthResult ? "Your Allocated P&L" : "This Month Realized"}</div>
+                    <div style={{fontSize:26,fontWeight:800,color:myClosedPnl>=0?C.green:C.red,lineHeight:1}}>
+                      {myClosedPnl>=0?"+":""}₹{Math.abs(myClosedPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                    </div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:6}}>{investorMonthResult ? "Combined across your portfolio" : "Closed positions only"}</div>
+                  </div>
+                );
+              })()}
+
+              {/* Current Month Net P&L */}
+              {(() => {
+                const cmPnl  = myMonthPnl;
+                const cmCol  = cmPnl >= 0 ? C.green : C.red;
+                return (
+                  <div style={{...card,padding:"20px 22px",borderTop:`3px solid ${cmCol}`,cursor:"pointer"}}
+                    onClick={()=>setPage("pnl")}>
+                    <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>
+                      This Month Net P&L
+                    </div>
+                    <div style={{fontSize:28,fontWeight:900,color:cmCol,lineHeight:1,marginBottom:4}}>
+                      {cmPnl>=0?"+":""}₹{Math.abs(cmPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                    </div>
+                    <div style={{fontSize:11,color:C.muted,marginTop:6}}>
+                      {investorMonthResult ? "Your proportional net result →" : "Closed + Open MTM − Expenses →"}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Open Positions */}
+              <div style={{...card,padding:"20px 22px",cursor:"pointer"}}
+                onClick={()=>setPage("trades")}
+                onMouseEnter={e=>{e.currentTarget.style.boxShadow="0 4px 20px rgba(0,0,0,0.1)";e.currentTarget.style.transform="translateY(-2px)";}}
+                onMouseLeave={e=>{e.currentTarget.style.boxShadow="";e.currentTarget.style.transform="";}}>
+                <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>Open Positions</div>
+                <div style={{fontSize:36,fontWeight:800,color:C.accent,lineHeight:1}}>{investorOpen ? investorOpen.length : myData.openCount}</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:6}}>Active contracts →</div>
+              </div>
+            </div>
+
+            {/* Quote */}
+            <div style={{padding:"20px 24px",background:`linear-gradient(135deg,#1e3a5f,#1e3a8a)`,
+              borderRadius:14,boxShadow:"0 4px 20px rgba(30,58,138,0.2)"}}>
+              <div style={{color:"#93c5fd",fontSize:10,fontWeight:700,letterSpacing:2,marginBottom:8,textTransform:"uppercase"}}>Market Insight</div>
+              <div style={{color:"#ffffff",fontSize:15,fontStyle:"italic",lineHeight:1.7,marginBottom:8}}>"{todayQuote.text}"</div>
+              <div style={{color:"#93c5fd",fontSize:12}}>— {todayQuote.author}</div>
+            </div>
+          </div>
+        );
+      }
+
+      // ── ADMIN / SUPERADMIN DASHBOARD ─────────────────────────
+      const adminName = auth?.role === "superadmin" ? "JIYA" : (state.admins||[]).find(a=>a.id===auth?.adminId)?.name || "Admin";
+      const operationalClients = visibleClients.filter(c => (c.accountType || "trading") !== "investor");
+      const pureInvestorClients = visibleClients.filter(c => c.accountType === "investor");
+      const operationalTarget = operationalClients.reduce((sum,c) => sum + monthlyTargetFor(c.id), 0);
+      const operationalPnl = operationalClients.reduce((sum,c) => sum + clientNetPnlForMonth(c.id, currentMonthStr), 0);
+      const investorTarget = pureInvestorClients.reduce((sum,c) => sum + monthlyTargetFor(c.id), 0);
+
+      return (
+        <div>
+          {/* Greeting bar */}
+          <div style={{marginBottom:24,display:"flex",justifyContent:"space-between",
+            alignItems:"center",flexWrap:"wrap",gap:12}}>
+            <div>
+              <div style={{fontSize:12,color:C.muted,marginBottom:4}}>
+                {greeting}, <span style={{color:C.accent,fontWeight:700}}>{adminName}</span>
+              </div>
+              <div style={{fontSize:22,fontWeight:800,color:C.text,letterSpacing:"-0.5px"}}>
+                Portfolio Overview
+              </div>
+              <div style={{fontSize:12,color:C.muted,marginTop:2}}>
+                {new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setPage("trades")}
+                style={{...btn(C.accent),fontSize:13,padding:"8px 16px"}}>
+                ⬆️ Upload Trades
+              </button>
+
+            </div>
+          </div>
+
+          <MonthlyTargetTracker
+            title="Firm Operational Target"
+            subtitle={`${currentMonthStr} · Trading + Hybrid accounts · ${operationalClients.length} accounts`}
+            pnl={operationalPnl}
+            target={operationalTarget}
+            pnlAvailable={true}
+            C={C}
+            card={card}
+          />
+
+          {pureInvestorClients.length > 0 && (
+            <MonthlyTargetTracker
+              title="Investor Account Targets"
+              subtitle={`${currentMonthStr} · ${pureInvestorClients.length} investor accounts · kept separate to prevent double-counting`}
+              pnl={0}
+              target={investorTarget}
+              pnlAvailable={false}
+              C={C}
+              card={card}
+            />
+          )}
+
+          {/* 4 KPI Cards */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:24}}>
+            {/* This Month P&L */}
+            <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${thisMonthPnl>=0?C.green:C.red}`,cursor:"pointer"}}
+              onClick={()=>setPage("pnl")}
+              onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 6px 24px rgba(0,0,0,0.1)";}}
+              onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="";}}>
+              <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>This Month P&L</div>
+              {(()=>{
+                const v = Math.abs(Math.round(thisMonthPnl));
+                return (
+                  <div className="kpi-num" style={{fontSize:24,fontWeight:800,color:thisMonthPnl>=0?C.green:C.red,lineHeight:1,marginBottom:6}}>
+                    {thisMonthPnl>=0?"+":"−"}₹{v.toLocaleString("en-IN")}
+                  </div>
+                );
+              })()}
+              <div style={{fontSize:11,color:C.muted}}>{currentMonthStr} · All clients</div>
+              {(() => {
+                const totalTrades = allTrades.length;
+                const thisMonthTrades = allTrades.filter(t=>(t.date||"").slice(0,7)===currentMonthStr).length;
+                if (totalTrades > 0 && thisMonthTrades === totalTrades && totalTrades > 50) {
+                  return <div style={{fontSize:10,color:C.yellow,marginTop:2}}>⚠️ All trades tagged as {currentMonthStr}</div>;
+                }
+                return null;
+              })()}
+            </div>
+
+            {/* Total Clients */}
+            <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${C.accent}`,cursor:"pointer"}}
+              onClick={()=>setPage("clients")}
+              onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 6px 24px rgba(0,0,0,0.1)";}}
+              onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="";}}>
+              <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>Active Clients</div>
+              <div className="kpi-num" style={{fontSize:36,fontWeight:800,color:C.accent,lineHeight:1,marginBottom:6}}>{visibleClients.length}</div>
+              <div style={{fontSize:11,color:C.muted}}>Tap to manage →</div>
+            </div>
+
+            {/* Current Month Net P&L — All Clients */}
+            {(() => {
+              const totalCmPnl = operationalClients.reduce((s,c) => s + clientNetPnlForMonth(c.id, currentMonthStr), 0);
+              const tcCol = totalCmPnl >= 0 ? C.green : C.red;
+              return (
+                <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${tcCol}`,cursor:"pointer"}}
+                  onClick={()=>setPage("pnl")}>
+                  <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>This Month Net P&L</div>
+                  <div style={{fontSize:36,fontWeight:800,color:tcCol,lineHeight:1,marginBottom:6}}>
+                    {totalCmPnl>=0?"+":""}₹{Math.abs(totalCmPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                  </div>
+                  <div style={{fontSize:11,color:C.muted}}>Trading + Hybrid only · Closed+MTM−Exp →</div>
+                </div>
+              );
+            })()}
+
+            {/* Open Positions */}
+            <div style={{...card,padding:"20px 22px",borderLeft:`4px solid ${C.yellow}`,cursor:"pointer"}}
+              onClick={()=>setPage("trades")}
+              onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 6px 24px rgba(0,0,0,0.1)";}}
+              onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="";}}>
+              <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,marginBottom:8}}>Open Positions</div>
+              <div className="kpi-num" style={{fontSize:36,fontWeight:800,color:C.yellow,lineHeight:1,marginBottom:6}}>
+                {clientPnlData.reduce((s,c)=>s+c.openCount,0)}
+              </div>
+              <div style={{fontSize:11,color:C.muted}}>Across all clients →</div>
+            </div>
+          </div>
+
+          {/* Two column layout */}
+          <div style={{display:"grid",gridTemplateColumns:"1.6fr 1fr",gap:16,marginBottom:16}}>
+
+            {/* 6-Month Line Chart */}
+            <div style={{...card,padding:0,overflow:"hidden"}}>
+              <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,
+                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontWeight:700,color:C.text,fontSize:15}}>6-Month P&L Trend</div>
+                  <div style={{color:C.muted,fontSize:12,marginTop:2}}>Net P&L per month per client</div>
+                </div>
+                <select value={chartClientFilter} onChange={e=>setChartClientFilter(e.target.value)}
+                  style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,
+                    padding:"5px 10px",color:C.text,fontSize:12,cursor:"pointer"}}>
+                  <option value="all">All Clients</option>
+                  {visibleClients.map(c=><option key={c.id} value={c.id}>{c.name||c.id}</option>)}
+                </select>
+              </div>
+              <div style={{padding:"16px 20px 12px"}}>
+                {(() => {
+                  const clientsToShow = chartClientFilter === "all"
+                    ? visibleClients.slice(0, 7)
+                    : visibleClients.filter(c => c.id === chartClientFilter);
+
+                  const clientLines = clientsToShow.map((cl, ci) => ({
+                    name: (cl.name||cl.id).split(" ")[0],
+                    color: CHART_COLORS[ci % CHART_COLORS.length],
+                    pts: months6.map(m => {
+                      const mT = allTrades.filter(t => t.clientId===cl.id && (t.date||"").slice(0,7)===m);
+                      let bv=0,sv=0;
+                      mT.forEach(t => { const v=(t.price||0)*(t.qty||0); if(t.side==="BUY") bv+=v; else sv+=v; });
+                      return sv - bv;
+                    })
+                  }));
+
+                  const allPts = clientLines.flatMap(c=>c.pts);
+                  const maxV   = Math.max(...allPts.map(Math.abs), 1);
+                  const H=140, W=560, pad=8;
+                  const xStep = (W-pad*2)/(months6.length-1);
+                  const toY   = v => (H/2) - (v/maxV)*(H/2-12);
+                  const monthLabels = months6.map(m => new Date(m+"-01").toLocaleString("default",{month:"short"}));
+
+                  return (
+                    <div>
+                      <svg width="100%" height={H+28} viewBox={`0 0 ${W} ${H+28}`} style={{display:"block"}}>
+                        {/* Zero line */}
+                        <line x1={pad} y1={H/2} x2={W-pad} y2={H/2} stroke={C.border} strokeWidth="1" strokeDasharray="4,3"/>
+                        {/* Grid */}
+                        {[0.4,0.8].map(r=>[
+                          <line key={"u"+r} x1={pad} y1={H/2-r*H/2} x2={W-pad} y2={H/2-r*H/2} stroke={C.border} strokeWidth="0.5" strokeOpacity="0.5"/>,
+                          <line key={"d"+r} x1={pad} y1={H/2+r*H/2} x2={W-pad} y2={H/2+r*H/2} stroke={C.border} strokeWidth="0.5" strokeOpacity="0.5"/>
+                        ])}
+                        {/* Lines */}
+                        {clientLines.map(cl=>{
+                          const pts = cl.pts.map((v,i)=>({x:pad+i*xStep, y:toY(v)}));
+                          const d   = pts.map((p,i)=>`${i===0?"M":"L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+                          return (
+                            <g key={cl.name}>
+                              <path d={d} fill="none" stroke={cl.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+                              {pts.map((p,i)=>(
+                                <g key={i}>
+                                  <circle cx={p.x} cy={p.y} r="4" fill={cl.color} stroke="#fff" strokeWidth="1.5"/>
+                                  <title>{cl.name}: ₹{cl.pts[i].toLocaleString("en-IN",{maximumFractionDigits:0})}</title>
+                                </g>
+                              ))}
+                            </g>
+                          );
+                        })}
+                        {/* Month labels */}
+                        {monthLabels.map((m,i)=>(
+                          <text key={m} x={pad+i*xStep} y={H+20} textAnchor="middle" fontSize="11" fill={C.muted}>{m}</text>
+                        ))}
+                      </svg>
+                      {/* Legend */}
+                      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:4}}>
+                        {clientLines.map(cl=>(
+                          <div key={cl.name} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.muted}}>
+                            <div style={{width:12,height:3,borderRadius:2,background:cl.color}}/>
+                            {cl.name}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* Client P&L Ranking */}
+            <div style={{...card,padding:0,overflow:"hidden"}}>
+              <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`}}>
+                <div style={{fontWeight:700,color:C.text,fontSize:15}}>Client P&L</div>
+                <div style={{color:C.muted,fontSize:12,marginTop:2}}>This month ranking — Net P&L</div>
+              </div>
+              <div style={{padding:"8px 0"}}>
+                {(() => {
+                  // Compute accurate Net P&L once per client (matches P&L page exactly)
+                  const ranked = clientPnlData
+                    .map(c => ({ ...c, netPnl: clientNetPnlForMonth(c.id, currentMonthStr) }))
+                    .sort((a,b) => b.netPnl - a.netPnl)
+                    .slice(0, 7);
+                  const maxAbsNet = Math.max(...ranked.map(c => Math.abs(c.netPnl)), 1);
+
+                  return ranked.map((c, i) => {
+                    const pct = (Math.abs(c.netPnl) / maxAbsNet) * 100;
+                    return (
+                      <div key={c.id} style={{padding:"10px 20px",display:"flex",alignItems:"center",gap:12,
+                        borderBottom:`1px solid ${C.border}22`}}>
+                        <div style={{width:20,height:20,borderRadius:"50%",background:C.accent+"20",
+                          color:C.accent,fontSize:11,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                          {i+1}
+                        </div>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontWeight:600,color:C.text,fontSize:13,marginBottom:3,
+                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                            {c.name?.split(" ")[0]||c.id}
+                          </div>
+                          <div style={{height:3,background:C.border,borderRadius:2,overflow:"hidden"}}>
+                            <div style={{height:"100%",width:pct+"%",background:c.netPnl>=0?C.green:C.red,borderRadius:2}}/>
+                          </div>
+                        </div>
+                        <div style={{fontWeight:700,fontSize:13,color:c.netPnl>=0?C.green:C.red,flexShrink:0}}>
+                          {c.netPnl>=0?"+":""}₹{Math.abs(c.netPnl).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+                {clientPnlData.length === 0 && (
+                  <div style={{padding:32,textAlign:"center",color:C.muted,fontSize:13}}>
+                    No trade data this month
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Quote banner */}
+          <div style={{padding:"20px 28px",background:"linear-gradient(135deg,#1e3a5f,#1e3a8a)",
+            borderRadius:14,boxShadow:"0 4px 20px rgba(30,58,138,0.2)",
+            display:"flex",alignItems:"center",gap:20,flexWrap:"wrap"}}>
+            <div style={{fontSize:36,color:"#ffffff20",fontFamily:"Georgia",lineHeight:1,flexShrink:0}}>"</div>
+            <div style={{flex:1}}>
+              <div style={{color:"#ffffff",fontSize:14,fontStyle:"italic",lineHeight:1.7,marginBottom:6}}>
+                {todayQuote.text}
+              </div>
+              <div style={{color:"#93c5fd",fontSize:12}}>— {todayQuote.author}</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (page === "clients" && (auth.role === "admin" || auth.role === "superadmin")) return (
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+          <h2 style={{ color: C.text, margin: 0 }}>Client Management</h2>
+          <button style={btn(C.green)} onClick={() => setModal("addClient")}><Icon name="add" size={16} /> Add Client</button>
+        </div>
+        <div style={{ ...card }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead><tr>{["Client ID", "Name", "Type", "Fund / Capital", "Monthly Target", "Email", "Phone", "Password", "Open Pos", "Action"].map((h) => <th key={h} style={{ textAlign: "left", padding: "10px 12px", color: C.muted, borderBottom: `1px solid ${C.border}` }}>{h}</th>)}</tr></thead>
+            <tbody>
+              {state.clients.map((c) => (
+                <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <td style={{ padding: "12px", color: C.accent, fontWeight: 600 }}>{c.id}</td>
+                  <td style={{ padding: "12px", color: C.text }}>{c.name}</td>
+                  <td style={{ padding:"12px" }}><span style={badge(c.accountType === "investor" ? C.purple : c.accountType === "hybrid" ? C.yellow : C.blue)}>{accountTypeLabel(c.accountType)}</span></td>
+                  <td style={{ padding:"12px", color:C.text }}>
+                    <button onClick={()=>startEditClient(c)} title="Click to add or change fund"
+                      style={{background:C.accent+"0b",border:`1px dashed ${C.accent}66`,borderRadius:7,padding:"7px 9px",color:C.text,cursor:"pointer",textAlign:"left",minWidth:150}}>
+                      {["investor","hybrid"].includes(c.accountType) && <div>Deposit: {formatINR(Number(c.depositAmount)||0)}</div>}
+                      {(c.accountType === "trading" || c.accountType === "hybrid" || !c.accountType) && <div>Strategy: {formatINR(Number(c.monthlyStrategyCapital)||0)}</div>}
+                      <div style={{fontSize:10,color:C.accent,marginTop:3}}>✏️ Click to edit fund</div>
+                    </button>
+                  </td>
+                  <td style={{padding:"12px"}}>
+                    <button onClick={()=>openTargetEditor(c)} style={{background:C.green+"0c",border:`1px dashed ${C.green}66`,borderRadius:7,padding:"7px 9px",color:monthlyTargetFor(c.id)>0?C.green:C.muted,cursor:"pointer",fontWeight:700,whiteSpace:"nowrap"}}>
+                      {monthlyTargetFor(c.id)>0?formatINR(monthlyTargetFor(c.id)):"+ Set Target"}
+                    </button>
+                  </td>
+                  <td style={{ padding: "12px", color: C.muted }}>{c.email}</td>
+                  <td style={{ padding: "12px", color: C.muted }}>{c.phone}</td>
+                  <td style={{ padding: "12px", color: C.muted, fontFamily: "monospace" }}>{c.password}</td>
+                  <td style={{ padding: "12px" }}><span style={badge(C.purple)}>{clientOpenPos(c.id).length}</span></td>
+                  <td style={{ padding: "12px" }}>
+                    <button style={{ ...btn(C.accent), padding:"5px 10px",marginRight:6 }} onClick={()=>startEditClient(c)} title="Edit every account detail">✏️ Edit</button>
+                    <button style={{ ...btn(C.red), padding: "5px 10px" }} onClick={() => { if(!window.confirm("Delete client " + c.name + "? This cannot be undone.")) return; withSync(() => sb.delete("clients", c.id)); setState((s) => ({ ...s, clients: s.clients.filter((x) => x.id !== c.id) })); }}><Icon name="delete" size={14} /></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+
+    if (page === "investors" && (auth.role === "admin" || auth.role === "superadmin")) {
+      const investors = state.clients.filter(c => ["investor","hybrid"].includes(c.accountType));
+      const strategies = state.clients.filter(c => c.accountType === "trading" || c.accountType === "hybrid" || !c.accountType);
+      const selectedStrategy = strategies.find(c => c.id === newAllocation.strategyClientId);
+      const selectedInvestor = investors.find(c => c.id === newAllocation.investorClientId);
+      const ownershipPreview = calculateOwnershipPct(newAllocation.allocatedAmount, selectedStrategy?.monthlyStrategyCapital);
+      const investorUsed = activeAllocationRows.filter(a => a.investorClientId === selectedInvestor?.id).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+      const strategyUsed = activeAllocationRows.filter(a => a.strategyClientId === selectedStrategy?.id).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+      const availableStrategies = strategies.filter(c => !activeAllocationRows.some(a=>a.investorClientId===selectedInvestor?.id && a.strategyClientId===c.id));
+      return (
+        <div>
+          <div style={{marginBottom:24}}>
+            <h2 style={{color:C.text,margin:"0 0 6px"}}>Investor Control</h2>
+            <div style={{color:C.muted,fontSize:13}}>Admin-only allocation records. Investor logins never see strategy codes, allocation percentages or diversification details.</div>
+          </div>
+          <div style={{...card,marginBottom:18}}>
+            <h3 style={{color:C.text,margin:"0 0 14px"}}>Investor Fund Allocation</h3>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
+              {investors.map(investor=>{
+                const rows = activeAllocationRows.filter(a=>a.investorClientId===investor.id);
+                const allocated = rows.reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
+                const deposit = Number(investor.depositAmount)||0;
+                const remaining = Math.max(0,deposit-allocated);
+                return <div key={investor.id} style={{background:C.bg,border:`1px solid ${selectedInvestor?.id===investor.id?C.accent:C.border}`,borderRadius:10,padding:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"start"}}>
+                    <div><div style={{color:C.text,fontWeight:700}}>{investor.name}</div><div style={{color:C.muted,fontSize:11}}>{investor.id} · {rows.length} strateg{rows.length===1?"y":"ies"}</div></div>
+                    <span style={badge(remaining>0?C.green:C.muted)}>{remaining>0?"Fund Available":"Fully Allocated"}</span>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,margin:"13px 0",fontSize:11}}>
+                    <div><span style={{color:C.muted}}>Total Fund</span><div style={{color:C.text,fontWeight:700,marginTop:3}}>{formatINR(deposit)}</div></div>
+                    <div><span style={{color:C.muted}}>Allocated</span><div style={{color:C.yellow,fontWeight:700,marginTop:3}}>{formatINR(allocated)}</div></div>
+                    <div><span style={{color:C.muted}}>Remaining</span><div style={{color:remaining>0?C.green:C.muted,fontWeight:700,marginTop:3}}>{formatINR(remaining)}</div></div>
+                  </div>
+                  <button disabled={remaining<=0} onClick={()=>beginAdditionalStrategy(investor.id)}
+                    style={{...btn(remaining>0?C.accent:C.muted),width:"100%",justifyContent:"center",opacity:remaining>0?1:0.55}}>
+                    <Icon name="add" size={14}/> Add More Strategy
+                  </button>
+                </div>;
+              })}
+              {!investors.length && <div style={{color:C.muted,fontSize:13}}>Create an Investor or Hybrid account first.</div>}
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"minmax(320px, 0.9fr) minmax(520px, 1.6fr)",gap:18,alignItems:"start"}}>
+            <div id="investor-allocation-form" style={card}>
+              <h3 style={{color:C.text,marginTop:0}}>{investorUsed>0?"Add More Strategy":"Create Allocation"}</h3>
+              <label style={{color:C.muted,fontSize:12}}>Investor / Hybrid Account *</label>
+              <select value={newAllocation.investorClientId} onChange={e=>setNewAllocation(s=>({...s,investorClientId:e.target.value,strategyClientId:"",allocatedAmount:""}))} style={{...input,margin:"5px 0 14px"}}>
+                <option value="">Select investor...</option>{investors.map(c=><option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
+              </select>
+              <label style={{color:C.muted,fontSize:12}}>Trading Strategy *</label>
+              <select value={newAllocation.strategyClientId} onChange={e=>setNewAllocation(s=>({...s,strategyClientId:e.target.value}))} style={{...input,margin:"5px 0 14px"}}>
+                <option value="">Select another strategy...</option>{availableStrategies.map(c=><option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
+              </select>
+              <label style={{color:C.muted,fontSize:12}}>Allocation Amount (₹) *</label>
+              <input type="number" min="0" value={newAllocation.allocatedAmount} onChange={e=>setNewAllocation(s=>({...s,allocatedAmount:e.target.value}))} style={{...input,margin:"5px 0 14px"}} />
+              <label style={{color:C.muted,fontSize:12}}>Effective Date & Time *</label>
+              <input type="datetime-local" value={newAllocation.effectiveFrom} onChange={e=>setNewAllocation(s=>({...s,effectiveFrom:e.target.value}))} style={{...input,margin:"5px 0 14px"}} />
+              <label style={{color:C.muted,fontSize:12}}>Mandatory Narration *</label>
+              <textarea value={newAllocation.reason} onChange={e=>setNewAllocation(s=>({...s,reason:e.target.value}))} style={{...input,margin:"5px 0 14px",minHeight:72,resize:"vertical"}} />
+              <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14,fontSize:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",color:C.muted}}><span>Calculated ownership</span><b style={{color:C.accent}}>{ownershipPreview.toFixed(4)}%</b></div>
+                <div style={{display:"flex",justifyContent:"space-between",color:C.muted,marginTop:7}}><span>Investor available</span><span>{formatINR(Math.max(0,Number(selectedInvestor?.depositAmount||0)-investorUsed))}</span></div>
+                <div style={{display:"flex",justifyContent:"space-between",color:C.muted,marginTop:7}}><span>Strategy capacity</span><span>{formatINR(Math.max(0,Number(selectedStrategy?.monthlyStrategyCapital||0)-strategyUsed))}</span></div>
+              </div>
+              <button style={btn(C.green)} onClick={addInvestorAllocation}><Icon name="check" size={14}/> {investorUsed>0?"Allocate Remaining Fund":"Create Allocation"}</button>
+              <div style={{color:C.yellow,fontSize:11,marginTop:12}}>Existing open positions require an Angel One LTP snapshot at the effective timestamp before P&L sharing can activate.</div>
+            </div>
+            <div style={card}>
+              <h3 style={{color:C.text,marginTop:0}}>Allocation History</h3>
+              <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead><tr>{["Investor","Strategy","Amount","Ownership","Effective From","Until","LTP Snapshot","Narration"].map(h=><th key={h} style={{textAlign:"left",padding:"9px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+                <tbody>{(state.investorAllocations||[]).map(a=><tr key={a.id} style={{borderBottom:`1px solid ${C.border}`}}>
+                  <td style={{padding:9,color:C.text}}>{a.investorClientId}</td><td style={{padding:9,color:C.text}}>{a.strategyClientId}</td>
+                  <td style={{padding:9,color:C.text}}>{formatINR(Number(a.allocatedAmount)||0)}</td><td style={{padding:9,color:C.accent}}>{Number(a.ownershipPct||0).toFixed(4)}%</td>
+                  <td style={{padding:9,color:C.muted}}>{new Date(a.effectiveFrom).toLocaleString("en-IN")}</td><td style={{padding:9,color:C.muted}}>{a.effectiveTo?new Date(a.effectiveTo).toLocaleString("en-IN"):"Active"}</td>
+                  <td style={{padding:9}}><span style={badge(a.ltpSnapshotStatus==="captured"?C.green:C.yellow)}>{a.ltpSnapshotStatus||"pending"}</span></td><td style={{padding:9,color:C.muted}}>{a.reason}</td>
+                </tr>)}</tbody>
+              </table></div>
+              {!state.investorAllocations?.length && <div style={{padding:32,textAlign:"center",color:C.muted}}>No investor allocations created yet.</div>}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (page === "month_end" && (auth.role === "admin" || auth.role === "superadmin")) return (
+      <div>
+        <div style={{marginBottom:22}}>
+          <h2 style={{color:C.text,margin:"0 0 6px"}}>Month-End Carry Forward</h2>
+          <div style={{color:C.muted,fontSize:13}}>Square off every FIFO open position at the uploaded official closing rate, then reopen the identical side and quantity on the first day of the next month.</div>
+        </div>
+
+        <div style={{...card,marginBottom:18}}>
+          <div style={{display:"flex",gap:14,alignItems:"end",flexWrap:"wrap"}}>
+            <div style={{minWidth:220}}>
+              <label style={{display:"block",color:C.muted,fontSize:12,marginBottom:5}}>Closing Month</label>
+              <input type="month" value={carryMonth} onChange={e=>{setCarryMonth(e.target.value);setCarryPreview(null);}} style={input}/>
+            </div>
+            <button style={btn(C.accent)} onClick={prepareCarryForward}>Generate Safety Preview</button>
+          </div>
+          <div style={{marginTop:12,color:C.yellow,fontSize:12}}>Accepted month-end sources: client-specific manual close, closing file uploaded in Trades & Positions, then Bhavcopy close. Live streaming Angel LTP is never used.</div>
+        </div>
+
+        {carryPreview && <div style={{...card,marginBottom:18,borderColor:carryPreview.canExecute?C.green:C.red}}>
+          <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"start",marginBottom:16}}>
+            <div>
+              <h3 style={{color:C.text,margin:"0 0 5px"}}>Batch {carryPreview.batchId}</h3>
+              <div style={{color:C.muted,fontSize:12}}>Close: <b style={{color:C.text}}>{carryPreview.monthEndDate}</b> · Reopen: <b style={{color:C.text}}>{carryPreview.reopenDate}</b></div>
+            </div>
+            <span style={badge(carryPreview.canExecute?C.green:C.red)}>{carryPreview.canExecute?"READY":"BLOCKED"}</span>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(130px,1fr))",gap:10,marginBottom:16}}>
+            {[['Open positions',carryPreview.positionCount,C.blue],['Synthetic trades',carryPreview.trades.length,C.purple],['Missing prices',carryPreview.missingPrices.length,carryPreview.missingPrices.length?C.red:C.green],['Duplicate month',carryPreview.duplicate?'YES':'NO',carryPreview.duplicate?C.red:C.green]].map(([label,value,color])=><div key={label} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:12}}><div style={{color:C.muted,fontSize:11}}>{label}</div><div style={{color,fontSize:20,fontWeight:800,marginTop:4}}>{value}</div></div>)}
+          </div>
+          {carryPreview.missingPrices.length>0 && <div style={{background:C.red+"10",border:`1px solid ${C.red}33`,borderRadius:8,padding:12,marginBottom:14}}>
+            <div style={{color:C.red,fontWeight:700,fontSize:12,marginBottom:6}}>Execution blocked—missing closing rates</div>
+            {carryPreview.missingPrices.map((m,i)=><div key={i} style={{color:C.muted,fontSize:11}}>{m.clientId} · {m.contract}</div>)}
+          </div>}
+          <div style={{overflowX:"auto",maxHeight:430}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead><tr>{["Client","Contract","Current Side","Qty","Old Avg","Closing / New Avg","Price Source","Close Trade","Reopen Trade"].map(h=><th key={h} style={{position:"sticky",top:0,background:C.card,textAlign:"left",padding:9,color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+            <tbody>{carryPreview.entries.map(e=><tr key={e.closeTradeId} style={{borderBottom:`1px solid ${C.border}`}}>
+              <td style={{padding:9,color:C.accent}}>{e.clientId}</td><td style={{padding:9,color:C.text}}>{e.contract}</td><td style={{padding:9,color:e.side==='BUY'?C.green:C.red}}>{e.side}</td>
+              <td style={{padding:9,color:C.text}}>{e.qty}</td><td style={{padding:9,color:C.muted}}>{e.previousAvgPrice}</td><td style={{padding:9,color:C.green,fontWeight:700}}>{e.closingPrice}</td><td style={{padding:9,color:C.muted}}>{e.closingPriceSource}</td>
+              <td style={{padding:9,color:C.muted,fontFamily:"monospace",fontSize:10}}>{e.closeTradeId}</td><td style={{padding:9,color:C.muted,fontFamily:"monospace",fontSize:10}}>{e.reopenTradeId}</td>
+            </tr>)}</tbody>
+          </table></div>
+          <div style={{display:"flex",justifyContent:"flex-end",marginTop:16}}><button disabled={!carryPreview.canExecute||carryExecuting} style={{...btn(carryPreview.canExecute?C.green:C.muted),opacity:(!carryPreview.canExecute||carryExecuting)?0.55:1}} onClick={executeCarryForward}>{carryExecuting?"Processing…":`Confirm & Carry ${carryPreview.entries.length} Positions`}</button></div>
+        </div>}
+
+        <div style={card}>
+          <h3 style={{color:C.text,marginTop:0}}>Carry-Forward Audit History</h3>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr>{["Batch","Month","Closed","Reopened","Positions","Trades","Status","Admin","Completed"].map(h=><th key={h} style={{textAlign:"left",padding:9,color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+            <tbody>{(state.carryForwardBatches||[]).map(b=><tr key={b.id} style={{borderBottom:`1px solid ${C.border}`}}><td style={{padding:9,color:C.accent}}>{b.id}</td><td style={{padding:9,color:C.text}}>{b.month}</td><td style={{padding:9,color:C.muted}}>{b.monthEndDate}</td><td style={{padding:9,color:C.muted}}>{b.reopenDate}</td><td style={{padding:9,color:C.text}}>{b.positionCount}</td><td style={{padding:9,color:C.text}}>{b.tradeCount}</td><td style={{padding:9}}><span style={badge(b.status==='completed'?C.green:b.status==='failed'?C.red:C.yellow)}>{b.status}</span></td><td style={{padding:9,color:C.muted}}>{b.createdBy}</td><td style={{padding:9,color:C.muted}}>{b.completedAt?new Date(b.completedAt).toLocaleString('en-IN'):'—'}</td></tr>)}</tbody>
+          </table>
+          {!state.carryForwardBatches?.length&&<div style={{textAlign:"center",padding:28,color:C.muted}}>No month-end batch has been executed yet.</div>}
+        </div>
+      </div>
+    );
+
+    if (page === "settlements" && (auth.role === "admin" || auth.role === "superadmin")) {
+      // Settlement Manager — view, edit, delete, add settlement trades
+      const settlements = state.trades.filter(t => (t.id||"").startsWith("SETTLE_"));
+
+      const [editingSettle,    setEditingSettle]    = [null, ()=>{}]; // handled via local state below
+      const [newSettleForm,    setNewSettleForm]    = [null, ()=>{}];
+
+      return (
+        <SettlementManager
+          settlements={settlements}
+          state={state}
+          notify={notify}
+          loadAllData={loadAllData}
+          C={C} card={card} btn={btn} input={input}
+          SUPABASE_URL={SUPABASE_URL}
+          SUPABASE_ANON_KEY={SUPABASE_ANON_KEY}
+          visibleClients={visibleClients}
+        />
+      );
+    }
+
+    if (page === "livemtm") {
+      // ── COMING SOON BANNER ──────────────────────────────────
+      return (
+        <div style={{ minHeight:"80vh", display:"flex", alignItems:"center", justifyContent:"center",
+          padding:"40px 20px", position:"relative", overflow:"hidden" }}>
+
+          {/* Blurred background — same live MTM boxes style */}
+          <div style={{ position:"absolute", inset:0, zIndex:0,
+            background:`linear-gradient(135deg, ${C.accent}08 0%, ${C.purple}08 50%, ${C.green}08 100%)` }}>
+            {/* Ghost boxes in background */}
+            {[0,1,2].map(i => (
+              <div key={i} style={{
+                position:"absolute",
+                top: i===0?"10%":i===1?"30%":"55%",
+                left: i===0?"5%":i===1?"35%":"65%",
+                width:240, height:110, borderRadius:16,
+                background: i===0?C.accent+"08":i===1?C.purple+"08":C.green+"08",
+                border:`1px solid ${i===0?C.accent:i===1?C.purple:C.green}18`,
+                filter:"blur(2px)",
+              }}/>
+            ))}
+          </div>
+
+          {/* Main banner */}
+          <div style={{
+            position:"relative", zIndex:1, textAlign:"center",
+            background:`linear-gradient(135deg, ${C.card}ee, ${C.card}cc)`,
+            border:`1px solid ${C.border}`,
+            borderRadius:24, padding:"56px 64px", maxWidth:520,
+            boxShadow:`0 32px 80px rgba(0,0,0,0.4), 0 0 0 1px ${C.border}`,
+            backdropFilter:"blur(20px)",
+          }}>
+
+            {/* Animated icon */}
+            <div style={{
+              width:80, height:80, borderRadius:"50%",
+              background:`linear-gradient(135deg, ${C.accent}, ${C.purple})`,
+              display:"flex", alignItems:"center", justifyContent:"center",
+              fontSize:36, margin:"0 auto 24px",
+              boxShadow:`0 8px 32px ${C.accent}44`,
+              animation:"pulse 2s ease-in-out infinite",
+            }}>📡</div>
+
+            <div style={{ fontSize:32, fontWeight:900, color:C.text,
+              letterSpacing:"-0.5px", marginBottom:8 }}>
+              Live MTM
+            </div>
+
+            <div style={{
+              display:"inline-block",
+              background:`linear-gradient(135deg, ${C.accent}, ${C.purple})`,
+              color:"#fff", fontSize:11, fontWeight:800,
+              letterSpacing:3, textTransform:"uppercase",
+              padding:"6px 18px", borderRadius:20, marginBottom:24,
+            }}>
+              Coming Soon
+            </div>
+
+            <div style={{ color:C.muted, fontSize:15, lineHeight:1.8, marginBottom:32 }}>
+              Live intraday P&L tracking is under development.<br/>
+              Box A · Box B · Box C — real-time calculations<br/>
+              will be available here very soon.
+            </div>
+
+            <div style={{ display:"flex", gap:8, justifyContent:"center", flexWrap:"wrap" }}>
+              {["Real-time MTM","Intraday P&L","Auto Capture","Live LTP"].map(tag => (
+                <span key={tag} style={{
+                  background:C.bg, border:`1px solid ${C.border}`,
+                  borderRadius:20, padding:"5px 14px",
+                  fontSize:12, color:C.muted, fontWeight:500,
+                }}>✦ {tag}</span>
+              ))}
+            </div>
+
+            <div style={{ marginTop:32, paddingTop:24, borderTop:`1px solid ${C.border}`,
+              fontSize:12, color:C.muted }}>
+              For queries contact <span style={{color:C.accent,fontWeight:600}}>JIYA Back Office</span>
+            </div>
+          </div>
+
+          <style>{`
+            @keyframes pulse {
+              0%, 100% { box-shadow: 0 8px 32px ${C.accent}44; transform: scale(1); }
+              50% { box-shadow: 0 8px 48px ${C.accent}88; transform: scale(1.05); }
+            }
+          `}</style>
+        </div>
+      );
+      // eslint-disable-next-line no-unreachable
+
+      const showC = auth.role === "client"
+        ? state.clients.filter(c => c.id === auth.clientId)
+        : visibleClients;
+
+      // Calculate Net P&L per client from P&L page (same formula)
+      const getNetPnlForClient = (cid) => {
+        const clientTrades2 = state.trades.filter(t => t.clientId === cid);
+        const { openPositions: op, closedPositions: cp } = applyFIFO(clientTrades2);
+        const closedPnl = cp.reduce((a,c) => a + c.totalPnl, 0);
+        const openMTM2  = op.reduce((s,pos) => {
+          const manualKey = `${pos.clientId}||${pos.contract}`;
+          const ltp2 = manualLTP[manualKey] !== undefined
+            ? manualLTP[manualKey]
+            : getBhavClose(pos.contract);
+          if (ltp2 === null || ltp2 === undefined) return s;
+          return s + (pos.side==="SELL" ? (pos.avgPrice-ltp2) : (ltp2-pos.avgPrice)) * pos.netQty;
+        }, 0);
+        const allMonths2 = [...new Set(clientTrades2.map(t=>(t.date||"").slice(0,7)).filter(Boolean))];
+        const exp2 = allMonths2.reduce((a,m)=>a+getMonthlyCharges(cid,m),0);
+        const sw2  = allMonths2.reduce((a,m)=>a+getMonthlyInterest(cid,m+"_SW"),0);
+        const int2 = allMonths2.reduce((a,m)=>a+getMonthlyInterest(cid,m),0);
+        // Net P&L = closed FIFO + open MTM - expenses (for Live MTM Box A)
+        return closedPnl + openMTM2 - exp2 - sw2 - int2;
+      };
+
+      return (
+        <div style={{padding:"24px 28px",maxWidth:1100,margin:"0 auto"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <div style={{fontSize:22,fontWeight:800,color:C.text}}>📡 Live MTM</div>
+            <button
+              onClick={() => {
+                // Copy Net P&L from P&L page into Box A for each client
+                const snapshot = {};
+                showC.forEach(client => {
+                  snapshot[client.id] = getNetPnlForClient(client.id);
+                });
+                setClosingData(snapshot); try{localStorage.setItem("jiya_closing_data",JSON.stringify(snapshot));}catch(e){}
+                notify("✅ Box A updated from P&L page");
+              }}
+              style={{...btn(C.accent),fontSize:13,padding:"10px 20px",fontWeight:700}}>
+              📥 Get Closing Data
+            </button>
+          </div>
+          <div style={{color:C.muted,fontSize:13,marginBottom:24}}>
+            Box A = Net P&L copied from P&L page · Box B & C = coming soon
+          </div>
+
+          {showC.map(client => {
+            const cid   = client.id;
+            const boxA  = closingData[cid] !== undefined ? closingData[cid] : null;
+
+            return (
+              <div key={cid} style={{...card,marginBottom:20,padding:20}}>
+                <div style={{fontWeight:700,color:C.accent,marginBottom:16,fontSize:15}}>
+                  {client.name} <span style={{color:C.muted,fontWeight:400,fontSize:13}}>({cid})</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+                  {/* BOX A */}
+                  <div style={{background:C.bg,borderRadius:12,padding:"20px",
+                    border:`2px solid ${boxA!==null?(boxA>=0?C.green:C.red):C.border}`}}>
+                    <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                      Box A — P&L Till Yesterday
+                    </div>
+                    {boxA !== null ? (
+                      <>
+                        <div style={{fontSize:28,fontWeight:800,color:boxA>=0?C.green:C.red,marginBottom:4}}>
+                          {boxA>=0?"+":""}₹{Math.abs(boxA).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                        </div>
+                        <div style={{fontSize:11,color:C.muted}}>Copied from Net P&L</div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{fontSize:22,color:C.muted,marginBottom:4}}>—</div>
+                        <div style={{fontSize:11,color:C.muted}}>Click "Get Closing Data" to set</div>
+                      </>
+                    )}
+                  </div>
+                  {/* BOX B */}
+                  <div style={{background:C.bg,borderRadius:12,padding:"20px",border:`1px solid ${C.border}`}}>
+                    <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                      Box B — Today's Live P&L
+                    </div>
+                    <div style={{fontSize:22,color:C.muted,marginBottom:4}}>—</div>
+                    <div style={{fontSize:11,color:C.muted}}>Coming soon</div>
+                  </div>
+                  {/* BOX C */}
+                  <div style={{background:C.bg,borderRadius:12,padding:"20px",border:`1px solid ${C.border}`}}>
+                    <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                      Box C — Total (A + B)
+                    </div>
+                    <div style={{fontSize:22,color:C.muted,marginBottom:4}}>—</div>
+                    <div style={{fontSize:11,color:C.muted}}>Coming soon</div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    if (page === "ledger") {
+      const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
+
+      // Which clients to show
+      const allClients = isAdmin ? state.clients : [currentClient];
+      const filteredClients = isAdmin && ledgerClientFilter !== "all"
+        ? allClients.filter(c => c.id === ledgerClientFilter)
+        : allClients;
+
+      // Running balance with ledgerType aware filtering
+      const ledgerRows = (cid, tab) => {
+        let bal = 0;
+        return state.ledger
+          .filter(l => l.clientId === cid)
+          .filter(l => tab === "dp" ? l.ledgerType === "dp" : true) // dp tab: only dp entries; all tab: all entries
+          .sort((a,b) => a.date.localeCompare(b.date) || (a.id > b.id ? 1 : -1))
+          .map(l => { bal += (l.credit||0) - (l.debit||0); return { ...l, balance: bal }; });
+      };
+
+      return (
+        <div>
+          {/* Header */}
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20, flexWrap:"wrap", gap:12 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+              <h2 style={{ color:C.text, margin:0 }}>Ledger</h2>
+              {/* Search box */}
+              <input value={ledgerSearch} onChange={e=>setLedgerSearch(e.target.value)}
+                placeholder="🔍 Search..."
+                style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",
+                  color:C.text,fontSize:13,outline:"none",width:200}}/>
+              {/* Client filter dropdown - admin only */}
+              {isAdmin && (
+                <select value={ledgerClientFilter} onChange={e => setLedgerClientFilter(e.target.value)}
+                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
+                  <option value="all">All Clients</option>
+                  {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
+                </select>
+              )}
+              {/* DP / ALL tab toggle */}
+              <div style={{ display:"flex", background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, overflow:"hidden" }}>
+                {["all","dp"].map(tab => (
+                  <button key={tab} onClick={() => setLedgerTabFilter(tab)}
+                    style={{ padding:"7px 18px", border:"none", cursor:"pointer", fontSize:13, fontWeight:600,
+                      background: ledgerTabFilter===tab ? C.accent : "transparent",
+                      color: ledgerTabFilter===tab ? "#fff" : C.muted }}>
+                    {tab === "all" ? "All Entry" : "DP Entry"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {isAdmin && (
+              <button style={btn(C.green)} onClick={() => setModal("addLedger")}>
+                <Icon name="add" size={16}/> Add Entry
+              </button>
+            )}
+          </div>
+
+          {/* DP Entry explanation */}
+          {ledgerTabFilter === "dp" && (
+            <div style={{ background:C.yellow+"11", border:`1px solid ${C.yellow}33`, borderRadius:8, padding:"10px 16px", marginBottom:16, fontSize:12, color:C.yellow }}>
+              📌 <b>DP Entry view</b> — showing only DP-tagged entries. These entries are also visible in All Entry. Entries added directly to All Entry are not shown here.
+            </div>
+          )}
+
+          {/* Per-client ledger tables */}
+          {filteredClients.map(client => {
+            const allRows = ledgerRows(client.id, ledgerTabFilter);
+            const rows = ledgerSearch ? allRows.filter(r =>
+              (r.narration||"").toLowerCase().includes(ledgerSearch.toLowerCase()) ||
+              String(r.amount||"").includes(ledgerSearch) ||
+              (r.ledgerType||"").toLowerCase().includes(ledgerSearch.toLowerCase())
+            ) : allRows;
+            const lastBal = rows.slice(-1)[0]?.balance || 0;
+            const totalCredit = rows.reduce((a,l) => a+(l.credit||0), 0);
+            const totalDebit  = rows.reduce((a,l) => a+(l.debit||0), 0);
+
+            return (
+              <div key={client.id} style={{ ...card, marginBottom:20 }}>
+                {/* Client header */}
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16, flexWrap:"wrap", gap:10 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    <span style={{ color:C.accent, fontWeight:700, fontSize:15 }}>{client.name}</span>
+                    <span style={{ color:C.muted, fontSize:12 }}>({client.id})</span>
+                    <span style={{ ...badge(ledgerTabFilter==="dp" ? C.yellow : C.accent), fontSize:11 }}>
+                      {ledgerTabFilter==="dp" ? "DP Entry" : "All Entry"}
+                    </span>
+                  </div>
+                  <div style={{ display:"flex", gap:20, flexWrap:"wrap" }}>
+                    <div style={{ textAlign:"right" }}>
+                      <div style={{ color:C.muted, fontSize:10, textTransform:"uppercase" }}>Total Credit</div>
+                      <div style={{ color:C.green, fontWeight:700 }}>₹{totalCredit.toLocaleString()}</div>
+                    </div>
+                    <div style={{ textAlign:"right" }}>
+                      <div style={{ color:C.muted, fontSize:10, textTransform:"uppercase" }}>Total Debit</div>
+                      <div style={{ color:C.red, fontWeight:700 }}>₹{totalDebit.toLocaleString()}</div>
+                    </div>
+                    <div style={{ textAlign:"right" }}>
+                      <div style={{ color:C.muted, fontSize:10, textTransform:"uppercase" }}>Net Balance</div>
+                      <div style={{ color:lastBal>=0?C.green:C.red, fontWeight:700, fontSize:16 }}>₹{lastBal.toLocaleString()}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {rows.length === 0 ? (
+                  <div style={{ color:C.muted, fontSize:13, textAlign:"center", padding:"20px 0" }}>No entries found.</div>
+                ) : (
+                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+                    <thead>
+                      <tr>
+                        {["Date","Type","Description","Credit","Debit","Balance","Added By", isAdmin?"Actions":""].filter(Boolean).map(h => (
+                          <th key={h} style={{ textAlign:"left", padding:"8px 12px", color:C.muted, borderBottom:`1px solid ${C.border}`, fontSize:12 }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map(l => (
+                        <tr key={l.id} style={{ borderBottom:`1px solid ${C.border}22` }}>
+                          <td style={{ padding:"10px 12px", color:C.muted, whiteSpace:"nowrap" }}>{l.date}</td>
+                          <td style={{ padding:"10px 12px" }}>
+                            <span style={badge(l.ledgerType==="dp" ? C.yellow : C.accent)}>
+                              {l.ledgerType==="dp" ? "DP" : "ALL"}
+                            </span>
+                          </td>
+                          <td style={{ padding:"10px 12px", color:C.text }}>{l.description}</td>
+                          <td style={{ padding:"10px 12px", color:C.green, fontWeight: l.credit>0?600:400 }}>
+                            {l.credit > 0 ? "₹"+l.credit.toLocaleString() : "—"}
+                          </td>
+                          <td style={{ padding:"10px 12px", color:C.red, fontWeight: l.debit>0?600:400 }}>
+                            {l.debit > 0 ? "₹"+l.debit.toLocaleString() : "—"}
+                          </td>
+                          <td style={{ padding:"10px 12px", color:l.balance>=0?C.text:C.red, fontWeight:600 }}>
+                            ₹{l.balance.toLocaleString()}
+                          </td>
+                          {isAdmin && (
+                            <td style={{ padding:"10px 12px" }}>
+                              <div style={{ display:"flex", gap:6 }}>
+                                <button style={{ ...btn(C.accent), padding:"4px 10px", fontSize:12 }}
+                                  onClick={() => { setEditLedgerEntry({...l}); setModal("editLedger"); }}>
+                                  ✏️
+                                </button>
+                                <button style={{ ...btn(C.red), padding:"4px 10px", fontSize:12 }}
+                                  onClick={() => deleteLedgerEntry(l.id)}>
+                                  <Icon name="delete" size={13}/>
+                                </button>
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                    {/* Totals row */}
+                    <tfoot>
+                      <tr style={{ borderTop:`2px solid ${C.border}` }}>
+                        <td colSpan={isAdmin ? 3 : 2} style={{ padding:"10px 12px", color:C.muted, fontWeight:600, fontSize:12 }}>TOTAL</td>
+                        <td style={{ padding:"10px 12px", color:C.green, fontWeight:700 }}>₹{totalCredit.toLocaleString()}</td>
+                        <td style={{ padding:"10px 12px", color:C.red, fontWeight:700 }}>₹{totalDebit.toLocaleString()}</td>
+                        <td style={{ padding:"10px 12px", color:lastBal>=0?C.green:C.red, fontWeight:700 }}>₹{lastBal.toLocaleString()}</td>
+                        {isAdmin && <td/>}
+                      </tr>
+                    </tfoot>
+                  </table>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    if (page === "trades") {
+      const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
+      const allClients = isAdmin ? state.clients : [currentClient];
+      const showClients = isAdmin && tradesClientFilter !== "all"
+        ? allClients.filter(c => c.id === tradesClientFilter)
+        : allClients;
+
+      return (
+        <div>
+          {/* Header bar */}
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16, flexWrap:"wrap", gap:12 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+              <h2 style={{ color:C.text, margin:0 }}>Trades & Positions</h2>
+              {/* Trades search */}
+              <input value={tradeSearch} onChange={e=>setTradeSearch(e.target.value)}
+                placeholder="🔍 Search contract, symbol..."
+                style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,
+                  padding:"7px 12px",color:C.text,fontSize:13,outline:"none",width:220}}/>
+              {isAdmin && (
+                <select value={tradesClientFilter} onChange={e => setTradesClientFilter(e.target.value)}
+                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
+                  <option value="all">All Clients</option>
+                  {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
+                </select>
+              )}
+            </div>
+            {isAdmin && (
+              <div style={{display:"flex", gap:8}}>
+                <button style={btn(C.purple)} onClick={() => setModal("uploadTrades")}>
+                  <Icon name="upload" size={16}/> Upload Master File
+                </button>
+                <button style={btn(C.blue)} onClick={() => {setLtpFile(null);setLtpPreview(null);setModal("uploadLTP");}}>
+                  📡 Upload LTP File
+                </button>
+                {Object.keys(manualLTP).length > 0 && (
+                  <button style={{...btn(C.muted),fontSize:12}} onClick={() => {
+                    setManualLTP({}); try{localStorage.removeItem("jiya_manual_ltp");}catch(e){}
+                    notify("Manual LTP cleared");
+                  }}>
+                    ✕ Clear Manual LTP ({Object.keys(manualLTP).length})
+                  </button>
+                )}
+                {uploadHistory.length > 0 && (
+                  <button style={{...btn(C.card), border:`1px solid ${C.border}`, color:C.text, fontSize:13}}
+                    onClick={() => setModal("uploadHistory")}>
+                    🕐 History ({uploadHistory.length})
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Position filter tabs */}
+          <div style={{ display:"flex", gap:8, marginBottom:20 }}>
+            {["open","closed","all"].map(f => (
+              <button key={f} onClick={() => setPositionFilter(f)}
+                style={{
+                  padding:"8px 18px", borderRadius:8, cursor:"pointer", fontSize:13, fontWeight: positionFilter===f ? 600 : 400,
+                  background: positionFilter===f ? C.accent : "#fff",
+                  color: positionFilter===f ? "#fff" : C.muted,
+                  border:`1.5px solid ${positionFilter===f ? C.accent : C.border}`,
+                  textTransform:"capitalize"
+                }}>
+                {f} Positions
+              </button>
+            ))}
+          </div>
+
+          {showClients.map(client => {
+            const isInvestorAccount = client.accountType === "investor";
+            const open   = isInvestorAccount ? investorOpenPos(client.id) : clientOpenPos(client.id);
+            const closed = isInvestorAccount ? [] : clientClosedPos(client.id);
+
+            // Charges for this client
+            const clientTrades = state.trades.filter(t => t.clientId === client.id);
+            const totalCharges = clientTrades.reduce((s,t) => s + getTradeCharges(t).total, 0);
+
+            return (
+              <div key={client.id} style={{ marginBottom:32 }}>
+                {/* Client header */}
+                {isAdmin && (
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+                    <div style={{ color:C.accent, fontWeight:700, fontSize:15 }}>
+                      {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
+                    </div>
+                    <div style={{ color:C.yellow, fontSize:12, fontWeight:600 }}>
+                      Total Charges: ₹{totalCharges.toFixed(2)}
+                    </div>
+                  </div>
+                )}
+
+                {/* Open Positions */}
+                {(positionFilter==="open" || positionFilter==="all") && open.length > 0 && (
+                  <div style={{ ...card, marginBottom:12 }}>
+                    <div style={{ color:C.yellow, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>🟡 Open Positions</div>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+                      <thead>
+                        <tr>{["Contract","Net Qty","Side","Avg Price","Close Price","MTM P&L",...(!isInvestorAccount?["Booked P&L"]:[])].map(h=>(
+                          <th key={h} style={{ textAlign:"left", padding:"8px 12px", color:C.muted, borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                        ))}</tr>
+                      </thead>
+                      <tbody>
+                        {open.map((p,i) => {
+                          const manualKey = `${p.clientId}||${p.contract}`;
+                          const close = manualLTP[manualKey] !== undefined
+                            ? manualLTP[manualKey]
+                            : getBhavClose(p.contract);
+                          const mtm = close !== null && close !== undefined
+                            ? (p.side==="SELL" ? (p.avgPrice-close) : (close-p.avgPrice)) * p.netQty
+                            : null;
+                          const isExp = isExpiring(p.contract);
+                          const isEq  = !p.contract.includes("CE") && !p.contract.includes("PE") && !p.contract.includes("FUT");
+                          const isEditing = editingLTP?.clientId===p.clientId && editingLTP?.contract===p.contract;
+                          const hasManual = manualLTP[manualKey] !== undefined;
+                          const posKey   = `${p.clientId}||${p.contract}`;
+                          const isExpand = !!expandedPos[posKey];
+                          const lots     = (p.openLots||p.trades||[]).filter(t => (t.qty||0) > 0);
+                          return (
+                            <Fragment key={i}>
+                            <tr style={{ borderBottom:`1px solid ${C.border}22`, background:isExp?C.red+"11":"transparent",
+                              cursor: lots.length>0?"pointer":"default" }}
+                              onClick={() => lots.length>0 && setExpandedPos(prev=>({...prev,[posKey]:!prev[posKey]}))}>
+                              <td style={{ padding:"10px 12px", color:C.accent }}>
+                                <span style={{display:"flex",alignItems:"center",gap:6}}>
+                                  {lots.length>0 && (
+                                    <span style={{fontSize:10,color:C.muted,transition:"transform 0.2s",
+                                      display:"inline-block",transform:isExpand?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
+                                  )}
+                                  {p.contract}
+                                </span>
+                                {isExp && <span style={{ ...badge(C.red), marginLeft:6, fontSize:10 }}>EXPIRING</span>}
+                                {isEq  && <span style={{ ...badge(C.blue||"#1f6feb"), marginLeft:6, fontSize:10 }}>EQUITY</span>}
+                              </td>
+                              <td style={{ padding:"10px 12px", color:C.text, fontWeight:700 }}>{p.netQty}</td>
+                              <td style={{ padding:"10px 12px" }}><span style={badge(p.side==="SELL"?C.red:C.green)}>{p.side}</span></td>
+                              <td style={{ padding:"10px 12px", color:C.text }}>₹{p.avgPrice}</td>
+                              <td style={{ padding:"10px 12px" }}>
+                                {isEditing ? (
+                                  <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                                    <input
+                                      autoFocus
+                                      type="number"
+                                      step="0.05"
+                                      defaultValue={close || ""}
+                                      style={{width:80,background:C.bg,border:`1px solid ${C.accent}`,
+                                        borderRadius:6,padding:"4px 8px",color:C.text,fontSize:12,outline:"none"}}
+                                      onKeyDown={e => {
+                                        if (e.key==="Enter") {
+                                          const v = parseFloat(e.target.value);
+                                          if (!isNaN(v) && v > 0) { const next={...manualLTP,[manualKey]:v}; setManualLTP(next); try{localStorage.setItem("jiya_manual_ltp",JSON.stringify(next));}catch(e){} }
+                                          setEditingLTP(null);
+                                        }
+                                        if (e.key==="Escape") setEditingLTP(null);
+                                      }}
+                                      onBlur={e => {
+                                        const v = parseFloat(e.target.value);
+                                        if (!isNaN(v) && v > 0) { const next={...manualLTP,[manualKey]:v}; setManualLTP(next); try{localStorage.setItem("jiya_manual_ltp",JSON.stringify(next));}catch(e){} }
+                                        setEditingLTP(null);
+                                      }}
+                                    />
+                                    <span style={{color:C.muted,fontSize:10}}>↵</span>
+                                  </div>
+                                ) : (
+                                  <span
+                                    onClick={() => { if(auth.role==="admin"||auth.role==="superadmin") setEditingLTP({clientId:p.clientId,contract:p.contract}); }}
+                                    title={auth.role==="admin"||auth.role==="superadmin" ? "Click to enter LTP manually" : ""}
+                                    style={{
+                                      color: hasManual ? C.yellow : close ? C.purple : C.muted,
+                                      cursor: (auth.role==="admin"||auth.role==="superadmin") ? "pointer" : "default",
+                                      borderBottom: (auth.role==="admin"||auth.role==="superadmin") && !close ? `1px dashed ${C.muted}` : "none",
+                                      padding:"2px 0",
+                                    }}>
+                                    {close ? `₹${close}` : (auth.role==="admin"||auth.role==="superadmin") ? "— click to set" : "—"}
+                                    {hasManual && (auth.role==="admin"||auth.role==="superadmin") && <span style={{fontSize:9,color:C.yellow,marginLeft:4}}>✎</span>}
+                                  </span>
+                                )}
+                              </td>
+                              <td style={{ padding:"10px 12px", color:mtm===null?C.muted:mtm>=0?C.green:C.red, fontWeight:600 }}>
+                                {mtm===null?"—":`${mtm>=0?"+":""}₹${mtm.toFixed(2)}`}
+                              </td>
+                              {!isInvestorAccount && <td style={{ padding:"10px 12px", color:p.bookedPnl>=0?C.green:C.red, fontWeight:600 }}>₹{p.bookedPnl.toLocaleString()}</td>}
+                              {(auth.role==="admin"||auth.role==="superadmin") && !isInvestorAccount && (
+                                <td style={{ padding:"6px 12px" }}>
+                                  <button
+                                    onClick={e => {
+                                      e.stopPropagation();
+                                      setSquareOffPrice("");
+                                      setSquareOffConfirm(false);
+                                      setSquareOffModal({
+                                        clientId: p.clientId,
+                                        contract: p.contract,
+                                        side:     p.side,
+                                        qty:      p.netQty,
+                                        avgPrice: p.avgPrice,
+                                      });
+                                    }}
+                                    style={{
+                                      background: C.red+"22",
+                                      color: C.red,
+                                      border: `1px solid ${C.red}44`,
+                                      borderRadius: 6,
+                                      padding: "4px 10px",
+                                      fontSize: 11,
+                                      fontWeight: 700,
+                                      cursor: "pointer",
+                                      whiteSpace: "nowrap",
+                                    }}>
+                                    ⚡ SQ OFF
+                                  </button>
+                                </td>
+                              )}
+                            </tr>
+                            {/* Drill-down: individual lots */}
+                            {isExpand && lots.length > 0 && (
+                              <tr style={{background:C.bg+"aa"}}>
+                                <td colSpan={7} style={{padding:"0 0 0 32px"}}>
+                                  <div style={{padding:"10px 0 10px 0",borderLeft:`2px solid ${C.accent}44`,paddingLeft:12}}>
+                                    <div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",
+                                      letterSpacing:1,marginBottom:8}}>Trade History — {p.contract}</div>
+                                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                                      <thead>
+                                        <tr>
+                                          {["Date","Time","Side","Qty","Price"].map(h=>(
+                                            <th key={h} style={{padding:"4px 10px",textAlign:"left",
+                                              color:C.muted,fontWeight:600,borderBottom:`1px solid ${C.border}33`}}>{h}</th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {lots.sort((a,b)=>((a.date||"")+(a.time||""))<((b.date||"")+(b.time||""))?-1:1).map((lot,li)=>(
+                                          <tr key={li} style={{borderBottom:`1px solid ${C.border}22`}}>
+                                            <td style={{padding:"5px 10px",color:C.text}}>{lot.date}</td>
+                                            <td style={{padding:"5px 10px",color:C.muted}}>{lot.time||"—"}</td>
+                                            <td style={{padding:"5px 10px"}}>
+                                              <span style={{color:lot.side==="BUY"?C.green:C.red,fontWeight:600}}>{lot.side}</span>
+                                            </td>
+                                            <td style={{padding:"5px 10px",color:C.text,fontWeight:600}}>{lot.qty}</td>
+                                            <td style={{padding:"5px 10px",color:C.text}}>₹{lot.price}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                    {/* Square Off button — admin only */}
+                                    {(auth.role==="admin"||auth.role==="superadmin") && (
+                                      <div style={{marginTop:10}}>
+                                        <button
+                                          onClick={e => {
+                                            e.stopPropagation();
+                                            setSquareOffPrice("");
+                                            setSquareOffConfirm(false);
+                                            setSquareOffModal({
+                                              clientId: p.clientId,
+                                              contract: p.contract,
+                                              side:     p.side,
+                                              qty:      p.netQty,
+                                              avgPrice: p.avgPrice,
+                                            });
+                                          }}
+                                          style={{
+                                            background: C.red,
+                                            color: "#fff",
+                                            border: "none",
+                                            borderRadius: 8,
+                                            padding: "7px 18px",
+                                            fontSize: 12,
+                                            fontWeight: 700,
+                                            cursor: "pointer",
+                                          }}>
+                                          ⚡ Square Off
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                            </Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Closed Positions */}
+                {(positionFilter==="closed" || positionFilter==="all") && closed.length > 0 && (
+                  <div style={{ ...card, marginBottom:12 }}>
+                    <div style={{ color:C.green, fontWeight:600, marginBottom:12, fontSize:13, textTransform:"uppercase", letterSpacing:1 }}>✅ Closed Positions</div>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+                      <thead>
+                        <tr>{["Contract","Qty","Sell Price","Buy Price","Gross P&L","Charges","Net P&L"].map(h=>(
+                          <th key={h} style={{ textAlign:"left", padding:"8px 12px", color:C.muted, borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                        ))}</tr>
+                      </thead>
+                      <tbody>
+                        {closed.flatMap(c=>c.trades).map((t,i) => {
+                          // Find trades for this closed trade to calc charges
+                          const relatedTrades = clientTrades.filter(tr =>
+                            tr.contract === t.contract && (tr.date === t.date || true)
+                          );
+                          // Approx: split total charges by turnover proportion
+                          const tradeTurnover = t.sellPrice * t.qty + t.buyPrice * t.qty;
+                          const totalTurnover = clientTrades
+                            .filter(tr => tr.contract === t.contract)
+                            .reduce((s,tr)=>s+tr.price*tr.qty,0) || tradeTurnover;
+                          const chargesApprox = totalCharges * (tradeTurnover / Math.max(totalTurnover,1));
+                          const netPnl = t.pnl - chargesApprox;
+                          return (
+                            <tr key={i} style={{ borderBottom:`1px solid ${C.border}22` }}>
+                              <td style={{ padding:"10px 12px", color:C.accent }}>{t.contract}</td>
+                              <td style={{ padding:"10px 12px", color:C.text }}>{t.qty}</td>
+                              <td style={{ padding:"10px 12px", color:C.text }}>₹{t.sellPrice}</td>
+                              <td style={{ padding:"10px 12px", color:C.text }}>₹{t.buyPrice}</td>
+                              <td style={{ padding:"10px 12px", color:t.pnl>=0?C.green:C.red, fontWeight:700 }}>₹{t.pnl.toFixed(2)}</td>
+                              <td style={{ padding:"10px 12px", color:C.yellow, fontSize:12 }}>₹{chargesApprox.toFixed(2)}</td>
+                              <td style={{ padding:"10px 12px", color:netPnl>=0?C.green:C.red, fontWeight:700 }}>₹{netPnl.toFixed(2)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Charges breakdown per trade — admin only */}
+                {isAdmin && (positionFilter==="closed" || positionFilter==="all") && clientTrades.length>0 && (
+                  <details style={{ ...card, cursor:"pointer" }}>
+                    <summary style={{ color:C.yellow, fontWeight:600, fontSize:13, padding:"4px 0", userSelect:"none" }}>
+                      💰 Charges Breakdown — {client.name} (Total: ₹{totalCharges.toFixed(2)})
+                    </summary>
+                    <div style={{ marginTop:14, overflowX:"auto" }}>
+                      <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
+                        <thead>
+                          <tr>{["Date","Contract","Side","Qty","Price","STT","Stamp","TOT","SEBI","IPF","Clearing","GST","Markup","Total"].map(h=>(
+                            <th key={h} style={{ textAlign:"left", padding:"5px 8px", color:C.muted, borderBottom:`1px solid ${C.border}`, whiteSpace:"nowrap" }}>{h}</th>
+                          ))}</tr>
+                        </thead>
+                        <tbody>
+                          {clientTrades.map((t,i) => {
+                            const ch = getTradeCharges(t);
+                            return (
+                              <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
+                                <td style={{ padding:"5px 8px", color:C.muted }}>{t.date}</td>
+                                <td style={{ padding:"5px 8px", color:C.accent, maxWidth:120, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{t.contract}</td>
+                                <td style={{ padding:"5px 8px" }}><span style={{ color:t.side==="SELL"?C.red:C.green, fontWeight:600 }}>{t.side}</span></td>
+                                <td style={{ padding:"5px 8px", color:C.text }}>{t.qty}</td>
+                                <td style={{ padding:"5px 8px", color:C.text }}>₹{t.price}</td>
+                                {[ch.stt,ch.stamp,ch.tot,ch.sebi,ch.ipf,ch.clearing,ch.gst,ch.markup].map((v,j)=>(
+                                  <td key={j} style={{ padding:"5px 8px", color:C.muted }}>₹{v.toFixed(3)}</td>
+                                ))}
+                                <td style={{ padding:"5px 8px", color:C.yellow, fontWeight:700 }}>₹{ch.total}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                        <tfoot>
+                          <tr style={{ borderTop:`2px solid ${C.border}` }}>
+                            <td colSpan={5} style={{ padding:"7px 8px", color:C.text, fontWeight:700, fontSize:12 }}>TOTAL</td>
+                            {["stt","stamp","tot","sebi","ipf","clearing","gst","markup"].map(k=>(
+                              <td key={k} style={{ padding:"7px 8px", color:C.muted, fontWeight:600 }}>
+                                ₹{clientTrades.reduce((s,t)=>s+getTradeCharges(t)[k],0).toFixed(3)}
+                              </td>
+                            ))}
+                            <td style={{ padding:"7px 8px", color:C.yellow, fontWeight:700 }}>₹{totalCharges.toFixed(2)}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </details>
+                )}
+
+                {open.length===0 && closed.length===0 && (
+                  <div style={{ color:C.muted, fontSize:13 }}>No trades found.</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    if (page === "pnl") {
+      const isAdmin = (auth.role === "admin" || auth.role === "superadmin") || auth.role === "superadmin";
+      const allClients = isAdmin ? state.clients : [currentClient];
+      const showClients = isAdmin && pnlClientFilter !== "all"
+        ? allClients.filter(c => c.id === pnlClientFilter)
+        : allClients;
+
+      // Date filter helper — does a month fall within the selected filter?
+      const monthInFilter = (m) => {
+        if (pnlDateMode === "all") return true;
+        if (pnlDateMode === "month") return m === pnlMonth;
+        if (pnlDateMode === "range") {
+          const from = pnlDateFrom ? pnlDateFrom.slice(0,7) : "";
+          const to   = pnlDateTo   ? pnlDateTo.slice(0,7)   : "";
+          return (!from || m >= from) && (!to || m <= to);
+        }
+        return true;
+      };
+
+      return (
+        <div>
+          {/* Header */}
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20, flexWrap:"wrap", gap:12 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+              <div style={{ display:"flex", alignItems:"baseline", gap:16, flexWrap:"wrap" }}>
+          <h2 style={{ color:C.text, margin:0 }}>Profit & Loss</h2>
+          {(() => {
+            // Correct All-Time Net P&L: sum of (Realized - Expenses - Interest - Software) across all months, all visible clients
+            const clientsForTotal = isAdmin ? visibleClients : visibleClients.filter(c=>c.id===cid);
+            let grandNet = 0;
+            clientsForTotal.forEach(client => {
+              const closed = clientClosedPos(client.id);
+              const realized = closed.reduce((a,c)=>a+c.totalPnl,0);
+              const tradeMonths = [...new Set(state.trades.filter(t=>t.clientId===client.id).map(t=>(t.date||"").slice(0,7)))];
+              const interestMonths = [...new Set((state.interest||[]).filter(i=>i.clientId===client.id).map(i=>(i.yearMonth||"").replace("_SW","")))];
+              const allMonthsForClient = [...new Set([...tradeMonths, ...interestMonths])].filter(Boolean);
+              const expenses = allMonthsForClient.reduce((a,m)=>a+getMonthlyCharges(client.id,m),0);
+              const interest = allMonthsForClient.reduce((a,m)=>a+getMonthlyInterest(client.id,m),0);
+              const software = allMonthsForClient.reduce((a,m)=>a+getMonthlyInterest(client.id,m+"_SW"),0);
+              grandNet += (realized - expenses - interest - software);
+            });
+            const thisMonthNet = visibleClients.reduce((s,c) => s + clientNetPnlForMonth(c.id, currentMonthStr), 0);
+            return (
+              <span style={{ fontSize:12, color:C.muted, fontWeight:400 }}>
+                {new Date().toLocaleString("en-IN",{month:"long",year:"numeric"})} Net P&L:&nbsp;
+                <span style={{ color:thisMonthNet>=0?C.green:C.red, fontWeight:600 }}>
+                  {thisMonthNet>=0?"+":""}₹{Math.abs(thisMonthNet).toLocaleString("en-IN",{maximumFractionDigits:0})}
+                </span>
+              </span>
+            );
+          })()}
+        </div>
+              {isAdmin && (
+                <select value={pnlClientFilter} onChange={e => setPnlClientFilter(e.target.value)}
+                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
+                  <option value="all">All Clients</option>
+                  {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
+                </select>
+              )}
+            </div>
+            {isAdmin && (
+              <button style={btn(C.yellow)} onClick={() => setModal("addInterest")}>
+                💰 Add Interest / Brokerage
+              </button>
+            )}
+          </div>
+
+          {/* Date Filter Bar */}
+          <div style={{ ...card, marginBottom:20, padding:"14px 20px" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+              <span style={{ color:C.muted, fontSize:12, fontWeight:600 }}>FILTER BY:</span>
+              {[
+                { val:"all",   label:"All Time" },
+                { val:"month", label:"Specific Month" },
+                { val:"range", label:"Date Range" },
+              ].map(f => (
+                <button key={f.val} onClick={() => setPnlDateMode(f.val)}
+                  style={{ padding:"6px 14px", borderRadius:8, border:`1.5px solid ${pnlDateMode===f.val ? C.accent : C.border}`,
+                    background: pnlDateMode===f.val ? C.accent+"12" : "transparent",
+                    color: pnlDateMode===f.val ? C.accent : C.muted,
+                    fontWeight: pnlDateMode===f.val ? 600 : 400, fontSize:13, cursor:"pointer" }}>
+                  {f.label}
+                </button>
+              ))}
+              {pnlDateMode === "month" && (
+                <input type="month" value={pnlMonth} onChange={e => setPnlMonth(e.target.value)}
+                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none", fontWeight:600 }}/>
+              )}
+              {pnlDateMode === "range" && (
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <input type="date" value={pnlDateFrom} onChange={e => setPnlDateFrom(e.target.value)}
+                    style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
+                  <span style={{ color:C.muted }}>to</span>
+                  <input type="date" value={pnlDateTo} onChange={e => setPnlDateTo(e.target.value)}
+                    style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {showClients.map(client => {
+            if (client.accountType === "investor") {
+              const allocationStrategyIds = new Set((state.investorAllocations || [])
+                .filter(a => a.investorClientId === client.id && a.status !== "cancelled")
+                .map(a => a.strategyClientId));
+              const investorMonths = [...new Set([
+                currentMonthStr,
+                ...state.trades.filter(t => allocationStrategyIds.has(t.clientId)).map(t => (t.date || "").slice(0, 7)),
+              ])].filter(m => m && monthInFilter(m)).sort().reverse();
+              const results = investorMonths.map(month => ({ month, ...investorPnlForMonth(client.id, month) }));
+              const total = results.reduce((sum, row) => sum + row.pnl, 0);
+              const pending = results.reduce((sum, row) => sum + row.pendingCount, 0);
+              return (
+                <div key={client.id} style={{ ...card, marginBottom:24 }}>
+                  {isAdmin && <div style={{ color:C.accent, fontWeight:700, fontSize:15, marginBottom:16 }}>
+                    {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
+                  </div>}
+                  <div style={{background:C.bg,borderRadius:10,padding:"18px 20px",border:`1px solid ${total>=0?C.green:C.red}55`,marginBottom:16}}>
+                    <div style={{color:C.muted,fontSize:11,textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>Combined Investor Net P&amp;L</div>
+                    <div style={{color:total>=0?C.green:C.red,fontSize:28,fontWeight:800}}>{total>=0?"+":"−"}₹{Math.abs(total).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:6}}>Your proportional result after Brokerage &amp; Charges</div>
+                  </div>
+                  {pending > 0 && <div style={{padding:"10px 14px",borderRadius:8,background:C.yellow+"12",color:C.yellow,fontSize:12,marginBottom:14}}>
+                    {pending} allocation period requires its effective-time LTP snapshot before that portion can be shown.
+                  </div>}
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                    <thead><tr><th style={{textAlign:"left",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>Month</th><th style={{textAlign:"right",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>Your Net P&amp;L</th></tr></thead>
+                    <tbody>{results.map(row => <tr key={row.month} style={{borderBottom:`1px solid ${C.border}22`}}>
+                      <td style={{padding:"10px 12px",color:C.text,fontWeight:600}}>{row.month}</td>
+                      <td style={{padding:"10px 12px",textAlign:"right",color:row.pnl>=0?C.green:C.red,fontWeight:700}}>{row.complete?(row.pnl>=0?"+":"−")+"₹"+Math.abs(row.pnl).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2}):"Pending snapshot"}</td>
+                    </tr>)}</tbody>
+                  </table>
+                </div>
+              );
+            }
+            const closed  = clientClosedPos(client.id);
+            const open    = clientOpenPos(client.id);
+
+            // All months that have any data for this client — filtered by date selection
+            const tradeDates = state.trades.filter(t => t.clientId === client.id).map(t => (t.date||"").slice(0,7));
+            const interestMonths = (state.interest||[]).filter(i => i.clientId === client.id).map(i => i.yearMonth);
+            const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(m => m && monthInFilter(m)).sort().reverse();
+
+            // For range/month filter: use LAST trade date (closing date) — same as monthly breakdown
+            const filteredClosed = closedPositionSlicesInFilter(closed, monthInFilter);
+
+            // Grand totals
+            // Realized P&L = CLOSED positions FIFO only — NO open MTM here
+            const grandRealized = filteredClosed.reduce((a,c) => a + c.totalPnl, 0);
+            const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
+            const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
+            const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
+            // Open MTM: ONLY show for current month — 0 for all past months (prevents double counting)
+            const currentYearMonth = new Date().toISOString().slice(0,7);
+            const isCurrentMonth   = pnlDateMode === "all" ||
+              (pnlDateMode === "month" && pnlMonth === currentYearMonth);
+            const grandMTM = isCurrentMonth ? openPositionMtm(open, pos => {
+              const manualKey = `${pos.clientId}||${pos.contract}`;
+              const ltp = manualLTP[manualKey] !== undefined
+                ? manualLTP[manualKey]
+                : getBhavClose(pos.contract);
+              return ltp;
+            }) : 0;
+            // Net P&L = Realized (closed) + Open MTM (current month only) - Expenses
+            const grandNet = grandRealized + grandMTM - grandExpenses - grandSoftware - grandInterest;
+
+            return (
+              <div key={client.id} style={{ ...card, marginBottom:24 }}>
+                {/* Client name */}
+                {isAdmin && (
+                  <div style={{ color:C.accent, fontWeight:700, fontSize:15, marginBottom:16 }}>
+                    {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
+                  </div>
+                )}
+
+                {/* Grand summary cards */}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
+                  {[
+                    { label:"Realized P&L (Closed)", val:grandRealized,          color:grandRealized>=0?C.green:C.red },
+                    { label:"Open Position MTM",     val:grandMTM,               color:grandMTM>=0?C.green:C.red },
+                    { label:"Expenses",              val:-grandExpenses,          color:C.yellow },
+                    { label:"Software Charges",      val:-grandSoftware,          color:C.purple },
+                    { label:"Interest",              val:-grandInterest,          color:C.red },
+                    { label:"Net P&L",               val:grandNet,               color:grandNet>=0?C.green:C.red, big:true },
+                    { label:"Open Positions",        val:open.length,             color:C.accent, count:true },
+                  ].map(s => (
+                    <div key={s.label} style={{ background:C.bg, borderRadius:10, padding:"14px 16px",
+                      border:`1px solid ${s.big ? s.color+"66" : C.border}`,
+                      boxShadow: s.big ? `0 0 12px ${s.color}22` : "none" }}>
+                      <div style={{ color:C.muted, fontSize:11, marginBottom:6, textTransform:"uppercase", letterSpacing:1 }}>{s.label}</div>
+                      <div style={{ color:s.color, fontSize:s.big?22:18, fontWeight:700 }}>
+                        {s.count ? s.val : `₹${(+s.val).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Formula line */}
+                <div style={{ background:C.bg, borderRadius:8, padding:"10px 16px", marginBottom:20, fontSize:13, color:C.muted, display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+                  <span style={{ color:grandRealized>=0?C.green:C.red, fontWeight:600 }}>₹{grandRealized.toFixed(2)}</span>
+                  <span>(Realized)</span>
+                  <span>−</span>
+                  <span style={{ color:C.yellow, fontWeight:600 }}>₹{grandExpenses.toFixed(2)}</span>
+                  <span>(Expenses)</span>
+                  <span>−</span>
+                  <span style={{ color:C.purple, fontWeight:600 }}>₹{grandSoftware.toFixed(2)}</span>
+                  <span>(Software)</span>
+                  <span>−</span>
+                  <span style={{ color:C.red, fontWeight:600 }}>₹{grandInterest.toFixed(2)}</span>
+                  <span>(Interest)</span>
+                  <span>=</span>
+                  <span style={{ color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</span>
+                  <span style={{ color:C.muted }}>(Net P&L)</span>
+                </div>
+
+                {/* Month-by-month breakdown */}
+                {allMonths.length > 0 && (
+                  <div style={{ marginBottom:16 }}>
+                    <div style={{ color:C.muted, fontSize:12, fontWeight:600, marginBottom:10, textTransform:"uppercase", letterSpacing:1 }}>Monthly Breakdown</div>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+                      <thead>
+                        <tr>
+                          {["Month","Realized P&L","Expenses (Auto)","Interest / Brokerage","Software Charges","Net P&L", isAdmin?"":""].filter(Boolean).map(h=>(
+                            <th key={h} style={{ textAlign:"left", padding:"8px 12px", color:C.muted, borderBottom:`1px solid ${C.border}`, fontSize:12 }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {allMonths.map(m => {
+                          // Realized for this month = P&L from trades closed in this month
+                          // Realized = contracts whose LAST trade (closing date) falls in this month
+                          const monthRealized = closedPositionSlicesForMonth(closed, m).reduce((a,c) => a + c.totalPnl, 0);
+                          const monthExpenses  = getMonthlyCharges(client.id, m);
+                          const monthInterest  = getMonthlyInterest(client.id, m);
+                          const monthSoftware  = getMonthlyInterest(client.id, m + "_SW"); // software charges stored with _SW suffix
+                          const monthNet       = monthRealized - monthExpenses - monthInterest - monthSoftware;
+
+                          // Interest entries for this month (for delete)
+                          const monthInterestEntries = (state.interest||[]).filter(i => i.clientId===client.id && i.yearMonth===m);
+
+                          return (
+                            <tr key={m} style={{ borderBottom:`1px solid ${C.border}22` }}>
+                              <td style={{ padding:"10px 12px", color:C.text, fontWeight:600 }}>{m}</td>
+                              <td style={{ padding:"10px 12px", color:monthRealized>=0?C.green:C.red, fontWeight:600 }}>
+                                ₹{monthRealized.toFixed(2)}
+                              </td>
+                              <td style={{ padding:"10px 12px", color:C.yellow }}>
+                                − ₹{monthExpenses.toFixed(2)}
+                              </td>
+                              <td style={{ padding:"10px 12px" }}>
+                                <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                                  <span style={{ color:C.red }}>− ₹{monthInterest.toFixed(2)}</span>
+                                  {isAdmin && monthInterestEntries.map(e => (
+                                    <span key={e.id} style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:6, padding:"2px 8px", fontSize:11, color:C.muted, display:"inline-flex", alignItems:"center", gap:6 }}>
+                                      {e.note || "Brokerage"}: ₹{e.amount}
+                                      <button onClick={() => deleteInterest(e.id)}
+                                        style={{ background:"none", border:"none", color:C.red, cursor:"pointer", fontSize:12, padding:0, lineHeight:1 }}>✕</button>
+                                    </span>
+                                  ))}
+                                </div>
+                              </td>
+                              <td style={{ padding:"10px 12px", color:C.purple }}>− ₹{monthSoftware.toFixed(2)}</td>
+                              <td style={{ padding:"10px 12px", color:monthNet>=0?C.green:C.red, fontWeight:700, fontSize:14 }}>
+                                ₹{monthNet.toFixed(2)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr style={{ borderTop:`2px solid ${C.border}` }}>
+                          <td style={{ padding:"10px 12px", color:C.muted, fontWeight:700, fontSize:12 }}>GRAND TOTAL</td>
+                          <td style={{ padding:"10px 12px", color:grandRealized>=0?C.green:C.red, fontWeight:700 }}>₹{grandRealized.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.yellow, fontWeight:700 }}>− ₹{grandExpenses.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.red, fontWeight:700 }}>− ₹{grandInterest.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:C.purple, fontWeight:700 }}>₹{grandSoftware.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                )}
+
+                {/* Closed contracts detail — filtered by current date selection */}
+                {filteredClosed.length > 0 && (
+                  <details>
+                    <summary style={{ color:C.muted, fontSize:12, cursor:"pointer", padding:"8px 0", userSelect:"none" }}>
+                      📋 View closed contracts ({filteredClosed.length})
+                    </summary>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, marginTop:10 }}>
+                      <thead>
+                        <tr>{["Contract","Gross P&L"].map(h=>(
+                          <th key={h} style={{ textAlign:"left", padding:"6px 12px", color:C.muted, borderBottom:`1px solid ${C.border}` }}>{h}</th>
+                        ))}</tr>
+                      </thead>
+                      <tbody>
+                        {filteredClosed.map((c,i)=>(
+                          <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
+                            <td style={{ padding:"8px 12px", color:C.accent }}>{c.contract}</td>
+                            <td style={{ padding:"8px 12px", color:c.totalPnl>=0?C.green:C.red, fontWeight:600 }}>₹{c.totalPnl.toFixed(2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </details>
+                )}
+
+                {filteredClosed.length===0 && allMonths.length===0 && (
+                  <div style={{ color:C.muted, fontSize:13 }}>No closed positions yet.</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    if (page === "charges" && (auth.role === "admin" || auth.role === "superadmin") && hasFeature(auth?.plan, "charges")) {
+      // ── PIN LOCK ──
+      const CHARGES_PIN = (() => {
+        try { return localStorage.getItem("jiya_charges_pin") || "2580"; } catch(e) { return "2580"; }
+      })();
+      if (!chargesPinUnlocked) return (
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}>
+          <div style={{...card,padding:40,width:340,textAlign:"center"}}>
+            <div style={{fontSize:32,marginBottom:12}}>🔒</div>
+            <div style={{fontSize:18,fontWeight:700,color:C.text,marginBottom:6}}>Charges Section Locked</div>
+            <div style={{color:C.muted,fontSize:13,marginBottom:24}}>Enter 4-digit PIN to access</div>
+            <input
+              type="password"
+              maxLength={4}
+              value={chargesPinInput}
+              onChange={e => { setChargesPinInput(e.target.value.replace(/\D/g,"")); setChargesPinError(""); }}
+              onKeyDown={e => {
+                if (e.key === "Enter") {
+                  if (chargesPinInput === CHARGES_PIN) {
+                    setChargesPinUnlocked(true); setChargesPinInput(""); setChargesPinError(""); try{sessionStorage.setItem("jiya_charges_unlocked","1");}catch(e){}
+                  } else {
+                    setChargesPinError("❌ Wrong PIN"); setChargesPinInput("");
+                  }
+                }
+              }}
+              placeholder="● ● ● ●"
+              style={{width:"100%",textAlign:"center",fontSize:28,letterSpacing:12,padding:"14px",
+                background:C.bg,border:`2px solid ${chargesPinError?C.red:C.border}`,borderRadius:12,
+                color:C.text,outline:"none",boxSizing:"border-box",marginBottom:8}}
+            />
+            {chargesPinError && <div style={{color:C.red,fontSize:13,marginBottom:8}}>{chargesPinError}</div>}
+            <button onClick={() => {
+              if (chargesPinInput === CHARGES_PIN) {
+                setChargesPinUnlocked(true); setChargesPinInput(""); setChargesPinError(""); try{sessionStorage.setItem("jiya_charges_unlocked","1");}catch(e){}
+              } else { setChargesPinError("❌ Wrong PIN"); setChargesPinInput(""); }
+            }} style={{...btn(C.accent),width:"100%",padding:"12px",fontSize:15,justifyContent:"center"}}>
+              Unlock
+            </button>
+          </div>
+        </div>
+      );
+      // PIN unlocked — show charges page normally below
+      const currentCfg = state.chargesHistory.slice().sort((a,b)=>b.effectiveFrom.localeCompare(a.effectiveFrom))[0] || DEFAULT_CHARGES;
+      const numFld = (label, val, onChange, color=C.text) => (
+        <div style={{ marginBottom:8 }}>
+          <div style={{ color:C.muted, fontSize:11, marginBottom:3 }}>{label}</div>
+          <input type="number" step="any" value={val} onChange={onChange}
+            style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`, borderRadius:8,
+              padding:"6px 10px", fontSize:12, color: color, outline:"none", boxSizing:"border-box" }}
+            disabled={!chargesEdit} />
+        </div>
+      );
+      const section = (title, color) => (
+        <div style={{ color, fontWeight:700, fontSize:13, margin:"16px 0 10px", paddingBottom:6, borderBottom:`1px solid ${C.border}`, letterSpacing:1 }}>{title}</div>
+      );
+      const cfg = chargesEdit || currentCfg;
+
+      return (
+        <div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24 }}>
+            <div>
+              <h2 style={{ color:C.text, margin:0 }}>Charges Configuration</h2>
+              <div style={{ color:C.muted, fontSize:12, marginTop:4 }}>Per-trade charges applied automatically. Clients see monthly total only.</div>
+            </div>
+            <div style={{ display:"flex", gap:10 }}>
+              {chargesEdit
+                ? <>
+                    <button style={btn(C.green)} onClick={() => {
+                      const newCfg = { ...chargesEdit, effectiveFrom: new Date().toISOString().slice(0,10) };
+                      setState(s => ({ ...s, chargesHistory: [...s.chargesHistory, newCfg] }));
+                      setChargesEdit(null);
+                      notify("✅ New charges saved! Effective from today.");
+                    }}><Icon name="check" size={14}/> Save & Apply from Today</button>
+                    <button style={btn(C.muted)} onClick={() => setChargesEdit(null)}>Discard</button>
+                  </>
+                : <button style={btn(C.accent)} onClick={() => setChargesEdit(JSON.parse(JSON.stringify(currentCfg)))}>
+                    ✏️ Edit Charges
+                  </button>
+              }
+            </div>
+          </div>
+
+          {chargesEdit && (
+            <div style={{ ...card, marginBottom:16, borderLeft:`3px solid ${C.yellow}`, background:C.yellow+"08" }}>
+              <div style={{ color:C.yellow, fontWeight:600, fontSize:13 }}>⚠️ Editing mode — changes apply from TODAY only. Past trade charges are not affected.</div>
+            </div>
+          )}
+
+          {/* Effective from history */}
+          <div style={{ ...card, marginBottom:20 }}>
+            <div style={{ color:C.muted, fontSize:12, marginBottom:10, fontWeight:600 }}>CHARGES HISTORY</div>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              {state.chargesHistory.slice().sort((a,b)=>b.effectiveFrom.localeCompare(a.effectiveFrom)).map((h,i)=>(
+                <div key={i} style={{ background:i===0?C.green+"22":C.bg, border:`1px solid ${i===0?C.green:C.border}`, borderRadius:8, padding:"8px 14px", fontSize:12 }}>
+                  <span style={{ color:i===0?C.green:C.muted }}>Effective from: </span>
+                  <span style={{ color:C.text, fontWeight:600 }}>{h.effectiveFrom}</span>
+                  {i===0&&<span style={{ color:C.green, marginLeft:8 }}>● Current</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20 }}>
+            {/* F&O NSE */}
+            <div style={{ ...card }}>
+              {section("F&O — NSE", C.accent)}
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                {numFld("STT Options Sell (%)", cfg.fno_nse?.stt_opt_sell, e=>setChargesEdit(s=>({...s,fno_nse:{...s.fno_nse,stt_opt_sell:+e.target.value}})), C.red)}
+                {numFld("STT Futures Sell (%)", cfg.fno_nse?.stt_fut_sell, e=>setChargesEdit(s=>({...s,fno_nse:{...s.fno_nse,stt_fut_sell:+e.target.value}})), C.red)}
                 {numFld("Stamp Duty Buy (%)", cfg.fno_nse?.stamp_buy, e=>setChargesEdit(s=>({...s,fno_nse:{...s.fno_nse,stamp_buy:+e.target.value}})))}
                 {numFld("Turnover — Options (%)", cfg.fno_nse?.tot_opt, e=>setChargesEdit(s=>({...s,fno_nse:{...s.fno_nse,tot_opt:+e.target.value}})))}
                 {numFld("Turnover — Futures (%)", cfg.fno_nse?.tot_fut, e=>setChargesEdit(s=>({...s,fno_nse:{...s.fno_nse,tot_fut:+e.target.value}})))}
