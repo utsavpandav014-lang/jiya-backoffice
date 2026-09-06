@@ -3,6 +3,11 @@ import assert from "node:assert/strict";
 import { calculateOwnershipPct, getActiveAllocations, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
 
 test("calculates ownership from rupees", () => assert.equal(calculateOwnershipPct(2_000_000, 5_000_000), 40));
+test("excludes adhoc deposit from ownership and cash-capital validation", () => {
+  const strategy = { accountType:"trading", monthlyStrategyCapital:6_300_000, adhocDeposit:6_300_000 };
+  assert.deepEqual(validateClientCapital(strategy), []);
+  assert.equal(calculateOwnershipPct(3_000_000, strategy.monthlyStrategyCapital), 47.619048);
+});
 test("requires capital by account type", () => {
   assert.deepEqual(validateClientCapital({ accountType: "trading", monthlyStrategyCapital: 0 }), ["Monthly strategy capital must be greater than zero"]);
   assert.deepEqual(validateClientCapital({ accountType: "investor", depositAmount: 0 }), ["Investor deposited fund must be greater than zero"]);
