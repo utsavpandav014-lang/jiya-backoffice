@@ -71,6 +71,7 @@ function applyFIFO(trades) {
           pnl: +pnl.toFixed(2),
           date: trade.date,
           time: trade.time || "",
+          sourceTradeId: trade.id || "",
         });
 
         lot.qty -= matchQty;
@@ -1065,6 +1066,8 @@ export default function BackOffice() {
   const [dbLoading, setDbLoading] = useState(false); // financial data loads after authentication
   const [authBootstrapReady, setAuthBootstrapReady] = useState(false);
   const [dbError, setDbError] = useState(null);
+  const [performanceWinners, setPerformanceWinners] = useState([]);
+  const leaderboardPublishedRef = useRef("");
   const [syncStatus, setSyncStatus] = useState("idle"); // "idle"|"saving"|"saved"|"error"
   const [auth, setAuth] = useState(null); // {role:'superadmin'|'admin'|'client', clientId?, adminId?, plan?}
 
@@ -1645,7 +1648,7 @@ export default function BackOffice() {
       const ownFilter = isClientSession ? `?clientId=eq.${encodeURIComponent(auth.clientId)}` : "?";
       const tradeFilter = isClientSession ? `?clientId=in.(${relatedTradeIds.map(encodeURIComponent).join(",")})` : "?";
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, carryForwardBatches, monthlyTargets] = await Promise.all([
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, carryForwardBatches, monthlyTargets, leaderboard] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         // CRITICAL: id is the unique tie-breaker. Hundreds of broker rows can
         // share the same date/time; offset pagination without id can skip or
@@ -1661,6 +1664,7 @@ export default function BackOffice() {
         sb.select("audit_log",      "?order=timestamp.desc&limit=2000").catch(() => []),
         fetchAll("carry_forward_batches", "?order=month.desc").catch(() => []),
         sb.rpc("get_monthly_targets", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
+        sb.rpc("get_performance_leaderboard", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||"",p_month:new Date().toISOString().slice(0,7)}).catch(() => []),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -1682,6 +1686,7 @@ export default function BackOffice() {
         carryForwardBatches: Array.isArray(carryForwardBatches) ? carryForwardBatches : [],
         monthlyTargets: Array.isArray(monthlyTargets) ? monthlyTargets : [],
       }));
+      setPerformanceWinners(Array.isArray(leaderboard) ? leaderboard : []);
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
 
@@ -2259,6 +2264,22 @@ export default function BackOffice() {
   })();
 
   const currentClient = auth?.role === "client" ? state.clients.find((c) => c.id === auth.clientId) : null;
+
+  useEffect(() => {
+    if (!auth || (auth.role!=="admin" && auth.role!=="superadmin") || !state.trades.length) return;
+    const signature=`${currentMonthStr}|${state.trades.length}|${state.interest.length}|${state.bhavcopy.length}`;
+    if (leaderboardPublishedRef.current===signature) return;
+    leaderboardPublishedRef.current=signature;
+    const rows=visibleClients.filter(client=>client.accountType!=="investor").map(client=>{
+      const capital=Number(client.monthlyStrategyCapital||client.startingCapital||client.depositAmount||0);
+      const pnl=displayedPnlForMonth(client,currentMonthStr);
+      return {client_id:client.id,pnl:+pnl.toFixed(2),roi:capital>0?+(pnl/capital*100).toFixed(4):0};
+    });
+    sb.rpc("save_performance_leaderboard",{p_user:auth.loginUser,p_password:auth.loginSecret,p_month:currentMonthStr,p_rows:rows})
+      .then(()=>sb.rpc("get_performance_leaderboard",{p_user:auth.loginUser,p_password:auth.loginSecret,p_month:currentMonthStr}))
+      .then(result=>setPerformanceWinners(Array.isArray(result)?result:[]))
+      .catch(error=>console.error("Leaderboard snapshot error:",error));
+  }, [auth?.role, auth?.adminId, currentMonthStr, state.trades, state.interest, state.bhavcopy, state.clients]);
 
   const ledgerWithBalance = (cid) => {
     let bal = 0;
@@ -3380,7 +3401,7 @@ export default function BackOffice() {
         const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
         months6.push(d.toISOString().slice(0, 7));
       }
-      const CHART_COLORS = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4"];
+      const CHART_COLORS = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#14b8a6","#6366f1","#e879f9"];
 
       // ── CLIENT DASHBOARD ─────────────────────────────────────
       if (auth?.role === "client") {
@@ -3647,18 +3668,13 @@ export default function BackOffice() {
               <div style={{padding:"16px 20px 12px"}}>
                 {(() => {
                   const clientsToShow = chartClientFilter === "all"
-                    ? visibleClients.slice(0, 7)
+                    ? visibleClients
                     : visibleClients.filter(c => c.id === chartClientFilter);
 
                   const clientLines = clientsToShow.map((cl, ci) => ({
                     name: (cl.name||cl.id).split(" ")[0],
                     color: CHART_COLORS[ci % CHART_COLORS.length],
-                    pts: months6.map(m => {
-                      const mT = allTrades.filter(t => t.clientId===cl.id && (t.date||"").slice(0,7)===m);
-                      let bv=0,sv=0;
-                      mT.forEach(t => { const v=(t.price||0)*(t.qty||0); if(t.side==="BUY") bv+=v; else sv+=v; });
-                      return sv - bv;
-                    })
+                    pts: months6.map(m => displayedPnlForMonth(cl,m))
                   }));
 
                   const allPts = clientLines.flatMap(c=>c.pts);
@@ -3700,7 +3716,7 @@ export default function BackOffice() {
                         ))}
                       </svg>
                       {/* Legend */}
-                      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:4}}>
+                      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:4,maxHeight:72,overflowY:"auto",paddingRight:4}}>
                         {clientLines.map(cl=>(
                           <div key={cl.name} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.muted}}>
                             <div style={{width:12,height:3,borderRadius:2,background:cl.color}}/>
@@ -3723,10 +3739,9 @@ export default function BackOffice() {
               <div style={{padding:"8px 0"}}>
                 {(() => {
                   // Compute accurate Net P&L once per client (matches P&L page exactly)
-                  const ranked = clientPnlData
-                    .map(c => ({ ...c, netPnl: clientNetPnlForMonth(c.id, currentMonthStr) }))
-                    .sort((a,b) => b.netPnl - a.netPnl)
-                    .slice(0, 7);
+                  const ranked = visibleClients
+                    .map(c => ({ id:c.id,name:c.name,netPnl:displayedPnlForMonth(c,currentMonthStr) }))
+                    .sort((a,b) => b.netPnl - a.netPnl);
                   const maxAbsNet = Math.max(...ranked.map(c => Math.abs(c.netPnl)), 1);
 
                   return ranked.map((c, i) => {
@@ -4744,7 +4759,7 @@ export default function BackOffice() {
         const stamp = year&&month&&day ? Date.UTC(year,month-1,day,hour-5,minute-30,second) : NaN;
         const starts = new Date(allocation.effectiveFrom).getTime();
         const ends = allocation.effectiveTo ? new Date(allocation.effectiveTo).getTime() : Infinity;
-        return Number.isFinite(stamp) && starts <= stamp && stamp < ends && allocation.status !== "cancelled" && allocation.status !== "closed";
+        return Number.isFinite(stamp) && starts <= stamp && stamp < ends && allocation.status !== "cancelled";
       };
       const insightClosed = [];
       const chargeRows = [];
@@ -4757,19 +4772,24 @@ export default function BackOffice() {
             for (const position of closedPositions.filter(p=>p.clientId===allocation.strategyClientId)) {
               for (const match of position.trades||[]) if (allocationActiveForMatch(allocation,match)) matches.push({...match,pnl:Number(match.pnl||0)*ownership});
             }
-            for (const trade of state.trades.filter(t=>t.clientId===allocation.strategyClientId)) {
+            for (const trade of state.trades.filter(t=>t.clientId===allocation.strategyClientId && !isCarryForwardTrade(t))) {
               if (allocationActiveForMatch(allocation,trade)) chargeRows.push({date:trade.date,amount:getTradeCharges(trade).total*ownership});
             }
           }
           insightClosed.push({clientId:client.id,contract:"Combined portfolio",trades:matches});
         } else {
           insightClosed.push(...closedPositions.filter(p=>p.clientId===client.id));
-          for (const trade of state.trades.filter(t=>t.clientId===client.id)) chargeRows.push({date:trade.date,amount:getTradeCharges(trade).total});
+          for (const trade of state.trades.filter(t=>t.clientId===client.id && !isCarryForwardTrade(t))) chargeRows.push({date:trade.date,amount:getTradeCharges(trade).total});
         }
       }
       const daily = dailyTradingResults(insightClosed,()=>chargeRows).filter(row=>row.date.startsWith(insightsMonth));
-      const patterns = tradingPatterns(insightClosed);
       const [iy,im] = insightsMonth.split("-").map(Number);
+      const threeMonthStartDate = iy&&im ? new Date(Date.UTC(iy,im-3,1)).toISOString().slice(0,7) : insightsMonth;
+      const closedInRange = (fromMonth,toMonth) => insightClosed.map(position=>({...position,trades:(position.trades||[]).filter(match=>{
+        const month=String(match.date||"").slice(0,7); return month>=fromMonth && month<=toMonth;
+      })}));
+      const patterns = tradingPatterns(closedInRange(threeMonthStartDate,insightsMonth));
+      const monthPatterns = tradingPatterns(closedInRange(insightsMonth,insightsMonth));
       const monthDays = iy&&im ? new Date(iy,im,0).getDate() : 0;
       const firstDay = iy&&im ? new Date(iy,im-1,1).getDay() : 0;
       const dailyMap = Object.fromEntries(daily.map(row=>[row.date,row]));
@@ -4777,12 +4797,23 @@ export default function BackOffice() {
       const profitableDays = daily.filter(row=>row.netPnl>=0).length;
       const dayRate = daily.length ? profitableDays*100/daily.length : 0;
       const sampleWarning = patterns.weekdays.reduce((s,row)=>s+row.trades,0) < 10;
+      const winners = performanceWinners.slice().sort((a,b)=>Number(a.rank)-Number(b.rank)).slice(0,3);
       return <div>
         <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:20}}>
           <div><h2 style={{color:C.text,margin:"0 0 5px"}}>Performance Insights</h2><div style={{color:C.muted,fontSize:12}}>Personal analytics calculated from actual FIFO-closed trades.</div></div>
           <div style={{display:"flex",gap:8}}>
             {isAdmin && <select value={insightClientFilter} onChange={e=>setInsightClientFilter(e.target.value)} style={{...input,width:230}}><option value="all">All visible accounts</option>{visibleClients.map(c=><option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}</select>}
             <input type="month" value={insightsMonth} onChange={e=>setInsightsMonth(e.target.value)} style={{...input,width:150}}/>
+          </div>
+        </div>
+        <div style={{...card,marginBottom:18,padding:18,border:`1px solid ${C.yellow}55`,background:`linear-gradient(135deg,${C.yellow}10,${C.card})`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"end",gap:10,marginBottom:14}}><div><div style={{color:C.yellow,fontWeight:900,fontSize:16}}>🏆 Performance Winners</div><div style={{color:C.muted,fontSize:11,marginTop:3}}>Top 3 trading accounts by current-month ROI · P&amp;L privacy protected</div></div><div style={{color:C.muted,fontSize:11}}>{currentMonthStr}</div></div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(190px,1fr))",gap:12}}>
+            {winners.map((winner,index)=>{
+              const own=auth.role!=="client" || winner.clientId===auth.clientId;
+              return <div key={winner.clientId} style={{background:C.bg,border:`1px solid ${index===0?C.yellow:C.border}`,borderRadius:12,padding:15,position:"relative"}}><div style={{position:"absolute",right:12,top:10,fontSize:20}}>{["🥇","🥈","🥉"][index]}</div><div style={{color:C.text,fontWeight:850,fontSize:14,paddingRight:28}}>{winner.name||winner.clientId}</div><div style={{color:C.green,fontSize:24,fontWeight:900,marginTop:9}}>{Number(winner.roi)>=0?"+":""}{Number(winner.roi).toFixed(2)}%</div><div style={{color:C.muted,fontSize:11,marginTop:4}}>Net P&amp;L: <span style={{color:own?(Number(winner.pnl)>=0?C.green:C.red):C.text,fontWeight:800}}>{own&&winner.pnl!==null&&winner.pnl!==undefined?formatINR(Number(winner.pnl)):"***"}</span></div></div>;
+            })}
+            {!winners.length && <div style={{gridColumn:"1 / -1",color:C.muted,fontSize:12,padding:8}}>Leaderboard will appear after the admin’s current-month snapshot is prepared.</div>}
           </div>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(150px,1fr))",gap:12,marginBottom:18}}>
@@ -4793,8 +4824,8 @@ export default function BackOffice() {
             ["Booked Trades",daily.reduce((s,r)=>s+r.matches,0),C.purple],
           ].map(([label,value,color])=><div key={label} style={{...card,padding:16}}><div style={{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:1}}>{label}</div><div style={{color,fontSize:22,fontWeight:850,marginTop:7}}>{value}</div></div>)}
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"minmax(420px,1.35fr) minmax(320px,1fr)",gap:18}}>
-          <div style={card}>
+        <div>
+          <div style={{...card,marginBottom:18}}>
             <div style={{color:C.text,fontWeight:800,marginBottom:14}}>P&L Calendar · {insightsMonth}</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:6}}>
               {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=><div key={d} style={{color:C.muted,fontSize:10,textAlign:"center",padding:5,fontWeight:700}}>{d}</div>)}
@@ -4807,16 +4838,14 @@ export default function BackOffice() {
               })}
             </div>
           </div>
-          <div style={{display:"flex",flexDirection:"column",gap:12}}>
-            <div style={card}><div style={{color:C.text,fontWeight:800,marginBottom:12}}>Data-based observations</div>
-              {sampleWarning && <div style={{color:C.yellow,fontSize:11,marginBottom:10}}>Early pattern: fewer than 10 booked trades. Confidence will improve as more history is added.</div>}
-              {patterns.bestTime ? <>
-                <div style={{background:C.green+"12",borderRadius:9,padding:12,marginBottom:8}}><div style={{color:C.green,fontWeight:800,fontSize:12}}>Most profitable booking time</div><div style={{color:C.text,fontSize:13,marginTop:4}}>{patterns.bestTime.label} · {patterns.bestTime.winRate}% profitable · {formatINR(patterns.bestTime.pnl)} net booked</div></div>
-                <div style={{background:C.red+"12",borderRadius:9,padding:12,marginBottom:8}}><div style={{color:C.red,fontWeight:800,fontSize:12}}>Weakest booking time</div><div style={{color:C.text,fontSize:13,marginTop:4}}>{patterns.weakTime.label} · {patterns.weakTime.winRate}% profitable · {formatINR(patterns.weakTime.pnl)} net booked</div></div>
-                <div style={{background:C.accent+"12",borderRadius:9,padding:12}}><div style={{color:C.accent,fontWeight:800,fontSize:12}}>Strongest weekday</div><div style={{color:C.text,fontSize:13,marginTop:4}}>{patterns.bestDay.label} · {patterns.bestDay.winRate}% profitable</div></div>
-              </>:<div style={{color:C.muted,fontSize:13}}>Insights will appear after positions are booked.</div>}
-            </div>
-            <div style={card}><div style={{color:C.text,fontWeight:800,marginBottom:10}}>Weekday consistency</div>{patterns.weekdays.map(row=><div key={row.label} style={{display:"grid",gridTemplateColumns:"80px 1fr 54px",gap:8,alignItems:"center",marginBottom:8,fontSize:11}}><span style={{color:C.muted}}>{row.label}</span><div style={{height:7,background:C.bg,borderRadius:9,overflow:"hidden"}}><div style={{width:`${row.winRate}%`,height:"100%",background:row.winRate>=50?C.green:C.red}}/></div><span style={{color:row.winRate>=50?C.green:C.red,fontWeight:800,textAlign:"right"}}>{row.winRate}%</span></div>)}</div>
+          <div style={{...card,marginBottom:18}}><div style={{color:C.text,fontWeight:800,marginBottom:12}}>Weekday consistency · selected month</div><div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12}}>{monthPatterns.weekdays.map(row=><div key={row.label} style={{background:C.bg,borderRadius:9,padding:12}}><div style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11,marginBottom:8}}><span style={{color:C.muted}}>{row.label}</span><span style={{color:row.winRate>=50?C.green:C.red,fontWeight:800}}>{row.winRate}%</span></div><div style={{height:7,background:C.border,borderRadius:9,overflow:"hidden"}}><div style={{width:`${row.winRate}%`,height:"100%",background:row.winRate>=50?C.green:C.red}}/></div><div style={{color:C.muted,fontSize:10,marginTop:7}}>{row.trades} booked matches · {formatINR(row.pnl)}</div></div>)}</div></div>
+          <div style={{marginBottom:8}}><div style={{color:C.text,fontWeight:850,fontSize:16}}>Three-month behavioural insights</div><div style={{color:C.muted,fontSize:11,marginTop:3}}>Only these three cards use {threeMonthStartDate} to {insightsMonth}. Calendar and headline figures remain selected-month only.</div>{sampleWarning&&<div style={{color:C.yellow,fontSize:11,marginTop:7}}>Limited sample: confidence improves after at least 10 genuine market-session bookings.</div>}</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(240px,1fr))",gap:14}}>
+            {patterns.bestTime ? <>
+              <div style={{...card,borderTop:`3px solid ${C.green}`}}><div style={{color:C.green,fontWeight:850,fontSize:14}}>Most profitable booking time</div><div style={{color:C.text,fontSize:22,fontWeight:900,marginTop:10}}>{patterns.bestTime.label}</div><div style={{color:C.muted,fontSize:12,lineHeight:1.7,marginTop:9}}><strong style={{color:C.green}}>{patterns.bestTime.winRate}%</strong> profitable across {patterns.bestTime.trades} genuine booked matches.<br/>Combined booked result: <strong style={{color:patterns.bestTime.pnl>=0?C.green:C.red}}>{formatINR(patterns.bestTime.pnl)}</strong>.<br/>Use this as a behavioural observation, not a trade signal.</div></div>
+              <div style={{...card,borderTop:`3px solid ${C.red}`}}><div style={{color:C.red,fontWeight:850,fontSize:14}}>Weakest booking time</div><div style={{color:C.text,fontSize:22,fontWeight:900,marginTop:10}}>{patterns.weakTime.label}</div><div style={{color:C.muted,fontSize:12,lineHeight:1.7,marginTop:9}}><strong style={{color:C.red}}>{patterns.weakTime.winRate}%</strong> profitable across {patterns.weakTime.trades} genuine booked matches.<br/>Combined booked result: <strong style={{color:patterns.weakTime.pnl>=0?C.green:C.red}}>{formatINR(patterns.weakTime.pnl)}</strong>.<br/>Review exits and risk decisions commonly made in this hour.</div></div>
+              <div style={{...card,borderTop:`3px solid ${C.accent}`}}><div style={{color:C.accent,fontWeight:850,fontSize:14}}>Strongest weekday</div><div style={{color:C.text,fontSize:22,fontWeight:900,marginTop:10}}>{patterns.bestDay.label}</div><div style={{color:C.muted,fontSize:12,lineHeight:1.7,marginTop:9}}><strong style={{color:C.accent}}>{patterns.bestDay.winRate}%</strong> profitable across {patterns.bestDay.trades} genuine booked matches.<br/>Combined booked result: <strong style={{color:patterns.bestDay.pnl>=0?C.green:C.red}}>{formatINR(patterns.bestDay.pnl)}</strong>.<br/>Compare position sizing and trade selection against weaker weekdays.</div></div>
+            </>:<div style={{...card,gridColumn:"1 / -1",color:C.muted}}>Insights will appear after genuine market-session positions are booked.</div>}
           </div>
         </div>
       </div>;
