@@ -12,9 +12,11 @@ export function validateClientCapital(client) {
   const type = client.accountType || "trading";
   const deposit = normalizeMoney(client.depositAmount);
   const strategyCapital = normalizeMoney(client.monthlyStrategyCapital);
+  const adhocDeposit = normalizeMoney(client.adhocDeposit);
   if (!["trading", "investor", "hybrid"].includes(type)) errors.push("Select a valid account type");
   if (["investor", "hybrid"].includes(type) && deposit <= 0) errors.push("Investor deposited fund must be greater than zero");
   if (["trading", "hybrid"].includes(type) && strategyCapital <= 0) errors.push("Monthly strategy capital must be greater than zero");
+  if (adhocDeposit < 0) errors.push("Adhoc deposit cannot be negative");
   return errors;
 }
 

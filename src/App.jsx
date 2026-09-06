@@ -2289,7 +2289,7 @@ export default function BackOffice() {
   };
 
   // ── Admin: Add Client ──
-  const emptyClient = { id: "", name: "", email: "", phone: "", password: "", accountType: "trading", depositAmount: "", monthlyStrategyCapital: "" };
+  const emptyClient = { id: "", name: "", email: "", phone: "", password: "", accountType: "trading", depositAmount: "", monthlyStrategyCapital: "", adhocDeposit: "" };
   const [newClient, setNewClient] = useState(emptyClient);
   const [editClient, setEditClient] = useState(null);
   const [editClientOriginalId, setEditClientOriginalId] = useState("");
@@ -2301,7 +2301,7 @@ export default function BackOffice() {
     if (state.clients.find((c) => c.id === newClient.id)) return notify("Client ID already exists", "error");
     const capitalErrors = validateClientCapital(newClient);
     if (capitalErrors.length) return notify(capitalErrors[0], "error");
-    const client = { ...newClient, depositAmount: Number(newClient.depositAmount) || 0, monthlyStrategyCapital: Number(newClient.monthlyStrategyCapital) || 0, created_at: new Date().toISOString() };
+    const client = { ...newClient, depositAmount: Number(newClient.depositAmount) || 0, monthlyStrategyCapital: Number(newClient.monthlyStrategyCapital) || 0, adhocDeposit: Number(newClient.adhocDeposit) || 0, created_at: new Date().toISOString() };
     setState((s) => ({ ...s, clients: [...s.clients, client] }));
     withSync(() => sb.upsert("clients", client));
     setNewClient(emptyClient);
@@ -2315,6 +2315,7 @@ export default function BackOffice() {
       accountType:client.accountType || "trading",
       depositAmount:Number(client.depositAmount) || 0,
       monthlyStrategyCapital:Number(client.monthlyStrategyCapital) || 0,
+      adhocDeposit:Number(client.adhocDeposit) || 0,
       adminId:client.adminId || "",
     });
     setEditClientOriginalId(client.id);
@@ -2379,6 +2380,7 @@ export default function BackOffice() {
       accountType:editClient.accountType || "trading",
       depositAmount:Number(editClient.depositAmount) || 0,
       monthlyStrategyCapital:Number(editClient.monthlyStrategyCapital) || 0,
+      adhocDeposit:Number(editClient.adhocDeposit) || 0,
       adminId:editClient.adminId || null,
     };
     if (!updated.id || !updated.name || !updated.password) return notify("Client ID, name and password are required", "error");
@@ -2418,7 +2420,7 @@ export default function BackOffice() {
         monthlyTargets:(s.monthlyTargets||[]).map(t=>t.clientId===oldId?{...t,clientId:saved.id}:t),
       }));
       setLivePositions(rows=>rows.map(p=>p.clientId===oldId?{...p,clientId:saved.id}:p));
-      pushAudit("EDITED", saved.id, `Account details updated${oldId!==saved.id?` — code ${oldId} → ${saved.id}`:""}; deposit ${formatINR(saved.depositAmount)}; strategy capital ${formatINR(saved.monthlyStrategyCapital)}`);
+      pushAudit("EDITED", saved.id, `Account details updated${oldId!==saved.id?` — code ${oldId} → ${saved.id}`:""}; cash deposit ${formatINR(saved.depositAmount)}; cash strategy capital ${formatINR(saved.monthlyStrategyCapital)}; adhoc deposit ${formatINR(saved.adhocDeposit)}`);
       setEditClient(null);
       setEditClientOriginalId("");
       setModal(null);
@@ -3427,6 +3429,14 @@ export default function BackOffice() {
 
         return (
           <div style={{maxWidth:960,margin:"0 auto"}}>
+            {/* Daily quote — dashboard top only */}
+            <div style={{padding:"20px 24px",marginBottom:24,background:`linear-gradient(135deg,#1e3a5f,#1e3a8a)`,
+              borderRadius:14,boxShadow:"0 4px 20px rgba(30,58,138,0.2)"}}>
+              <div style={{color:"#93c5fd",fontSize:10,fontWeight:700,letterSpacing:2,marginBottom:8,textTransform:"uppercase"}}>Daily Market Quote</div>
+              <div style={{color:"#ffffff",fontSize:15,fontStyle:"italic",lineHeight:1.7,marginBottom:8}}>"{todayQuote.text}"</div>
+              <div style={{color:"#93c5fd",fontSize:12}}>— {todayQuote.author}</div>
+            </div>
+
             {/* Greeting header */}
             <div style={{marginBottom:24,padding:"24px 28px",
               background:`linear-gradient(135deg, ${C.accent}18 0%, ${C.accent}05 100%)`,
@@ -3515,13 +3525,6 @@ export default function BackOffice() {
               </div>
             </div>
 
-            {/* Quote */}
-            <div style={{padding:"20px 24px",background:`linear-gradient(135deg,#1e3a5f,#1e3a8a)`,
-              borderRadius:14,boxShadow:"0 4px 20px rgba(30,58,138,0.2)"}}>
-              <div style={{color:"#93c5fd",fontSize:10,fontWeight:700,letterSpacing:2,marginBottom:8,textTransform:"uppercase"}}>Market Insight</div>
-              <div style={{color:"#ffffff",fontSize:15,fontStyle:"italic",lineHeight:1.7,marginBottom:8}}>"{todayQuote.text}"</div>
-              <div style={{color:"#93c5fd",fontSize:12}}>— {todayQuote.author}</div>
-            </div>
           </div>
         );
       }
@@ -3536,6 +3539,18 @@ export default function BackOffice() {
 
       return (
         <div>
+          {/* Daily quote — dashboard top only */}
+          <div style={{padding:"20px 28px",marginBottom:24,background:"linear-gradient(135deg,#1e3a5f,#1e3a8a)",
+            borderRadius:14,boxShadow:"0 4px 20px rgba(30,58,138,0.2)",
+            display:"flex",alignItems:"center",gap:20,flexWrap:"wrap"}}>
+            <div style={{fontSize:36,color:"#ffffff20",fontFamily:"Georgia",lineHeight:1,flexShrink:0}}>"</div>
+            <div style={{flex:1}}>
+              <div style={{color:"#93c5fd",fontSize:10,fontWeight:700,letterSpacing:2,marginBottom:6,textTransform:"uppercase"}}>Daily Market Quote</div>
+              <div style={{color:"#ffffff",fontSize:14,fontStyle:"italic",lineHeight:1.7,marginBottom:6}}>{todayQuote.text}</div>
+              <div style={{color:"#93c5fd",fontSize:12}}>— {todayQuote.author}</div>
+            </div>
+          </div>
+
           {/* Greeting bar */}
           <div style={{marginBottom:24,display:"flex",justifyContent:"space-between",
             alignItems:"center",flexWrap:"wrap",gap:12}}>
@@ -3778,18 +3793,6 @@ export default function BackOffice() {
             </div>
           </div>
 
-          {/* Quote banner */}
-          <div style={{padding:"20px 28px",background:"linear-gradient(135deg,#1e3a5f,#1e3a8a)",
-            borderRadius:14,boxShadow:"0 4px 20px rgba(30,58,138,0.2)",
-            display:"flex",alignItems:"center",gap:20,flexWrap:"wrap"}}>
-            <div style={{fontSize:36,color:"#ffffff20",fontFamily:"Georgia",lineHeight:1,flexShrink:0}}>"</div>
-            <div style={{flex:1}}>
-              <div style={{color:"#ffffff",fontSize:14,fontStyle:"italic",lineHeight:1.7,marginBottom:6}}>
-                {todayQuote.text}
-              </div>
-              <div style={{color:"#93c5fd",fontSize:12}}>— {todayQuote.author}</div>
-            </div>
-          </div>
         </div>
       );
     }
@@ -3812,8 +3815,8 @@ export default function BackOffice() {
                   <td style={{ padding:"12px", color:C.text }}>
                     <button onClick={()=>startEditClient(c)} title="Click to add or change fund"
                       style={{background:C.accent+"0b",border:`1px dashed ${C.accent}66`,borderRadius:7,padding:"7px 9px",color:C.text,cursor:"pointer",textAlign:"left",minWidth:150}}>
-                      {["investor","hybrid"].includes(c.accountType) && <div>Deposit: {formatINR(Number(c.depositAmount)||0)}</div>}
-                      {(c.accountType === "trading" || c.accountType === "hybrid" || !c.accountType) && <div>Strategy: {formatINR(Number(c.monthlyStrategyCapital)||0)}</div>}
+                      {["investor","hybrid"].includes(c.accountType) && <div>Cash Deposit: {formatINR(Number(c.depositAmount)||0)}</div>}
+                      {(c.accountType === "trading" || c.accountType === "hybrid" || !c.accountType) && <div>Cash Strategy: {formatINR(Number(c.monthlyStrategyCapital)||0)}</div>}
                       <div style={{fontSize:10,color:C.accent,marginTop:3}}>✏️ Click to edit fund</div>
                     </button>
                   </td>
@@ -5928,15 +5931,20 @@ export default function BackOffice() {
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
               <div style={{marginBottom:14}}>
-                <label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Total Deposited Fund (₹){["investor","hybrid"].includes(editClient.accountType)?" *":""}</label>
+                <label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Cash Deposit (₹){["investor","hybrid"].includes(editClient.accountType)?" *":""}</label>
                 <input type="number" min="0" value={editClient.depositAmount} onChange={e=>setEditClient(s=>({...s,depositAmount:e.target.value}))} style={input}/>
                 {investorCommitted>0 && <div style={{fontSize:10,color:C.yellow,marginTop:4}}>Minimum allowed: {formatINR(investorCommitted)} active investor allocation</div>}
               </div>
               <div style={{marginBottom:14}}>
-                <label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Monthly Strategy Capital (₹){["trading","hybrid"].includes(editClient.accountType)?" *":""}</label>
+                <label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Cash Strategy Capital (₹){["trading","hybrid"].includes(editClient.accountType)?" *":""}</label>
                 <input type="number" min="0" value={editClient.monthlyStrategyCapital} onChange={e=>setEditClient(s=>({...s,monthlyStrategyCapital:e.target.value}))} style={input}/>
                 {strategyCommitted>0 && <div style={{fontSize:10,color:C.yellow,marginTop:4}}>Minimum allowed: {formatINR(strategyCommitted)} active strategy allocation</div>}
               </div>
+            </div>
+            <div style={{marginBottom:14}}>
+              <label style={{color:C.muted,fontSize:12,display:"block",marginBottom:5}}>Adhoc Deposit (₹)</label>
+              <input type="number" min="0" value={editClient.adhocDeposit} onChange={e=>setEditClient(s=>({...s,adhocDeposit:e.target.value}))} style={input}/>
+              <div style={{fontSize:10,color:C.muted,marginTop:4}}>Stored separately. Currently excluded from Fund / Capital, investor allocation, ownership, ROI and P&amp;L.</div>
             </div>
             <div style={{display:"flex",gap:10,marginTop:8}}>
               <button disabled={editClientSaving} style={{...btn(C.green),opacity:editClientSaving?0.6:1}} onClick={saveClientAccount}><Icon name="check" size={14}/> {editClientSaving?"Saving safely...":"Save All Changes"}</button>
@@ -5964,8 +5972,10 @@ export default function BackOffice() {
               <option value="hybrid">Hybrid Account</option>
             </select>
           </div>
-          {["investor","hybrid"].includes(newClient.accountType) && field("Total Deposited Fund (₹) *", "depositAmount", newClient, setNewClient, "number")}
-          {["trading","hybrid"].includes(newClient.accountType) && field("Monthly Strategy Capital (₹) *", "monthlyStrategyCapital", newClient, setNewClient, "number")}
+          {["investor","hybrid"].includes(newClient.accountType) && field("Cash Deposit (₹) *", "depositAmount", newClient, setNewClient, "number")}
+          {["trading","hybrid"].includes(newClient.accountType) && field("Cash Strategy Capital (₹) *", "monthlyStrategyCapital", newClient, setNewClient, "number")}
+          {field("Adhoc Deposit (₹)", "adhocDeposit", newClient, setNewClient, "number")}
+          <div style={{fontSize:10,color:C.muted,marginTop:-8,marginBottom:14}}>Stored separately. Currently excluded from Fund / Capital, investor allocation, ownership, ROI and P&amp;L.</div>
           <div style={{padding:10,background:C.accent+"0d",border:`1px solid ${C.accent}22`,borderRadius:8,color:C.muted,fontSize:11,lineHeight:1.5}}>
             Trading accounts own broker trades. Investor accounts receive combined economic participation. Hybrid accounts support both. This selection does not change FIFO or trade records.
           </div>
