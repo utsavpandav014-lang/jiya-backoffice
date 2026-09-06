@@ -4735,7 +4735,13 @@ export default function BackOffice() {
         ? (insightClientFilter === "all" ? visibleClients : visibleClients.filter(c=>c.id===insightClientFilter))
         : [currentClient].filter(Boolean);
       const allocationActiveForMatch = (allocation, match) => {
-        const stamp = new Date(`${match.date}T${match.time || "15:30:00"}+05:30`).getTime();
+        const [year,month,day] = String(match.date||"").split("-").map(Number);
+        const parsed = String(match.time||"15:30:00").match(/(\d+):(\d+)(?::(\d+))?\s*(AM|PM)?/i);
+        let hour = Number(parsed?.[1]||15);
+        const minute = Number(parsed?.[2]||30), second = Number(parsed?.[3]||0), meridiem=(parsed?.[4]||"").toUpperCase();
+        if (meridiem==="PM" && hour!==12) hour+=12;
+        if (meridiem==="AM" && hour===12) hour=0;
+        const stamp = year&&month&&day ? Date.UTC(year,month-1,day,hour-5,minute-30,second) : NaN;
         const starts = new Date(allocation.effectiveFrom).getTime();
         const ends = allocation.effectiveTo ? new Date(allocation.effectiveTo).getTime() : Infinity;
         return Number.isFinite(stamp) && starts <= stamp && stamp < ends && allocation.status !== "cancelled" && allocation.status !== "closed";
