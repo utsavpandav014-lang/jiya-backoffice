@@ -99,5 +99,5 @@ grant execute on function public.get_daily_interest_settings(text,text),public.s
 
 do $$ begin
   if exists(select 1 from cron.job where jobname='jiya-daily-interest') then perform cron.unschedule('jiya-daily-interest'); end if;
-  perform cron.schedule('jiya-daily-interest','5 0 * * *','select private.apply_daily_interest();');
+  perform cron.schedule('jiya-daily-interest','30 13 * * *','select private.apply_daily_interest();');
 end $$;
