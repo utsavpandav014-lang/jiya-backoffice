@@ -236,6 +236,7 @@ const INITIAL_STATE = {
   carryForwardBatches: [],
   monthlyTargets: [], // presentation goals only; consumes canonical P&L output
   dailyInterestSettings: [], // financing rules only; never changes capital/FIFO
+  monthlySoftwareSettings: [], // fixed monthly software fees for trading accounts
 };
 
 // ── Plan feature access ──────────────────────────────
@@ -1650,7 +1651,7 @@ export default function BackOffice() {
       const ownFilter = isClientSession ? `?clientId=eq.${encodeURIComponent(auth.clientId)}` : "?";
       const tradeFilter = isClientSession ? `?clientId=in.(${relatedTradeIds.map(encodeURIComponent).join(",")})` : "?";
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, carryForwardBatches, monthlyTargets, leaderboard, dailyInterestSettings] = await Promise.all([
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, carryForwardBatches, monthlyTargets, leaderboard, dailyInterestSettings, monthlySoftwareSettings] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         // CRITICAL: id is the unique tie-breaker. Hundreds of broker rows can
         // share the same date/time; offset pagination without id can skip or
@@ -1668,6 +1669,7 @@ export default function BackOffice() {
         sb.rpc("get_monthly_targets", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
         sb.rpc("get_performance_leaderboard", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||"",p_month:new Date().toISOString().slice(0,7)}).catch(() => []),
         isClientSession ? Promise.resolve([]) : sb.rpc("get_daily_interest_settings", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
+        isClientSession ? Promise.resolve([]) : sb.rpc("get_monthly_software_settings", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -1689,6 +1691,7 @@ export default function BackOffice() {
         carryForwardBatches: Array.isArray(carryForwardBatches) ? carryForwardBatches : [],
         monthlyTargets: Array.isArray(monthlyTargets) ? monthlyTargets : [],
         dailyInterestSettings: Array.isArray(dailyInterestSettings) ? dailyInterestSettings : [],
+        monthlySoftwareSettings: Array.isArray(monthlySoftwareSettings) ? monthlySoftwareSettings : [],
       }));
       setPerformanceWinners(Array.isArray(leaderboard) ? leaderboard : []);
       setSyncStatus("saved");
@@ -1789,6 +1792,8 @@ export default function BackOffice() {
   const [addInterestForm, setAddInterestForm] = useState({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
   const [dailyInterestForm, setDailyInterestForm] = useState({clientId:"",capital:"",annualRate:""});
   const [dailyInterestSaving, setDailyInterestSaving] = useState(false);
+  const [monthlySoftwareForm,setMonthlySoftwareForm]=useState({clientId:"",amount:""});
+  const [monthlySoftwareSaving,setMonthlySoftwareSaving]=useState(false);
   const [bulkChargesForm, setBulkChargesForm] = useState({yearMonth:new Date().toISOString().slice(0,7),entryType:"software",rows:[]});
   const [bulkChargesSaving, setBulkChargesSaving] = useState(false);
   const [tradesClientFilter, setTradesClientFilter] = useState("all");
@@ -1869,6 +1874,9 @@ export default function BackOffice() {
     try { await withSync(()=>sb.rpc("pause_daily_interest_setting",{p_user:auth.loginUser,p_password:auth.loginSecret,p_client_id:clientId})); await refreshDailyInterestSettings(); notify("Daily interest stopped after today"); }
     catch(error){notify(`Could not stop daily interest: ${error.message}`,"error");}
   };
+  const refreshMonthlySoftwareSettings=async()=>{const rows=await sb.rpc("get_monthly_software_settings",{p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""});setState(s=>({...s,monthlySoftwareSettings:Array.isArray(rows)?rows:[]}));};
+  const saveMonthlySoftwareSetting=async()=>{const amount=Number(monthlySoftwareForm.amount);if(!monthlySoftwareForm.clientId||!(amount>0))return notify("Select a trading client and enter a valid monthly amount","error");setMonthlySoftwareSaving(true);try{await withSync(()=>sb.rpc("save_monthly_software_setting",{p_user:auth.loginUser,p_password:auth.loginSecret,p_client:monthlySoftwareForm.clientId,p_amount:amount}));await refreshMonthlySoftwareSettings();setMonthlySoftwareForm({clientId:"",amount:""});notify("Monthly software charge automation activated");}catch(error){notify(`Software automation save failed: ${error.message}`,"error");}finally{setMonthlySoftwareSaving(false);}};
+  const pauseMonthlySoftware=async clientId=>{try{await withSync(()=>sb.rpc("pause_monthly_software_setting",{p_user:auth.loginUser,p_password:auth.loginSecret,p_client:clientId}));await refreshMonthlySoftwareSettings();notify("Monthly software automation stopped");}catch(error){notify(`Could not stop software automation: ${error.message}`,"error");}};
   const openBulkCharges = () => {
     const rows=state.clients.filter(c=>c.accountType==="trading").map(c=>({clientId:c.id,name:c.name,amount:""}));
     setBulkChargesForm({yearMonth:new Date().toISOString().slice(0,7),entryType:"software",rows}); setModal("bulkCharges");
@@ -5376,6 +5384,17 @@ export default function BackOffice() {
               <button disabled={dailyInterestSaving} style={{...btn(C.purple),opacity:dailyInterestSaving?.6:1,height:38}} onClick={saveDailyInterestSetting}>{dailyInterestSaving?"Saving...":"Activate"}</button>
             </div>
             {(state.dailyInterestSettings||[]).some(s=>s.active)&&<div style={{marginTop:16,overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr>{["Client","Capital","Yearly Rate","Per Day","Started","Action"].map(h=><th key={h} style={{textAlign:"left",padding:"7px 9px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead><tbody>{state.dailyInterestSettings.filter(s=>s.active).map(s=><tr key={s.id}><td style={{padding:"9px",color:C.text}}>{s.clientName} ({s.clientId})</td><td style={{padding:"9px",color:C.text}}>{formatINR(s.capital)}</td><td style={{padding:"9px",color:C.purple,fontWeight:700}}>{Number(s.annualRate)}%</td><td style={{padding:"9px",color:C.yellow,fontWeight:700}}>{formatINR(s.dailyAmount)}</td><td style={{padding:"9px",color:C.muted}}>{s.effectiveFrom}</td><td style={{padding:"9px"}}><button style={{...btn(C.red),padding:"5px 9px"}} onClick={()=>pauseDailyInterest(s.clientId)}>Stop</button></td></tr>)}</tbody></table></div>}
+          </div>
+
+          <div style={{...card,marginBottom:20,borderLeft:`3px solid ${C.accent}`}}>
+            <div style={{color:C.text,fontWeight:800,fontSize:15}}>Monthly Software Charges Automation</div>
+            <div style={{color:C.muted,fontSize:11,margin:"4px 0 16px"}}>Trading accounts only · Fixed amount posted once on the month’s final date at 7:00 PM IST · Manual software charges remain additional</div>
+            <div style={{display:"grid",gridTemplateColumns:"2fr 1fr auto",gap:10,alignItems:"end"}}>
+              <div><label style={{color:C.muted,fontSize:11,display:"block",marginBottom:5}}>Trading Client</label><select value={monthlySoftwareForm.clientId} onChange={e=>setMonthlySoftwareForm(s=>({...s,clientId:e.target.value}))} style={input}><option value="">Select client...</option>{state.clients.filter(c=>c.accountType==="trading").map(c=><option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}</select></div>
+              <div><label style={{color:C.muted,fontSize:11,display:"block",marginBottom:5}}>Monthly Amount (₹)</label><input type="number" min="0" value={monthlySoftwareForm.amount} onChange={e=>setMonthlySoftwareForm(s=>({...s,amount:e.target.value}))} style={input}/></div>
+              <button disabled={monthlySoftwareSaving} style={{...btn(C.accent),opacity:monthlySoftwareSaving?.6:1,height:38}} onClick={saveMonthlySoftwareSetting}>{monthlySoftwareSaving?"Saving...":"Activate"}</button>
+            </div>
+            {(state.monthlySoftwareSettings||[]).some(s=>s.active)&&<div style={{marginTop:16,overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr>{["Client","Monthly Amount","Started","Posting Time","Action"].map(h=><th key={h} style={{textAlign:"left",padding:"7px 9px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead><tbody>{state.monthlySoftwareSettings.filter(s=>s.active).map(s=><tr key={s.id}><td style={{padding:9,color:C.text}}>{s.clientName} ({s.clientId})</td><td style={{padding:9,color:C.purple,fontWeight:700}}>{formatINR(s.amount)}</td><td style={{padding:9,color:C.muted}}>{s.effectiveFrom}</td><td style={{padding:9,color:C.muted}}>Last date · 7:00 PM IST</td><td style={{padding:9}}><button style={{...btn(C.red),padding:"5px 9px"}} onClick={()=>pauseMonthlySoftware(s.clientId)}>Stop</button></td></tr>)}</tbody></table></div>}
           </div>
 
           {/* Effective from history */}
