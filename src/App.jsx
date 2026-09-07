@@ -4809,7 +4809,7 @@ export default function BackOffice() {
             <input type="month" value={insightsMonth} onChange={e=>setInsightsMonth(e.target.value)} style={{...input,width:150}}/>
           </div>
         </div>
-        <div style={{...card,marginBottom:18,padding:18,border:`1px solid ${C.yellow}55`,background:`linear-gradient(135deg,${C.yellow}10,${C.card})`}}>
+        {(auth.role !== "client" || currentClient?.accountType !== "investor") && <div style={{...card,marginBottom:18,padding:18,border:`1px solid ${C.yellow}55`,background:`linear-gradient(135deg,${C.yellow}10,${C.card})`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"end",gap:10,marginBottom:14}}><div><div style={{color:C.yellow,fontWeight:900,fontSize:16}}>🏆 Performance Winners</div><div style={{color:C.muted,fontSize:11,marginTop:3}}>Top 3 trading accounts by current-month ROI · P&amp;L privacy protected</div></div><div style={{color:C.muted,fontSize:11}}>{currentMonthStr}</div></div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(190px,1fr))",gap:12}}>
             {winners.map((winner,index)=>{
@@ -4818,7 +4818,7 @@ export default function BackOffice() {
             })}
             {!winners.length && <div style={{gridColumn:"1 / -1",color:C.muted,fontSize:12,padding:8}}>Leaderboard will appear after the admin’s current-month snapshot is prepared.</div>}
           </div>
-        </div>
+        </div>}
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(150px,1fr))",gap:12,marginBottom:18}}>
           {[
             ["Month Net P&L",`${monthNet>=0?"+":"−"}${formatINR(Math.abs(monthNet))}`,monthNet>=0?C.green:C.red],
@@ -4979,6 +4979,37 @@ export default function BackOffice() {
               const totalGross = results.reduce((sum,row)=>sum+row.gross,0);
               const pending = results.reduce((sum, row) => sum + row.pendingCount, 0);
               const investorOpen = investorOpenPos(client.id);
+              const investorClosedByContract = new Map();
+              const allocationActiveForClose = (allocation, match) => {
+                const [year,month,day] = String(match.date||"").split("-").map(Number);
+                const parsed = String(match.time||"09:15").match(/(\d+):(\d+)(?::(\d+))?\s*(AM|PM)?/i);
+                let hour = parsed ? Number(parsed[1]) : 9;
+                const minute = parsed ? Number(parsed[2]) : 15;
+                const second = parsed?.[3] ? Number(parsed[3]) : 0;
+                const meridiem = (parsed?.[4]||"").toUpperCase();
+                if (meridiem==="PM" && hour!==12) hour+=12;
+                if (meridiem==="AM" && hour===12) hour=0;
+                const closedAt = year&&month&&day ? Date.UTC(year,month-1,day,hour-5,minute-30,second) : NaN;
+                const startsAt = new Date(allocation.effectiveFrom).getTime();
+                const endsAt = allocation.effectiveTo ? new Date(allocation.effectiveTo).getTime() : Infinity;
+                return Number.isFinite(closedAt) && startsAt <= closedAt && closedAt < endsAt && allocation.status !== "cancelled";
+              };
+              for (const allocation of (state.investorAllocations||[]).filter(a=>a.investorClientId===client.id && a.status!=="cancelled")) {
+                const ownership = Number(allocation.ownershipPct||0)/100;
+                if (!(ownership > 0)) continue;
+                for (const position of closedPositions.filter(p=>p.clientId===allocation.strategyClientId)) {
+                  for (const match of position.trades||[]) {
+                    if (!monthInFilter(String(match.date||"").slice(0,7)) || !allocationActiveForClose(allocation,match)) continue;
+                    const existing = investorClosedByContract.get(position.contract) || {contract:position.contract,totalPnl:0,matches:0};
+                    existing.totalPnl += Number(match.pnl||0)*ownership;
+                    existing.matches += 1;
+                    investorClosedByContract.set(position.contract,existing);
+                  }
+                }
+              }
+              const investorClosed = [...investorClosedByContract.values()]
+                .map(row=>({...row,totalPnl:+row.totalPnl.toFixed(2)}))
+                .sort((a,b)=>a.contract.localeCompare(b.contract));
               return (
                 <div key={client.id} style={{ ...card, marginBottom:24 }}>
                   {isAdmin && <div style={{ color:C.accent, fontWeight:700, fontSize:15, marginBottom:16 }}>
@@ -5004,6 +5035,19 @@ export default function BackOffice() {
                       <td style={{padding:"10px 12px",textAlign:"right",color:row.pnl>=0?C.green:C.red,fontWeight:700}}>{row.complete?(row.pnl>=0?"+":"−")+"₹"+Math.abs(row.pnl).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2}):"Pending snapshot"}</td>
                     </tr>)}</tbody>
                   </table>
+                  {investorClosed.length > 0 && <details style={{marginTop:16}}>
+                    <summary style={{color:C.muted,fontSize:12,cursor:"pointer",padding:"8px 0",userSelect:"none"}}>
+                      📋 View closed contracts ({investorClosed.length})
+                    </summary>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginTop:10}}>
+                      <thead><tr>{["Contract","Gross Allocated P&L"].map(h=><th key={h} style={{textAlign:"left",padding:"6px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+                      <tbody>{investorClosed.map(row=><tr key={row.contract} style={{borderBottom:`1px solid ${C.border}11`}}>
+                        <td style={{padding:"8px 12px",color:C.accent}}>{row.contract}</td>
+                        <td style={{padding:"8px 12px",color:row.totalPnl>=0?C.green:C.red,fontWeight:600}}>₹{row.totalPnl.toFixed(2)}</td>
+                      </tr>)}</tbody>
+                    </table>
+                  </details>}
+                  {investorClosed.length===0 && <div style={{color:C.muted,fontSize:13,marginTop:16}}>No closed positions yet.</div>}
                 </div>
               );
             }
