@@ -4,6 +4,7 @@ import { buildCarryForwardPreview, verifyCarryForwardPairs } from "./monthEndCar
 import { closedPositionSlicesForMonth, closedPositionSlicesInFilter, isCarryForwardTrade, openPositionMtm } from "./monthPnlAttribution.js";
 import { daysRemainingInMonth, targetTrackerState } from "./targetTracker.js";
 import { investorPnlForMonth as calculateInvestorPnlForMonth } from "./investorPnl.js";
+import { calculateDailyInterest } from "./interestAutomation.js";
 import { investorPositions as calculateInvestorPositions } from "./investorPositions.js";
 import { dailyTradingResults, positionsAsOfDate, tradingPatterns } from "./tradingInsights.js";
 
@@ -234,6 +235,7 @@ const INITIAL_STATE = {
   investorAllocations: [], // allocation layer only; never changes broker trades/FIFO
   carryForwardBatches: [],
   monthlyTargets: [], // presentation goals only; consumes canonical P&L output
+  dailyInterestSettings: [], // financing rules only; never changes capital/FIFO
 };
 
 // ── Plan feature access ──────────────────────────────
@@ -1648,7 +1650,7 @@ export default function BackOffice() {
       const ownFilter = isClientSession ? `?clientId=eq.${encodeURIComponent(auth.clientId)}` : "?";
       const tradeFilter = isClientSession ? `?clientId=in.(${relatedTradeIds.map(encodeURIComponent).join(",")})` : "?";
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, carryForwardBatches, monthlyTargets, leaderboard] = await Promise.all([
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, carryForwardBatches, monthlyTargets, leaderboard, dailyInterestSettings] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         // CRITICAL: id is the unique tie-breaker. Hundreds of broker rows can
         // share the same date/time; offset pagination without id can skip or
@@ -1665,6 +1667,7 @@ export default function BackOffice() {
         fetchAll("carry_forward_batches", "?order=month.desc").catch(() => []),
         sb.rpc("get_monthly_targets", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
         sb.rpc("get_performance_leaderboard", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||"",p_month:new Date().toISOString().slice(0,7)}).catch(() => []),
+        isClientSession ? Promise.resolve([]) : sb.rpc("get_daily_interest_settings", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -1685,6 +1688,7 @@ export default function BackOffice() {
         investorAllocations: Array.isArray(investorAllocations) ? investorAllocations : [],
         carryForwardBatches: Array.isArray(carryForwardBatches) ? carryForwardBatches : [],
         monthlyTargets: Array.isArray(monthlyTargets) ? monthlyTargets : [],
+        dailyInterestSettings: Array.isArray(dailyInterestSettings) ? dailyInterestSettings : [],
       }));
       setPerformanceWinners(Array.isArray(leaderboard) ? leaderboard : []);
       setSyncStatus("saved");
@@ -1783,6 +1787,10 @@ export default function BackOffice() {
   const [pnlDateFrom, setPnlDateFrom] = useState("");
   const [pnlDateTo, setPnlDateTo] = useState("");
   const [addInterestForm, setAddInterestForm] = useState({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
+  const [dailyInterestForm, setDailyInterestForm] = useState({clientId:"",capital:"",annualRate:""});
+  const [dailyInterestSaving, setDailyInterestSaving] = useState(false);
+  const [bulkChargesForm, setBulkChargesForm] = useState({yearMonth:new Date().toISOString().slice(0,7),entryType:"software",rows:[]});
+  const [bulkChargesSaving, setBulkChargesSaving] = useState(false);
   const [tradesClientFilter, setTradesClientFilter] = useState("all");
   const [insightClientFilter, setInsightClientFilter] = useState("all");
   const [chargesEdit, setChargesEdit] = useState(null); // working copy for charges edit
@@ -1839,6 +1847,41 @@ export default function BackOffice() {
     setState(s => ({ ...s, interest: (s.interest||[]).filter(i => i.id !== id) }));
     withSync(() => sb.delete("interest", id));
     notify("Interest entry removed");
+  };
+
+  const refreshDailyInterestSettings = async () => {
+    const rows = await sb.rpc("get_daily_interest_settings",{p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""});
+    setState(s=>({...s,dailyInterestSettings:Array.isArray(rows)?rows:[]}));
+  };
+  const saveDailyInterestSetting = async () => {
+    const capital=Number(dailyInterestForm.capital), annualRate=Number(dailyInterestForm.annualRate);
+    if (!dailyInterestForm.clientId || !(capital>0) || !(annualRate>0)) return notify("Select a trading client and enter valid capital and yearly rate","error");
+    setDailyInterestSaving(true);
+    try {
+      await withSync(()=>sb.rpc("save_daily_interest_setting",{p_user:auth.loginUser,p_password:auth.loginSecret,p_client_id:dailyInterestForm.clientId,p_capital:capital,p_annual_rate:annualRate}));
+      const interest=await sb.select("interest","?order=created_at.asc");
+      setState(s=>({...s,interest:Array.isArray(interest)?interest:s.interest}));
+      await refreshDailyInterestSettings(); setDailyInterestForm({clientId:"",capital:"",annualRate:""});
+      notify("Daily interest activated and today's interest added");
+    } catch(error){notify(`Daily interest save failed: ${error.message}`,"error");} finally{setDailyInterestSaving(false);}
+  };
+  const pauseDailyInterest = async clientId => {
+    try { await withSync(()=>sb.rpc("pause_daily_interest_setting",{p_user:auth.loginUser,p_password:auth.loginSecret,p_client_id:clientId})); await refreshDailyInterestSettings(); notify("Daily interest stopped after today"); }
+    catch(error){notify(`Could not stop daily interest: ${error.message}`,"error");}
+  };
+  const openBulkCharges = () => {
+    const rows=state.clients.filter(c=>c.accountType==="trading").map(c=>({clientId:c.id,name:c.name,amount:""}));
+    setBulkChargesForm({yearMonth:new Date().toISOString().slice(0,7),entryType:"software",rows}); setModal("bulkCharges");
+  };
+  const saveBulkCharges = async () => {
+    const rows=bulkChargesForm.rows.filter(r=>Number(r.amount)>0).map(r=>({client_id:r.clientId,amount:Number(r.amount)}));
+    if (!bulkChargesForm.yearMonth || !rows.length) return notify("Enter an amount for at least one trading client","error");
+    setBulkChargesSaving(true);
+    try {
+      const saved=await withSync(()=>sb.rpc("add_bulk_charges",{p_user:auth.loginUser,p_password:auth.loginSecret,p_month:bulkChargesForm.yearMonth,p_entry_type:bulkChargesForm.entryType,p_rows:rows}));
+      setState(s=>({...s,interest:[...(s.interest||[]),...(Array.isArray(saved)?saved:[])]})); setModal(null);
+      notify(`${rows.length} bulk charge${rows.length===1?"":"s"} added`);
+    } catch(error){notify(`Bulk save failed: ${error.message}`,"error");} finally{setBulkChargesSaving(false);}
   };
   const [bhavPreview, setBhavPreview] = useState(null); // {date, rows, matched, expiring}
   const [bhavDate, setBhavDate] = useState(new Date().toISOString().slice(0,10));
@@ -4914,11 +4957,10 @@ export default function BackOffice() {
                 </select>
               )}
             </div>
-            {isAdmin && (
-              <button style={btn(C.yellow)} onClick={() => setModal("addInterest")}>
-                💰 Add Interest / Brokerage
-              </button>
-            )}
+            {isAdmin && <div style={{display:"flex",gap:8}}>
+              <button style={btn(C.yellow)} onClick={() => setModal("addInterest")}>💰 Add Interest / Brokerage</button>
+              <button style={btn(C.purple)} onClick={openBulkCharges}>▦ Add in Bulk</button>
+            </div>}
           </div>
 
           {/* Date Filter Bar */}
@@ -5320,6 +5362,21 @@ export default function BackOffice() {
               <div style={{ color:C.yellow, fontWeight:600, fontSize:13 }}>⚠️ Editing mode — changes apply from TODAY only. Past trade charges are not affected.</div>
             </div>
           )}
+
+          {/* Daily interest automation — financing only, independent of trade charges/FIFO */}
+          <div style={{...card,marginBottom:20,borderLeft:`3px solid ${C.purple}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"start",flexWrap:"wrap",marginBottom:16}}>
+              <div><div style={{color:C.text,fontWeight:800,fontSize:15}}>Daily Interest Automation</div><div style={{color:C.muted,fontSize:11,marginTop:4}}>Trading accounts only · Daily amount = capital × yearly rate ÷ 100 ÷ 365 · Calendar days</div></div>
+              {dailyInterestForm.capital&&dailyInterestForm.annualRate&&<div style={{color:C.purple,fontWeight:800}}>₹{calculateDailyInterest(dailyInterestForm.capital,dailyInterestForm.annualRate).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})} / day</div>}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr auto",gap:10,alignItems:"end"}}>
+              <div><label style={{color:C.muted,fontSize:11,display:"block",marginBottom:5}}>Trading Client</label><select value={dailyInterestForm.clientId} onChange={e=>setDailyInterestForm(s=>({...s,clientId:e.target.value}))} style={input}><option value="">Select client...</option>{state.clients.filter(c=>c.accountType==="trading").map(c=><option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}</select></div>
+              <div><label style={{color:C.muted,fontSize:11,display:"block",marginBottom:5}}>Interest Capital (₹)</label><input type="number" min="0" value={dailyInterestForm.capital} onChange={e=>setDailyInterestForm(s=>({...s,capital:e.target.value}))} style={input}/></div>
+              <div><label style={{color:C.muted,fontSize:11,display:"block",marginBottom:5}}>Yearly Interest (%)</label><input type="number" min="0" step="0.01" value={dailyInterestForm.annualRate} onChange={e=>setDailyInterestForm(s=>({...s,annualRate:e.target.value}))} style={input}/></div>
+              <button disabled={dailyInterestSaving} style={{...btn(C.purple),opacity:dailyInterestSaving?.6:1,height:38}} onClick={saveDailyInterestSetting}>{dailyInterestSaving?"Saving...":"Activate"}</button>
+            </div>
+            {(state.dailyInterestSettings||[]).some(s=>s.active)&&<div style={{marginTop:16,overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr>{["Client","Capital","Yearly Rate","Per Day","Started","Action"].map(h=><th key={h} style={{textAlign:"left",padding:"7px 9px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead><tbody>{state.dailyInterestSettings.filter(s=>s.active).map(s=><tr key={s.id}><td style={{padding:"9px",color:C.text}}>{s.clientName} ({s.clientId})</td><td style={{padding:"9px",color:C.text}}>{formatINR(s.capital)}</td><td style={{padding:"9px",color:C.purple,fontWeight:700}}>{Number(s.annualRate)}%</td><td style={{padding:"9px",color:C.yellow,fontWeight:700}}>{formatINR(s.dailyAmount)}</td><td style={{padding:"9px",color:C.muted}}>{s.effectiveFrom}</td><td style={{padding:"9px"}}><button style={{...btn(C.red),padding:"5px 9px"}} onClick={()=>pauseDailyInterest(s.clientId)}>Stop</button></td></tr>)}</tbody></table></div>}
+          </div>
 
           {/* Effective from history */}
           <div style={{ ...card, marginBottom:20 }}>
@@ -6577,6 +6634,24 @@ export default function BackOffice() {
         </div>
       );
     }
+
+    if (modal === "bulkCharges") return (
+      <div style={overlay} onClick={()=>{if(!bulkChargesSaving)setModal(null)}}>
+        <div style={{...box,width:760,maxHeight:"90vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+          <h3 style={{color:C.text,marginTop:0}}>▦ Add Charges in Bulk</h3>
+          <div style={{color:C.muted,fontSize:12,marginBottom:16}}>Enter amounts only for clients you want to charge. Blank and zero rows are ignored.</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+            <div><label style={{color:C.muted,fontSize:11,display:"block",marginBottom:5}}>Month *</label><input type="month" value={bulkChargesForm.yearMonth} onChange={e=>setBulkChargesForm(s=>({...s,yearMonth:e.target.value}))} style={input}/></div>
+            <div><label style={{color:C.muted,fontSize:11,display:"block",marginBottom:5}}>Type *</label><select value={bulkChargesForm.entryType} onChange={e=>setBulkChargesForm(s=>({...s,entryType:e.target.value}))} style={input}><option value="interest">Interest / Brokerage</option><option value="software">Software Charges</option></select></div>
+          </div>
+          <div style={{border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden"}}>
+            <div style={{display:"grid",gridTemplateColumns:"160px 1fr 180px",background:C.bg,color:C.muted,fontSize:11,fontWeight:700}}><div style={{padding:10}}>USER CODE</div><div style={{padding:10}}>NAME</div><div style={{padding:10}}>AMOUNT (₹)</div></div>
+            {bulkChargesForm.rows.map((row,index)=><div key={row.clientId} style={{display:"grid",gridTemplateColumns:"160px 1fr 180px",borderTop:`1px solid ${C.border}22`,alignItems:"center"}}><div style={{padding:10,color:C.accent,fontFamily:"monospace"}}>{row.clientId}</div><div style={{padding:10,color:C.text}}>{row.name}</div><input type="number" min="0" placeholder="0" value={row.amount} onChange={e=>setBulkChargesForm(s=>({...s,rows:s.rows.map((r,i)=>i===index?{...r,amount:e.target.value}:r)}))} style={{...input,border:0,borderLeft:`1px solid ${C.border}`,borderRadius:0}}/></div>)}
+          </div>
+          <div style={{display:"flex",gap:10,marginTop:18}}><button disabled={bulkChargesSaving} style={{...btn(C.green),opacity:bulkChargesSaving?.6:1}} onClick={saveBulkCharges}>{bulkChargesSaving?"Saving...":"Save Bulk Charges"}</button><button disabled={bulkChargesSaving} style={btn(C.muted)} onClick={()=>setModal(null)}>Cancel</button></div>
+        </div>
+      </div>
+    );
 
     if (modal === "addInterest") return (
       <div style={overlay} onClick={() => setModal(null)}>
