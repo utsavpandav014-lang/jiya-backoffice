@@ -5106,7 +5106,9 @@ export default function BackOffice() {
 
             // All months that have any data for this client — filtered by date selection
             const tradeDates = state.trades.filter(t => t.clientId === client.id).map(t => (t.date||"").slice(0,7));
-            const interestMonths = (state.interest||[]).filter(i => i.clientId === client.id).map(i => i.yearMonth);
+            // Software rows use a `_SW` storage suffix, but the P&L table must
+            // group them under the real calendar month (including zero-trade months).
+            const interestMonths = (state.interest||[]).filter(i => i.clientId === client.id).map(i => (i.yearMonth||"").replace(/_SW$/, ""));
             const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(m => m && monthInFilter(m)).sort().reverse();
 
             // For range/month filter: use LAST trade date (closing date) — same as monthly breakdown
