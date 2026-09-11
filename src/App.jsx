@@ -7,6 +7,7 @@ import { investorPnlForMonth as calculateInvestorPnlForMonth } from "./investorP
 import { calculateDailyInterest } from "./interestAutomation.js";
 import { investorPositions as calculateInvestorPositions } from "./investorPositions.js";
 import { dailyTradingResults, positionsAsOfDate, tradingPatterns } from "./tradingInsights.js";
+import { buildLedgerStatement, ledgerTotals } from "./ledgerStatement.js";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -349,6 +350,7 @@ const sb = {
       method: "DELETE", headers: { ...this.headers, "Prefer": "" }
     });
     if (!r.ok) throw new Error(`DELETE ${table}: ${await r.text()}`);
+    return true;
   },
   async deleteAll(table) {
     // Supabase requires a filter for DELETE — use created_at > epoch (matches all rows)
@@ -1752,8 +1754,7 @@ export default function BackOffice() {
 
   const withSync = async (fn) => {
     if (!SUPABASE_CONFIGURED) {
-      fn(); // local only
-      return;
+      return await fn(); // local only
     }
     setSyncStatus("saving");
     try {
@@ -2581,14 +2582,17 @@ export default function BackOffice() {
     notify("Entry updated");
   };
 
-  const deleteLedgerEntry = (id) => {
+  const deleteLedgerEntry = async (id) => {
     const entry = state.ledger.find(l => l.id === id);
+    if (!entry) return;
     setState(s => ({ ...s, ledger: s.ledger.filter(l => l.id !== id) }));
-    withSync(() => sb.delete("ledger", id));
-    if (entry) {
-      const amt = entry.credit > 0 ? `₹${entry.credit} credit` : `₹${entry.debit} debit`;
-      pushAudit("DELETED", entry.clientId, `Removed ${amt} — "${entry.narration||""}"`);
+    const deleted = await withSync(() => sb.delete("ledger", id));
+    if (deleted !== true) {
+      setState(s => ({ ...s, ledger:s.ledger.some(l=>l.id===id) ? s.ledger : [...s.ledger, entry] }));
+      return;
     }
+    const amt = Number(entry.credit) > 0 ? `₹${entry.credit} credit` : `₹${entry.debit} debit`;
+    pushAudit("DELETED", entry.clientId, `Removed ${amt} — "${entry.description||entry.narration||""}"`);
     notify("Entry deleted");
   };
 
@@ -4252,16 +4256,6 @@ export default function BackOffice() {
         ? allClients.filter(c => c.id === ledgerClientFilter)
         : allClients;
 
-      // Running balance with ledgerType aware filtering
-      const ledgerRows = (cid, tab) => {
-        let bal = 0;
-        return state.ledger
-          .filter(l => l.clientId === cid)
-          .filter(l => tab === "dp" ? l.ledgerType === "dp" : true) // dp tab: only dp entries; all tab: all entries
-          .sort((a,b) => a.date.localeCompare(b.date) || (a.id > b.id ? 1 : -1))
-          .map(l => { bal += (l.credit||0) - (l.debit||0); return { ...l, balance: bal }; });
-      };
-
       return (
         <div>
           {/* Header */}
@@ -4309,15 +4303,16 @@ export default function BackOffice() {
 
           {/* Per-client ledger tables */}
           {filteredClients.map(client => {
-            const allRows = ledgerRows(client.id, ledgerTabFilter);
-            const rows = ledgerSearch ? allRows.filter(r =>
-              (r.narration||"").toLowerCase().includes(ledgerSearch.toLowerCase()) ||
-              String(r.amount||"").includes(ledgerSearch) ||
+            // Build one complete chronological statement first. Tabs/search only
+            // control visibility; they must never recalculate the account balance.
+            const statementRows = buildLedgerStatement(state.ledger, client.id);
+            const tabRows = ledgerTabFilter === "dp" ? statementRows.filter(r => r.ledgerType === "dp") : statementRows;
+            const rows = ledgerSearch ? tabRows.filter(r =>
+              (r.description||r.narration||"").toLowerCase().includes(ledgerSearch.toLowerCase()) ||
+              String(r.credit||"").includes(ledgerSearch) || String(r.debit||"").includes(ledgerSearch) ||
               (r.ledgerType||"").toLowerCase().includes(ledgerSearch.toLowerCase())
-            ) : allRows;
-            const lastBal = rows.slice(-1)[0]?.balance || 0;
-            const totalCredit = rows.reduce((a,l) => a+(l.credit||0), 0);
-            const totalDebit  = rows.reduce((a,l) => a+(l.debit||0), 0);
+            ) : tabRows;
+            const {totalCredit,totalDebit,closingBalance:lastBal} = ledgerTotals(statementRows);
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:20 }}>
@@ -4340,7 +4335,7 @@ export default function BackOffice() {
                       <div style={{ color:C.red, fontWeight:700 }}>₹{totalDebit.toLocaleString()}</div>
                     </div>
                     <div style={{ textAlign:"right" }}>
-                      <div style={{ color:C.muted, fontSize:10, textTransform:"uppercase" }}>Net Balance</div>
+                      <div style={{ color:C.muted, fontSize:10, textTransform:"uppercase" }}>Closing Balance</div>
                       <div style={{ color:lastBal>=0?C.green:C.red, fontWeight:700, fontSize:16 }}>₹{lastBal.toLocaleString()}</div>
                     </div>
                   </div>
