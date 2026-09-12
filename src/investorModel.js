@@ -26,6 +26,26 @@ export function calculateOwnershipPct(allocatedAmount, strategyCapital) {
   return Math.round((amount / capital) * 100000000) / 1000000;
 }
 
+export function calculateAllocationAmount(ownershipPct, strategyCapital) {
+  const percentage = Number(ownershipPct), capital = normalizeMoney(strategyCapital);
+  if (!Number.isFinite(percentage) || percentage <= 0 || capital <= 0) return 0;
+  return normalizeMoney(capital * percentage / 100);
+}
+
+export function validateAllocationChange({ allocatedAmount, effectiveFrom, reason, originalEffectiveFrom, investorDeposit, investorOtherAllocated = 0, strategyCapital, strategyOtherAllocated = 0, now = new Date() }) {
+  const errors = [];
+  const amount = normalizeMoney(allocatedAmount), deposit = normalizeMoney(investorDeposit), capital = normalizeMoney(strategyCapital);
+  const effective = new Date(effectiveFrom).getTime(), original = new Date(originalEffectiveFrom).getTime(), current = new Date(now).getTime();
+  if (amount <= 0) errors.push("Allocation amount must be greater than zero");
+  if (!Number.isFinite(effective)) errors.push("Enter a valid effective date and time");
+  if (Number.isFinite(effective) && Number.isFinite(original) && effective <= original) errors.push("Change date must be after the original allocation start");
+  if (Number.isFinite(effective) && Number.isFinite(current) && effective > current + 5 * 60 * 1000) errors.push("Change date cannot be in the future");
+  if (!String(reason || "").trim()) errors.push("Narration is mandatory");
+  if (amount + normalizeMoney(investorOtherAllocated) > deposit) errors.push("Allocation exceeds the investor's available deposited fund");
+  if (amount + normalizeMoney(strategyOtherAllocated) > capital) errors.push("Total investor allocation exceeds the strategy capital");
+  return errors;
+}
+
 export function getActiveAllocations(allocations, at = new Date()) {
   const timestamp = new Date(at).getTime();
   return (allocations || []).filter((a) => {

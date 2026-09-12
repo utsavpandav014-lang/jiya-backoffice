@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { accountTypeLabel, calculateOwnershipPct, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
+import { accountTypeLabel, calculateAllocationAmount, calculateOwnershipPct, validateAllocationChange, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
 import { buildCarryForwardPreview, verifyCarryForwardPairs } from "./monthEndCarryForward.js";
 import { closedPositionSlicesForMonth, closedPositionSlicesInFilter, isCarryForwardTrade, openPositionMtm } from "./monthPnlAttribution.js";
 import { daysRemainingInMonth, targetTrackerState } from "./targetTracker.js";
@@ -2486,6 +2486,8 @@ export default function BackOffice() {
 
   // Investor allocations are an economic layer only. They never write to trades or invoke FIFO.
   const [newAllocation, setNewAllocation] = useState({ investorClientId:"", strategyClientId:"", allocatedAmount:"", effectiveFrom:"", reason:"" });
+  const [editAllocation, setEditAllocation] = useState(null);
+  const [clientTypeFilter, setClientTypeFilter] = useState("trading");
   const activeAllocationRows = (state.investorAllocations || []).filter(a => a.status !== "closed" && !a.effectiveTo);
   const beginAdditionalStrategy = (investorClientId) => {
     setNewAllocation({ investorClientId, strategyClientId:"", allocatedAmount:"", effectiveFrom:"", reason:"" });
@@ -2515,6 +2517,26 @@ export default function BackOffice() {
     } catch (error) {
       notify(`Allocation failed: ${error.message}`, "error");
     }
+  };
+  const saveAllocationChange = async () => {
+    if (!editAllocation) return;
+    const original = (state.investorAllocations || []).find(a=>a.id===editAllocation.id);
+    const investor = state.clients.find(c=>c.id===original?.investorClientId);
+    const strategy = state.clients.find(c=>c.id===original?.strategyClientId);
+    const allocatedAmount = editAllocation.inputMode === "percentage"
+      ? calculateAllocationAmount(editAllocation.value, strategy?.monthlyStrategyCapital)
+      : Number(editAllocation.value);
+    const investorOtherAllocated = activeAllocationRows.filter(a=>a.id!==original?.id && a.investorClientId===investor?.id).reduce((sum,a)=>sum+Number(a.allocatedAmount||0),0);
+    const strategyOtherAllocated = activeAllocationRows.filter(a=>a.id!==original?.id && a.strategyClientId===strategy?.id).reduce((sum,a)=>sum+Number(a.allocatedAmount||0),0);
+    const errors = validateAllocationChange({allocatedAmount,effectiveFrom:editAllocation.effectiveFrom,reason:editAllocation.reason,originalEffectiveFrom:original?.effectiveFrom,investorDeposit:investor?.depositAmount,investorOtherAllocated,strategyCapital:strategy?.monthlyStrategyCapital,strategyOtherAllocated});
+    if (errors.length) return notify(errors[0], "error");
+    try {
+      const result = await withSync(()=>sb.rpc("modify_investor_allocation",{p_user:auth.loginUser,p_password:auth.loginSecret,p_allocation_id:original.id,p_allocated_amount:allocatedAmount,p_effective_from:new Date(editAllocation.effectiveFrom).toISOString(),p_reason:editAllocation.reason.trim()}));
+      if (!result?.previous?.id || !result?.current?.id) throw new Error("Allocation change was not confirmed by the database");
+      setState(s=>({...s,investorAllocations:[result.current,...(s.investorAllocations||[]).map(a=>a.id===result.previous.id?result.previous:a)]}));
+      setEditAllocation(null);
+      notify(`Allocation changed from ${new Date(result.current.effectiveFrom).toLocaleString("en-IN")}. Earlier P&L remains unchanged.`);
+    } catch (error) { notify(`Allocation change failed: ${error.message}`, "error"); }
   };
 
   // ── Admin: Add Ledger Entry ──
@@ -3858,11 +3880,17 @@ export default function BackOffice() {
           <h2 style={{ color: C.text, margin: 0 }}>Client Management</h2>
           <button style={btn(C.green)} onClick={() => setModal("addClient")}><Icon name="add" size={16} /> Add Client</button>
         </div>
+        <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+          {[["trading","Traders"],["investor","Investors"],["hybrid","Hybrids"]].map(([type,label])=>{
+            const count=state.clients.filter(c=>(c.accountType||"trading")===type).length;
+            return <button key={type} onClick={()=>setClientTypeFilter(type)} style={{...btn(clientTypeFilter===type?C.accent:C.muted),padding:"8px 14px",opacity:clientTypeFilter===type?1:0.75}}>{label} ({count})</button>;
+          })}
+        </div>
         <div style={{ ...card }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead><tr>{["Client ID", "Name", "Type", "Fund / Capital", "Monthly Target", "Email", "Phone", "Password", "Open Pos", "Action"].map((h) => <th key={h} style={{ textAlign: "left", padding: "10px 12px", color: C.muted, borderBottom: `1px solid ${C.border}` }}>{h}</th>)}</tr></thead>
             <tbody>
-              {state.clients.map((c) => (
+              {state.clients.filter(c=>(c.accountType||"trading")===clientTypeFilter).map((c) => (
                 <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}` }}>
                   <td style={{ padding: "12px", color: C.accent, fontWeight: 600 }}>{c.id}</td>
                   <td style={{ padding: "12px", color: C.text }}>{c.name}</td>
@@ -3890,6 +3918,7 @@ export default function BackOffice() {
                   </td>
                 </tr>
               ))}
+              {!state.clients.some(c=>(c.accountType||"trading")===clientTypeFilter)&&<tr><td colSpan={10} style={{padding:32,textAlign:"center",color:C.muted}}>No {clientTypeFilter} accounts found.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -3905,6 +3934,10 @@ export default function BackOffice() {
       const investorUsed = activeAllocationRows.filter(a => a.investorClientId === selectedInvestor?.id).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
       const strategyUsed = activeAllocationRows.filter(a => a.strategyClientId === selectedStrategy?.id).reduce((s,a)=>s+Number(a.allocatedAmount||0),0);
       const availableStrategies = strategies.filter(c => !activeAllocationRows.some(a=>a.investorClientId===selectedInvestor?.id && a.strategyClientId===c.id));
+      const editingRow = (state.investorAllocations||[]).find(a=>a.id===editAllocation?.id);
+      const editingStrategy = state.clients.find(c=>c.id===editingRow?.strategyClientId);
+      const editingAmount = editAllocation?.inputMode==="percentage" ? calculateAllocationAmount(editAllocation?.value,editingStrategy?.monthlyStrategyCapital) : Number(editAllocation?.value||0);
+      const editingPct = calculateOwnershipPct(editingAmount,editingStrategy?.monthlyStrategyCapital);
       return (
         <div>
           <div style={{marginBottom:24}}>
@@ -3966,17 +3999,34 @@ export default function BackOffice() {
             <div style={card}>
               <h3 style={{color:C.text,marginTop:0}}>Allocation History</h3>
               <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                <thead><tr>{["Investor","Strategy","Amount","Ownership","Effective From","Until","LTP Snapshot","Narration"].map(h=><th key={h} style={{textAlign:"left",padding:"9px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+                <thead><tr>{["Investor","Strategy","Amount","Ownership","Effective From","Until","LTP Snapshot","Narration","Action"].map(h=><th key={h} style={{textAlign:"left",padding:"9px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
                 <tbody>{(state.investorAllocations||[]).map(a=><tr key={a.id} style={{borderBottom:`1px solid ${C.border}`}}>
                   <td style={{padding:9,color:C.text}}>{a.investorClientId}</td><td style={{padding:9,color:C.text}}>{a.strategyClientId}</td>
                   <td style={{padding:9,color:C.text}}>{formatINR(Number(a.allocatedAmount)||0)}</td><td style={{padding:9,color:C.accent}}>{Number(a.ownershipPct||0).toFixed(4)}%</td>
                   <td style={{padding:9,color:C.muted}}>{new Date(a.effectiveFrom).toLocaleString("en-IN")}</td><td style={{padding:9,color:C.muted}}>{a.effectiveTo?new Date(a.effectiveTo).toLocaleString("en-IN"):"Active"}</td>
                   <td style={{padding:9}}><span style={badge(a.ltpSnapshotStatus==="captured"?C.green:C.yellow)}>{a.ltpSnapshotStatus||"pending"}</span></td><td style={{padding:9,color:C.muted}}>{a.reason}</td>
+                  <td style={{padding:9}}>{a.status!=="closed"&&!a.effectiveTo?<button style={{...btn(C.accent),padding:"5px 9px"}} onClick={()=>{const now=new Date();const localNow=new Date(now.getTime()-now.getTimezoneOffset()*60000).toISOString().slice(0,16);setEditAllocation({id:a.id,inputMode:"capital",value:String(a.allocatedAmount),effectiveFrom:localNow,reason:""})}}>Edit</button>:<span style={{color:C.muted}}>History</span>}</td>
                 </tr>)}</tbody>
               </table></div>
               {!state.investorAllocations?.length && <div style={{padding:32,textAlign:"center",color:C.muted}}>No investor allocations created yet.</div>}
             </div>
           </div>
+          {editAllocation&&editingRow&&<div style={{position:"fixed",inset:0,background:"#000b",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:18}} onMouseDown={e=>{if(e.target===e.currentTarget)setEditAllocation(null)}}>
+            <div style={{...card,width:"min(560px,100%)",maxHeight:"90vh",overflowY:"auto"}}>
+              <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"start",marginBottom:18}}><div><h3 style={{color:C.text,margin:"0 0 5px"}}>Change Investor Allocation</h3><div style={{color:C.muted,fontSize:12}}>{editingRow.investorClientId} → {editingRow.strategyClientId}</div></div><button style={btn(C.muted)} onClick={()=>setEditAllocation(null)}>Close</button></div>
+              <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14,fontSize:12,color:C.muted}}>The old allocation will end at the selected time. A new period starts at the same time, so all earlier P&amp;L stays unchanged.</div>
+              <label style={{color:C.muted,fontSize:12}}>Change By *</label>
+              <div style={{display:"flex",gap:8,margin:"6px 0 14px"}}>{[["capital","Capital (₹)"],["percentage","Percentage (%)"]].map(([mode,label])=><button key={mode} onClick={()=>setEditAllocation(s=>({...s,inputMode:mode,value:mode==="capital"?String(editingAmount):String(editingPct)}))} style={{...btn(editAllocation.inputMode===mode?C.accent:C.muted),flex:1,justifyContent:"center"}}>{label}</button>)}</div>
+              <label style={{color:C.muted,fontSize:12}}>{editAllocation.inputMode==="percentage"?"New Ownership Percentage (%) *":"New Shared Capital (₹) *"}</label>
+              <input type="number" min="0" step={editAllocation.inputMode==="percentage"?"0.0001":"0.01"} value={editAllocation.value} onChange={e=>setEditAllocation(s=>({...s,value:e.target.value}))} style={{...input,margin:"5px 0 14px"}} />
+              <label style={{color:C.muted,fontSize:12}}>Effective From *</label>
+              <input type="datetime-local" value={editAllocation.effectiveFrom} onChange={e=>setEditAllocation(s=>({...s,effectiveFrom:e.target.value}))} style={{...input,margin:"5px 0 14px"}} />
+              <label style={{color:C.muted,fontSize:12}}>Reason / Narration *</label>
+              <textarea value={editAllocation.reason} onChange={e=>setEditAllocation(s=>({...s,reason:e.target.value}))} style={{...input,margin:"5px 0 14px",minHeight:72,resize:"vertical"}} />
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:15,fontSize:12}}><div><span style={{color:C.muted}}>New shared capital</span><div style={{color:C.text,fontWeight:700,marginTop:4}}>{formatINR(editingAmount)}</div></div><div><span style={{color:C.muted}}>New ownership</span><div style={{color:C.accent,fontWeight:700,marginTop:4}}>{editingPct.toFixed(4)}%</div></div></div>
+              <button style={{...btn(C.green),width:"100%",justifyContent:"center"}} onClick={saveAllocationChange}><Icon name="check" size={14}/> Save Dated Change</button>
+            </div>
+          </div>}
         </div>
       );
     }
@@ -4303,15 +4353,15 @@ export default function BackOffice() {
 
           {/* Per-client ledger tables */}
           {filteredClients.map(client => {
-            // Build one complete chronological statement first. Tabs/search only
-            // control visibility; they must never recalculate the account balance.
-            const statementRows = buildLedgerStatement(state.ledger, client.id);
-            const tabRows = ledgerTabFilter === "dp" ? statementRows.filter(r => r.ledgerType === "dp") : statementRows;
-            const rows = ledgerSearch ? tabRows.filter(r =>
+            // Each ledger tab is its own bank-statement view. DP totals and its
+            // running balance must use only DP-tagged entries; All uses everything.
+            const selectedEntries = ledgerTabFilter === "dp" ? state.ledger.filter(r => r.ledgerType === "dp") : state.ledger;
+            const statementRows = buildLedgerStatement(selectedEntries, client.id);
+            const rows = ledgerSearch ? statementRows.filter(r =>
               (r.description||r.narration||"").toLowerCase().includes(ledgerSearch.toLowerCase()) ||
               String(r.credit||"").includes(ledgerSearch) || String(r.debit||"").includes(ledgerSearch) ||
               (r.ledgerType||"").toLowerCase().includes(ledgerSearch.toLowerCase())
-            ) : tabRows;
+            ) : statementRows;
             const {totalCredit,totalDebit,closingBalance:lastBal} = ledgerTotals(statementRows);
 
             return (

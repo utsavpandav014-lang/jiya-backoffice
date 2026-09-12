@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateOwnershipPct, getActiveAllocations, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
+import { calculateAllocationAmount, calculateOwnershipPct, getActiveAllocations, validateAllocationChange, validateClientCapital, validateInvestorAllocation } from "./investorModel.js";
 
 test("calculates ownership from rupees", () => assert.equal(calculateOwnershipPct(2_000_000, 5_000_000), 40));
 test("excludes adhoc deposit from ownership and cash-capital validation", () => {
@@ -30,4 +30,17 @@ test("allows one investor to add multiple strategies within remaining fund", () 
 test("preserves timestamped periods", () => {
   const periods = [{ effectiveFrom:"2026-08-15T12:00:00Z", effectiveTo:"2026-08-21T09:00:00Z", status:"closed" }, { effectiveFrom:"2026-08-21T09:00:00Z", effectiveTo:null, status:"active" }];
   assert.equal(getActiveAllocations(periods, "2026-08-22T00:00:00Z").length, 1);
+});
+test("converts an entered ownership percentage into shared capital", () => {
+  assert.equal(calculateAllocationAmount(25, 6_300_000), 1_575_000);
+  assert.equal(calculateAllocationAmount(0, 6_300_000), 0);
+});
+test("validates a dated allocation replacement without rewriting its earlier period", () => {
+  const valid = validateAllocationChange({allocatedAmount:300000,effectiveFrom:"2026-09-10T10:00:00Z",originalEffectiveFrom:"2026-09-01T10:00:00Z",reason:"Capital reduced",investorDeposit:500000,investorOtherAllocated:100000,strategyCapital:1000000,strategyOtherAllocated:600000,now:"2026-09-12T10:00:00Z"});
+  assert.deepEqual(valid, []);
+  const invalid = validateAllocationChange({allocatedAmount:450000,effectiveFrom:"2026-09-01T10:00:00Z",originalEffectiveFrom:"2026-09-01T10:00:00Z",reason:"",investorDeposit:500000,investorOtherAllocated:100000,strategyCapital:1000000,strategyOtherAllocated:600000,now:"2026-09-12T10:00:00Z"});
+  assert.ok(invalid.includes("Change date must be after the original allocation start"));
+  assert.ok(invalid.includes("Narration is mandatory"));
+  assert.ok(invalid.includes("Allocation exceeds the investor's available deposited fund"));
+  assert.ok(invalid.includes("Total investor allocation exceeds the strategy capital"));
 });

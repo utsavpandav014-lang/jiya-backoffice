@@ -20,9 +20,8 @@ test("recalculates every later balance after an entry is deleted", () => {
   assert.equal(ledgerTotals(statement).closingBalance, 50);
 });
 
-test("a filtered view retains balances from the complete statement", () => {
-  const statement = buildLedgerStatement(rows, "C1");
-  const dpRows = statement.filter(row => row.ledgerType === "dp");
-  assert.deepEqual(dpRows.map(row => row.balance), [150, 250]);
-  assert.equal(ledgerTotals(statement).closingBalance, 250);
+test("a DP statement calculates balances and totals from DP entries only", () => {
+  const dpStatement = buildLedgerStatement(rows.filter(row => row.ledgerType === "dp"), "C1");
+  assert.deepEqual(dpStatement.map(row => row.balance), [200, 300]);
+  assert.deepEqual(ledgerTotals(dpStatement), {totalCredit:300,totalDebit:0,closingBalance:300});
 });
