@@ -8,6 +8,7 @@ import { calculateDailyInterest } from "./interestAutomation.js";
 import { investorPositions as calculateInvestorPositions } from "./investorPositions.js";
 import { dailyTradingResults, positionsAsOfDate, tradingPatterns } from "./tradingInsights.js";
 import { buildLedgerStatement, ledgerTotals } from "./ledgerStatement.js";
+import { assertSafeUndoBatch, missingTradeRows } from "./tradeUploadSafety.js";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -371,7 +372,27 @@ const sb = {
     });
     if (!r.ok) throw new Error(`DELETE WHERE ${table}: ${await r.text()}`);
   },
+  async deleteFiltered(table, query) {
+    const r = await fetch(`${this.url(table)}${query}`, {
+      method: "DELETE",
+      headers: { ...this.headers, "Prefer": "return=representation" }
+    });
+    if (!r.ok) throw new Error(`DELETE FILTERED ${table}: ${await r.text()}`);
+    return r.json();
+  },
 };
+
+async function fetchAllRows(table, query = "?") {
+  const PAGE = 1000;
+  const separator = query.includes("?") ? "&" : "?";
+  let rows = [];
+  for (let offset = 0; ; offset += PAGE) {
+    const page = await sb.select(table, `${query}${separator}limit=${PAGE}&offset=${offset}`);
+    const valid = Array.isArray(page) ? page : [];
+    rows = rows.concat(valid);
+    if (valid.length < PAGE) return rows;
+  }
+}
 
 // Check if Supabase is configured
 const SUPABASE_CONFIGURED = SUPABASE_URL !== "YOUR_SUPABASE_URL" && SUPABASE_ANON_KEY !== "YOUR_SUPABASE_ANON_KEY";
@@ -2622,6 +2643,8 @@ export default function BackOffice() {
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadPreview, setUploadPreview] = useState(null);
   const [uploadMode, setUploadMode] = useState("append");
+  const [tradeUploadSaving, setTradeUploadSaving] = useState(false);
+  const tradeUploadBusyRef = useRef(false);
   const [uploadHistory, setUploadHistory] = useState(() => {
     try { return JSON.parse(localStorage.getItem("jiya_upload_history") || "[]"); }
     catch(e) { return []; }
@@ -2864,124 +2887,117 @@ export default function BackOffice() {
       "This will remove those trades permanently."
     )) return;
 
-    const { batchId, mode, month } = entry;
+    if (tradeUploadBusyRef.current) return notify("Another upload action is still running", "error");
+    const { batchId } = entry;
+    tradeUploadBusyRef.current = true;
+    setTradeUploadSaving(true);
+    try {
+      const existing = await fetchAllRows("trades", `?batchId=eq.${batchId}&select=id,batchId&order=id.asc`);
+      assertSafeUndoBatch(existing, batchId, entry.tradeCount);
 
-    // Remove from local state
-    setState(s => ({ ...s, trades: s.trades.filter(t => t.batchId !== batchId) }));
-
-    // Remove from Supabase
-    withSync(async () => {
-      // Delete in batches by batchId
-      while (true) {
-        const existing = await sb.select("trades", `?batchId=eq.${batchId}&limit=1000&select=id`);
-        if (!Array.isArray(existing) || existing.length === 0) break;
-        const ids = existing.map(r => r.id).join(",");
-        await fetch(`${sb.url("trades")}?id=in.(${ids})`, {
-          method: "DELETE",
-          headers: { ...sb.headers, "Prefer": "" }
-        });
-        if (existing.length < 1000) break;
+      // Delete by the short batch filter. Never put hundreds of trade IDs in one URL.
+      const deleted = await sb.deleteFiltered("trades", `?batchId=eq.${batchId}`);
+      if (!Array.isArray(deleted) || deleted.length !== existing.length) {
+        throw new Error(`Delete verification failed: expected ${existing.length}, removed ${deleted?.length || 0}`);
       }
-    });
 
-    // Remove from history
-    setUploadHistory(prev => {
-      const updated = prev.filter(h => h.batchId !== batchId);
-      try { localStorage.setItem("jiya_upload_history", JSON.stringify(updated)); } catch(e) {}
-      return updated;
-    });
-
-    notify("✅ Upload undone — " + entry.tradeCount + " trades removed");
+      setUploadHistory(prev => {
+        const updated = prev.filter(h => Number(h.batchId) !== Number(batchId));
+        try { localStorage.setItem("jiya_upload_history", JSON.stringify(updated)); } catch(e) {}
+        return updated;
+      });
+      await loadAllData();
+      notify("✅ Upload undone and verified — " + deleted.length + " trades removed");
+    } catch (error) {
+      notify("❌ Undo stopped safely: " + error.message, "error");
+    } finally {
+      tradeUploadBusyRef.current = false;
+      setTradeUploadSaving(false);
+    }
   };
 
-  const confirmUpload = () => {
+  const confirmUpload = async () => {
     if (!uploadPreview || !uploadPreview.rows.length) return notify("No valid trades to import", "error");
+    if (tradeUploadBusyRef.current) return notify("Upload already in progress", "error");
+
+    tradeUploadBusyRef.current = true;
+    setTradeUploadSaving(true);
     const batchId = Date.now();
     const newTrades = uploadPreview.rows.map(t => ({ ...t, batchId }));
-    const clientsInFile = [...new Set(newTrades.map((t) => t.clientId))];
-    const unknownClients = clientsInFile.filter((cid) => !state.clients.find((c) => c.id === cid));
+    const clientsInFile = [...new Set(newTrades.map(t => t.clientId))];
+    const unknownClients = clientsInFile.filter(cid => !state.clients.find(c => c.id === cid));
 
-    setState((s) => ({
-      ...s,
-      trades: uploadMode === "replace"
-        ? [
-            // Keep locked month trades + add new current month trades
-            ...s.trades.filter(t => {
-              const m = (t.date || "").slice(0, 7);
-              return (s.lockedMonths || []).includes(m);
-            }),
-            ...newTrades
-          ]
-        : [...s.trades, ...newTrades],
-    }));
-
-    withSync(async () => {
-      if (uploadMode === "replace") {
-        // Delete trades for same months as in uploaded file — NOT current calendar month
-        const uploadedMonths = [...new Set(newTrades.map(t => (t.date||"").slice(0,7)).filter(Boolean))];
-        const lockedMonths   = state.lockedMonths || [];
-        const monthsToDelete = uploadedMonths.filter(m => !lockedMonths.includes(m));
-        for (const month of monthsToDelete) {
-          while (true) {
-            const existing = await sb.select("trades",
-              `?date=gte.${month}-01&date=lte.${month}-31&limit=1000&select=id`
-            );
-            if (!Array.isArray(existing) || existing.length === 0) break;
-            const ids = existing.map(r => r.id).join(",");
-            await fetch(`${sb.url("trades")}?id=in.(${ids})`, {
-              method: "DELETE",
-              headers: { ...sb.headers, "Prefer": "" }
-            });
-            if (existing.length < 1000) break;
+    try {
+      const syncResult = await withSync(async () => {
+        if (uploadMode === "replace") {
+          // Replace only broker-uploaded rows for the selected trading date.
+          // Manual settlements (batchId null) and CF accounting rows are protected.
+          const uploadedDates = [...new Set(newTrades.map(t => t.date).filter(Boolean))];
+          const lockedMonths = state.lockedMonths || [];
+          for (const date of uploadedDates) {
+            if (lockedMonths.includes(date.slice(0,7))) throw new Error(`Month ${date.slice(0,7)} is locked`);
+            await sb.deleteFiltered("trades", `?date=eq.${encodeURIComponent(date)}&batchId=not.is.null&id=not.like.CF_*`);
           }
+          for (let i = 0; i < newTrades.length; i += 500) {
+            await sb.upsert("trades", newTrades.slice(i, i + 500));
+          }
+          return { savedCount:newTrades.length };
         }
-        // Replace mode: insert all directly
-        for (let i = 0; i < newTrades.length; i += 500) {
-          await sb.upsert("trades", newTrades.slice(i, i + 500));
+
+        // Compare only the uploaded trading date(s), but fetch every existing
+        // row. Occurrence counts preserve legitimate repeated fills.
+        const clientIds = clientsInFile.map(encodeURIComponent).join(",");
+        const uploadedDates = [...new Set(newTrades.map(t => t.date).filter(Boolean))];
+        let existing = [];
+        for (const date of uploadedDates) {
+          existing = existing.concat(await fetchAllRows("trades",
+            `?date=eq.${encodeURIComponent(date)}&clientId=in.(${clientIds})&select=clientId,contract,side,qty,price,date,time,id&order=id.asc`
+          ));
         }
-      } else {
-        // Append mode: deduplicate by contract+side+qty+price+date+time (not ID — IDs are new each upload)
-        const clientIds = [...new Set(newTrades.map(t=>t.clientId))].join(",");
-        const existing  = await sb.select("trades",
-          `?clientId=in.(${clientIds})&select=contract,side,qty,price,date,time&limit=20000`
-        ) || [];
-        const existingKeys = new Set(
-          existing.map(r => `${r.contract}|${r.side}|${r.qty}|${r.price}|${r.date}|${r.time}`)
-        );
-        const toInsert = newTrades.filter(t =>
-          !existingKeys.has(`${t.contract}|${t.side}|${t.qty}|${t.price}|${t.date}|${t.time}`)
-        );
+        const toInsert = missingTradeRows(newTrades, existing);
         if (toInsert.length < newTrades.length) {
           console.log(`Dedup: skipped ${newTrades.length - toInsert.length} duplicate trades`);
         }
         for (let i = 0; i < toInsert.length; i += 500) {
           await sb.upsert("trades", toInsert.slice(i, i + 500));
         }
+        return { savedCount:toInsert.length };
+      });
+
+      if (!syncResult) throw new Error("Database did not confirm the upload");
+      if (syncResult.savedCount === 0) {
+        notify("No new trades imported — this file is already uploaded", "error");
+        return;
       }
-    });
 
-    setUploadFile(null);
-    setUploadPreview(null);
-    setModal(null);
-    const warn = unknownClients.length ? ` ⚠️ Unknown client IDs: ${unknownClients.join(", ")}` : "";
-    notify(`${newTrades.length} trades imported for ${clientsInFile.length} clients.${warn}`);
-    addBell(`${newTrades.length} trades uploaded (${clientsInFile.length} clients)`, "trade", "trades");
+      await loadAllData();
+      setUploadFile(null);
+      setUploadPreview(null);
+      setModal(null);
+      const warn = unknownClients.length ? ` ⚠️ Unknown client IDs: ${unknownClients.join(", ")}` : "";
+      notify(`${syncResult.savedCount} trades imported and verified for ${clientsInFile.length} clients.${warn}`);
+      addBell(`${syncResult.savedCount} trades uploaded (${clientsInFile.length} clients)`, "trade", "trades");
 
-    // ── Save to upload history (keep last 5) ──
-    const histEntry = {
-      batchId,
-      timestamp:  new Date().toISOString(),
-      mode:       uploadMode,
-      tradeCount: newTrades.length,
-      clients:    clientsInFile.length,
-      filename:   uploadFile?.name || "unknown",
-      month:      new Date().toISOString().slice(0,7),
-    };
-    setUploadHistory(prev => {
-      const updated = [histEntry, ...prev].slice(0, 5); // keep last 5
-      try { localStorage.setItem("jiya_upload_history", JSON.stringify(updated)); } catch(e) {}
-      return updated;
-    });
+      const histEntry = {
+        batchId,
+        timestamp: new Date().toISOString(),
+        mode: uploadMode,
+        tradeCount: syncResult.savedCount,
+        clients: clientsInFile.length,
+        filename: uploadFile?.name || "unknown",
+        month: (newTrades[0]?.date || "").slice(0,7),
+      };
+      setUploadHistory(prev => {
+        const updated = [histEntry, ...prev].slice(0, 5);
+        try { localStorage.setItem("jiya_upload_history", JSON.stringify(updated)); } catch(e) {}
+        return updated;
+      });
+    } catch (error) {
+      notify("❌ Upload stopped safely: " + error.message, "error");
+    } finally {
+      tradeUploadBusyRef.current = false;
+      setTradeUploadSaving(false);
+    }
   };
 
   // ── Support Tickets ──
@@ -6376,11 +6392,11 @@ export default function BackOffice() {
 
           <div style={{ display: "flex", gap: 10 }}>
             <button
-              style={{ ...btn(!uploadPreview?.rows?.length || !uploadTradeDate ? C.muted : C.purple), opacity: (!uploadPreview?.rows?.length || !uploadTradeDate) ? 0.5 : 1 }}
+              style={{ ...btn(!uploadPreview?.rows?.length || !uploadTradeDate || tradeUploadSaving ? C.muted : C.purple), opacity: (!uploadPreview?.rows?.length || !uploadTradeDate || tradeUploadSaving) ? 0.5 : 1 }}
               onClick={confirmUpload}
-              disabled={!uploadPreview?.rows?.length || !uploadTradeDate}
+              disabled={!uploadPreview?.rows?.length || !uploadTradeDate || tradeUploadSaving}
             >
-              <Icon name="upload" size={14} /> Import & Apply FIFO
+              <Icon name="upload" size={14} /> {tradeUploadSaving ? "Saving & Verifying..." : "Import & Apply FIFO"}
             </button>
             <button style={btn(C.muted)} onClick={() => { setModal(null); setUploadFile(null); setUploadPreview(null); }}>Cancel</button>
           </div>
