@@ -9,6 +9,7 @@ import { investorPositions as calculateInvestorPositions } from "./investorPosit
 import { dailyTradingResults, positionsAsOfDate, tradingPatterns } from "./tradingInsights.js";
 import { buildLedgerStatement, ledgerTotals } from "./ledgerStatement.js";
 import { assertSafeUndoBatch, missingTradeRows } from "./tradeUploadSafety.js";
+import { mustBlockForEmergency, normalizeEmergencyStatus } from "./emergencyLockdown.js";
 
 // ─── FIFO Engine (Broker-Level Accurate) ───────────────────────────────────────
 // Processes trades chronologically. Uses a running queue to match positions.
@@ -830,7 +831,7 @@ function SettlementManager({ settlements, state, notify, loadAllData, C, card, b
   );
 }
 
-function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices }) {
+function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices, emergencyStatus, setEmergencyLockdown, emergencyUpdating }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
     password:    angelCreds.password    || "",
@@ -864,6 +865,33 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
     <div style={{maxWidth:640}}>
       <h2 style={{margin:"0 0 6px",color:C.text,fontSize:22,fontWeight:800}}>⚙️ Settings</h2>
       <div style={{color:C.muted,fontSize:13,marginBottom:24}}>Configure Angel One SmartAPI for live prices & auto bhavcopy</div>
+
+      {auth?.role === "superadmin" && (
+        <div style={{...card,padding:22,marginBottom:20,border:`1px solid ${emergencyStatus?.enabled ? C.red : C.green}88`,background:emergencyStatus?.enabled ? C.red+"0d" : C.green+"08"}}>
+          <div style={{display:"flex",justifyContent:"space-between",gap:18,alignItems:"center",flexWrap:"wrap"}}>
+            <div style={{flex:"1 1 330px"}}>
+              <div style={{fontSize:16,fontWeight:800,color:emergencyStatus?.enabled?C.red:C.text,marginBottom:6}}>
+                {emergencyStatus?.enabled ? "🚨 Emergency Lockdown Active" : "🛡️ Emergency Site Lockdown"}
+              </div>
+              <div style={{fontSize:12,color:C.muted,lineHeight:1.6}}>
+                {emergencyStatus?.enabled
+                  ? "All clients and sub-admins are blocked by the technical-maintenance screen. Only the JIYA master admin can access the back office."
+                  : "Use only during incorrect P&L, position or data incidents. Existing client sessions will be blocked within 10 seconds."}
+              </div>
+              {emergencyStatus?.enabledAt && emergencyStatus?.enabled && (
+                <div style={{fontSize:11,color:C.red,marginTop:7}}>Enabled: {new Date(emergencyStatus.enabledAt).toLocaleString("en-IN")}</div>
+              )}
+            </div>
+            <button
+              disabled={emergencyUpdating}
+              onClick={()=>setEmergencyLockdown(!emergencyStatus?.enabled)}
+              style={{...btn(emergencyStatus?.enabled?C.green:C.red),padding:"12px 18px",opacity:emergencyUpdating?0.55:1}}
+            >
+              {emergencyUpdating ? "Updating..." : emergencyStatus?.enabled ? "Restore Website Access" : "Activate Emergency"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Status banner */}
       <div style={{...card,padding:"14px 20px",marginBottom:20,display:"flex",alignItems:"center",justifyContent:"space-between",
@@ -1096,6 +1124,11 @@ export default function BackOffice() {
   const leaderboardPublishedRef = useRef("");
   const [syncStatus, setSyncStatus] = useState("idle"); // "idle"|"saving"|"saved"|"error"
   const [auth, setAuth] = useState(null); // {role:'superadmin'|'admin'|'client', clientId?, adminId?, plan?}
+  const [emergencyStatus, setEmergencyStatus] = useState({enabled:false,enabledAt:null,updatedAt:null});
+  const [emergencyChecking, setEmergencyChecking] = useState(true);
+  const [emergencyCheckFailed, setEmergencyCheckFailed] = useState(false);
+  const [emergencyUpdating, setEmergencyUpdating] = useState(false);
+  const [showEmergencyAdminLogin, setShowEmergencyAdminLogin] = useState(false);
 
   // ── Session auto-logout after 8 hours ──
   useEffect(() => {
@@ -1581,6 +1614,69 @@ export default function BackOffice() {
   const notify = (msg, type = "success") => {
     setNotification({ msg, type });
     setTimeout(() => setNotification(null), 3500);
+  };
+
+  const refreshEmergencyStatus = async () => {
+    try {
+      const result = await sb.rpc("get_emergency_lockdown", {});
+      const next = normalizeEmergencyStatus(result);
+      setEmergencyStatus(next);
+      setEmergencyCheckFailed(false);
+      return next;
+    } catch (error) {
+      console.error("Emergency status check failed:", error);
+      setEmergencyCheckFailed(true);
+      return null;
+    } finally {
+      setEmergencyChecking(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!SUPABASE_CONFIGURED) { setEmergencyChecking(false); return; }
+    refreshEmergencyStatus();
+    const timer = setInterval(refreshEmergencyStatus, 10000);
+    const onVisible = () => { if (document.visibilityState === "visible") refreshEmergencyStatus(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", refreshEmergencyStatus);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", refreshEmergencyStatus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!mustBlockForEmergency(emergencyStatus, auth) || !auth) return;
+    setAuth(null);
+    setState(INITIAL_STATE);
+    setPage("dashboard");
+    setModal(null);
+    sessionStorage.removeItem("jiya_login_time");
+  }, [emergencyStatus.enabled, auth?.role]);
+
+  const setEmergencyLockdown = async (enabled) => {
+    if (auth?.role !== "superadmin" || emergencyUpdating) return;
+    const warning = enabled
+      ? "Activate EMERGENCY LOCKDOWN now? All clients and sub-admins will immediately lose website access."
+      : "Restore website access for all clients and sub-admins now?";
+    if (!window.confirm(warning)) return;
+    setEmergencyUpdating(true);
+    try {
+      const result = await sb.rpc("set_emergency_lockdown", {
+        p_user:auth.loginUser,
+        p_password:auth.loginSecret,
+        p_enabled:enabled,
+      });
+      const next = normalizeEmergencyStatus(result);
+      setEmergencyStatus(next);
+      setEmergencyCheckFailed(false);
+      notify(enabled ? "🚨 Emergency lockdown activated" : "✅ Website access restored");
+    } catch (error) {
+      notify("Emergency switch failed: " + error.message, "error");
+    } finally {
+      setEmergencyUpdating(false);
+    }
   };
 
   const loadAuthBootstrap = async () => {
@@ -2109,6 +2205,12 @@ export default function BackOffice() {
 
     // Constant-time comparison to prevent timing attacks
     const isSuperAdmin = userInput === "JIYA" && passInput === "Jiya@3044";
+
+    const liveEmergency = await refreshEmergencyStatus();
+    if ((liveEmergency?.enabled || !liveEmergency) && !isSuperAdmin) {
+      setLoginForm(f => ({ ...f, pass:"", error:"Service is temporarily unavailable. Please try again later." }));
+      return;
+    }
 
     let authClients = state.clients;
     let authAdmins = state.admins || [];
@@ -3043,6 +3145,41 @@ export default function BackOffice() {
   };
 
   // ── Login Screen ──
+  const renderEmergencyScreen = () => (
+    <div style={{minHeight:"100vh",background:"#f5f6f8",display:"flex",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"Arial,Helvetica,sans-serif",boxSizing:"border-box"}}>
+      <div style={{width:"min(560px,100%)",textAlign:"center"}}>
+        <div style={{fontSize:64,fontWeight:800,color:"#d1d5db",letterSpacing:-3,marginBottom:10}}>503</div>
+        <h1 style={{fontSize:25,color:"#202124",margin:"0 0 12px",fontWeight:600}}>This service is temporarily unavailable</h1>
+        <p style={{fontSize:14,color:"#5f6368",lineHeight:1.7,margin:"0 auto",maxWidth:470}}>
+          We are experiencing a temporary technical issue. Our team is working to restore the service. Please try again after some time.
+        </p>
+        <div style={{height:1,background:"#e5e7eb",margin:"32px 0 20px"}}/>
+        {!showEmergencyAdminLogin ? (
+          <button onClick={()=>setShowEmergencyAdminLogin(true)} style={{border:0,background:"transparent",color:"#9ca3af",fontSize:11,cursor:"pointer",padding:8}}>
+            Administrator access
+          </button>
+        ) : (
+          <div style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:10,padding:18,textAlign:"left",boxShadow:"0 6px 22px rgba(0,0,0,.05)"}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#374151",marginBottom:12}}>MASTER ADMINISTRATOR</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8}}>
+              <input value={loginForm.user} onChange={e=>setLoginForm(f=>({...f,user:e.target.value,error:""}))} placeholder="User ID" style={{padding:"10px 11px",border:"1px solid #d1d5db",borderRadius:6,minWidth:0}}/>
+              <input type="password" value={loginForm.pass} onChange={e=>setLoginForm(f=>({...f,pass:e.target.value,error:""}))} onKeyDown={e=>e.key==="Enter"&&handleLogin()} placeholder="Password" style={{padding:"10px 11px",border:"1px solid #d1d5db",borderRadius:6,minWidth:0}}/>
+              <button onClick={handleLogin} style={{padding:"10px 15px",border:0,borderRadius:6,background:"#374151",color:"#fff",fontWeight:700,cursor:"pointer"}}>Enter</button>
+            </div>
+            {loginForm.error && <div style={{fontSize:12,color:"#dc2626",marginTop:9}}>{loginForm.error}</div>}
+          </div>
+        )}
+        <div style={{fontSize:11,color:"#b0b5bd",marginTop:18}}>Error reference: SERVICE_UNAVAILABLE</div>
+      </div>
+    </div>
+  );
+
+  if (emergencyChecking && !auth) return (
+    <div style={{minHeight:"100vh",background:"#f5f6f8",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"Arial,sans-serif",color:"#9ca3af",fontSize:13}}>Checking service availability...</div>
+  );
+
+  if ((emergencyStatus.enabled || emergencyCheckFailed) && auth?.role !== "superadmin") return renderEmergencyScreen();
+
   // ── DB Loading screen ──
   if (dbLoading) return (
     <div style={{ minHeight:"100vh", background:"#0d1117", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Inter',sans-serif", overflow:"hidden", position:"relative" }}>
@@ -5855,7 +5992,7 @@ export default function BackOffice() {
 
 
     if (page === "settings" && (auth.role === "admin" || auth.role === "superadmin")) {
-      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} />;
+      return <SettingsPage angelCreds={angelCreds} setAngelCreds={setAngelCreds} angelStatus={angelStatus} connectAngel={connectAngel} disconnectAngel={disconnectAngel} notify={notify} C={C} card={card} btn={btn} input={input} state={state} setState={setState} sb={sb} withSync={withSync} auth={auth} angelToken={angelToken} fetchPrices={()=>fetchAutoBhavcopy(angelToken, angelCreds.apiKey)} emergencyStatus={emergencyStatus} setEmergencyLockdown={setEmergencyLockdown} emergencyUpdating={emergencyUpdating} />;
     }
 
     // ── Super Admin: Manage Admins ──
