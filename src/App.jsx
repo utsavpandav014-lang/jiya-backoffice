@@ -1050,7 +1050,7 @@ const formatINR = (value) => new Intl.NumberFormat("en-IN", {
   style: "currency", currency: "INR", maximumFractionDigits: 2,
 }).format(Number(value) || 0);
 
-function MonthlyTargetTracker({ title, subtitle, pnl, target, pnlAvailable=true, onSetTarget=null, C, card }) {
+function MonthlyTargetTracker({ title, subtitle, pnl, target, pnlAvailable=true, onSetTarget=null, daysLeftOverride=null, onSetDays=null, C, card }) {
   const targetAmount = Number(target) || 0;
   if (!(targetAmount > 0)) return (
     <div style={{...card,padding:"18px 20px",marginBottom:20,border:`1px solid ${C.border}`}}>
@@ -1075,7 +1075,8 @@ function MonthlyTargetTracker({ title, subtitle, pnl, target, pnlAvailable=true,
   const tracker = targetTrackerState(value, targetAmount);
   const markerColor = tracker.status==="loss" ? C.red : tracker.status==="caution" ? C.yellow : C.accent;
   const statusText = tracker.status==="loss" ? "Recovery Zone" : tracker.status==="caution" ? "Target achieved — protect profits" : "Progressing toward target";
-  const daysLeft = daysRemainingInMonth(new Date());
+  const configuredDays = Number(daysLeftOverride);
+  const daysLeft = Number.isInteger(configuredDays) && configuredDays > 0 ? configuredDays : daysRemainingInMonth(new Date());
   const dailyNeeded = tracker.remaining > 0 ? tracker.remaining / Math.max(daysLeft,1) : 0;
   return (
     <div style={{...card,padding:"20px 22px",marginBottom:20,border:`1px solid ${markerColor}55`,overflow:"hidden"}}>
@@ -1106,7 +1107,7 @@ function MonthlyTargetTracker({ title, subtitle, pnl, target, pnlAvailable=true,
         <div style={{background:C.bg,borderRadius:9,padding:10}}><div style={{color:C.muted,fontSize:10}}>Status</div><div style={{color:markerColor,fontWeight:800,fontSize:12,marginTop:3}}>{statusText}</div></div>
         <div style={{background:C.bg,borderRadius:9,padding:10}}><div style={{color:C.muted,fontSize:10}}>{tracker.status==="caution"?"Profit Buffer":"Target Remaining"}</div><div style={{color:C.text,fontWeight:800,fontSize:12,marginTop:3}}>{formatINR(tracker.status==="caution"?tracker.buffer:tracker.remaining)}</div></div>
         <div style={{background:C.bg,borderRadius:9,padding:10}}><div style={{color:C.muted,fontSize:10}}>Target Progress</div><div style={{color:markerColor,fontWeight:800,fontSize:12,marginTop:3}}>{tracker.progressPct.toFixed(2)}%</div></div>
-        <div style={{background:C.bg,borderRadius:9,padding:10}}><div style={{color:C.muted,fontSize:10}}>{tracker.remaining>0?`Required / day · ${daysLeft} days left`:"Risk Message"}</div><div style={{color:tracker.status==="caution"?C.yellow:C.text,fontWeight:800,fontSize:12,marginTop:3}}>{tracker.remaining>0?formatINR(dailyNeeded):"Protect achieved profits"}</div></div>
+        <div style={{background:C.bg,borderRadius:9,padding:10}}><div style={{color:C.muted,fontSize:10}}>Required / day · {tracker.remaining>0 && onSetDays ? <button type="button" onClick={onSetDays} title="Change for every client" style={{padding:0,border:0,background:"transparent",color:C.accent,font: "inherit",fontWeight:900,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>{daysLeft} days left</button> : tracker.remaining>0 ? `${daysLeft} days left` : "Risk Message"}</div><div style={{color:tracker.status==="caution"?C.yellow:C.text,fontWeight:800,fontSize:12,marginTop:3}}>{tracker.remaining>0?formatINR(dailyNeeded):"Protect achieved profits"}</div></div>
       </div>
     </div>
   );
@@ -1121,6 +1122,7 @@ export default function BackOffice() {
   const [authBootstrapReady, setAuthBootstrapReady] = useState(false);
   const [dbError, setDbError] = useState(null);
   const [performanceWinners, setPerformanceWinners] = useState([]);
+  const [targetDaysLeft, setTargetDaysLeft] = useState(null);
   const leaderboardPublishedRef = useRef("");
   const [syncStatus, setSyncStatus] = useState("idle"); // "idle"|"saving"|"saved"|"error"
   const [auth, setAuth] = useState(null); // {role:'superadmin'|'admin'|'client', clientId?, adminId?, plan?}
@@ -1770,7 +1772,7 @@ export default function BackOffice() {
       const ownFilter = isClientSession ? `?clientId=eq.${encodeURIComponent(auth.clientId)}` : "?";
       const tradeFilter = isClientSession ? `?clientId=in.(${relatedTradeIds.map(encodeURIComponent).join(",")})` : "?";
 
-      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, carryForwardBatches, monthlyTargets, leaderboard, dailyInterestSettings, monthlySoftwareSettings] = await Promise.all([
+      const [clients, trades, ledger, tickets, interest, chargesHistory, bhavcopy, lockedMonthsRaw, admins, auditLog, carryForwardBatches, monthlyTargets, leaderboard, dailyInterestSettings, monthlySoftwareSettings, sharedTargetDays] = await Promise.all([
         fetchAll("clients",         "?order=created_at.asc"),
         // CRITICAL: id is the unique tie-breaker. Hundreds of broker rows can
         // share the same date/time; offset pagination without id can skip or
@@ -1789,6 +1791,7 @@ export default function BackOffice() {
         sb.rpc("get_performance_leaderboard", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||"",p_month:new Date().toISOString().slice(0,7)}).catch(() => []),
         isClientSession ? Promise.resolve([]) : sb.rpc("get_daily_interest_settings", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
         isClientSession ? Promise.resolve([]) : sb.rpc("get_monthly_software_settings", {p_user:auth?.loginUser||"",p_password:auth?.loginSecret||""}).catch(() => []),
+        sb.rpc("get_target_days", {p_month:new Date().toISOString().slice(0,7)}).catch(() => null),
       ]);
 
       // If we get here, DB is truly connected and returning data
@@ -1813,6 +1816,7 @@ export default function BackOffice() {
         monthlySoftwareSettings: Array.isArray(monthlySoftwareSettings) ? monthlySoftwareSettings : [],
       }));
       setPerformanceWinners(Array.isArray(leaderboard) ? leaderboard : []);
+      setTargetDaysLeft(Number.isInteger(Number(sharedTargetDays)) && Number(sharedTargetDays)>0 ? Number(sharedTargetDays) : null);
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus("idle"), 2000);
 
@@ -1849,6 +1853,22 @@ export default function BackOffice() {
   useEffect(() => {
     if (!auth || !SUPABASE_CONFIGURED) return;
     loadAllData();
+  }, [auth]);
+
+  // Keep the master-admin days setting synchronized in already-open client sessions.
+  useEffect(() => {
+    if (!auth || !SUPABASE_CONFIGURED) return;
+    let active = true;
+    const refresh = async () => {
+      try {
+        const value = await sb.rpc("get_target_days", {p_month:new Date().toISOString().slice(0,7)});
+        if (active) setTargetDaysLeft(Number.isInteger(Number(value)) && Number(value)>0 ? Number(value) : null);
+      } catch (_) {}
+    };
+    const timer = setInterval(refresh, 30000);
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    return () => { active=false; clearInterval(timer); window.removeEventListener("focus", onFocus); };
   }, [auth]);
 
   // ── Supabase: Generic save with sync indicator ──
@@ -2503,6 +2523,22 @@ export default function BackOffice() {
     }
     setTargetEditor({clientId:client.id,clientName:client.name||client.id,month,targetAmount:monthlyTargetFor(client.id,month)});
     setModal("monthlyTarget");
+  };
+
+  const editSharedTargetDays = async () => {
+    if (auth?.role !== "superadmin") return;
+    const fallback = targetDaysLeft || daysRemainingInMonth(new Date()) || 1;
+    const raw = window.prompt("Days left for Required / day (applies to every client)", String(fallback));
+    if (raw === null) return;
+    const days = Number(raw);
+    if (!Number.isInteger(days) || days < 1 || days > 366) return notify("Enter a whole number between 1 and 366", "error");
+    try {
+      const saved = await withSync(() => sb.rpc("set_target_days", {
+        p_user:auth.loginUser,p_password:auth.loginSecret,p_month:currentMonthStr,p_days:days,
+      }));
+      setTargetDaysLeft(Number(saved));
+      notify(`✅ Required / day now uses ${days} days for every client`);
+    } catch (error) { notify(`Could not update target days: ${error.message}`, "error"); }
   };
 
   const saveMonthlyTarget = async () => {
@@ -3696,6 +3732,7 @@ export default function BackOffice() {
               target={monthlyTargetFor(cid)}
               pnlAvailable={!investorMonthResult || investorMonthResult.complete}
               onSetTarget={(currentClient?.accountType || "trading") !== "investor" && monthlyTargetFor(cid) <= 0 ? ()=>openTargetEditor(currentClient) : null}
+              daysLeftOverride={targetDaysLeft}
               C={C}
               card={card}
             />
@@ -3810,6 +3847,8 @@ export default function BackOffice() {
             pnl={operationalPnl}
             target={operationalTarget}
             pnlAvailable={true}
+            daysLeftOverride={targetDaysLeft}
+            onSetDays={auth?.role==="superadmin" ? editSharedTargetDays : null}
             C={C}
             card={card}
           />
@@ -3821,6 +3860,7 @@ export default function BackOffice() {
               pnl={0}
               target={investorTarget}
               pnlAvailable={false}
+              daysLeftOverride={targetDaysLeft}
               C={C}
               card={card}
             />
@@ -5550,8 +5590,10 @@ export default function BackOffice() {
             <div style={{ display:"flex", gap:10 }}>
               {chargesEdit
                 ? <>
-                    <button style={btn(C.green)} onClick={() => {
-                      const newCfg = { ...chargesEdit, effectiveFrom: new Date().toISOString().slice(0,10) };
+                    <button style={btn(C.green)} onClick={async () => {
+                      const newCfg = { ...chargesEdit, id:`CHG${Date.now()}`, effectiveFrom: new Date().toISOString().slice(0,10), created_at:new Date().toISOString() };
+                      const saved = await withSync(() => sb.upsert("charges_history", newCfg));
+                      if (!saved) return;
                       setState(s => ({ ...s, chargesHistory: [...s.chargesHistory, newCfg] }));
                       setChargesEdit(null);
                       notify("✅ New charges saved! Effective from today.");
