@@ -1092,6 +1092,17 @@ const formatINR = (value) => new Intl.NumberFormat("en-IN", {
   style: "currency", currency: "INR", maximumFractionDigits: 2,
 }).format(Number(value) || 0);
 
+function PaginationControls({page,total,pageSize,onChange,C,label="items"}) {
+  const pages=Math.max(1,Math.ceil(total/pageSize));
+  if(total<=pageSize) return null;
+  const safePage=Math.min(Math.max(page,1),pages);
+  return <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:9,margin:"14px 0 4px",flexWrap:"wrap"}}>
+    <button disabled={safePage===1} onClick={()=>onChange(safePage-1)} style={{padding:"6px 11px",borderRadius:7,border:`1px solid ${C.border}`,background:C.card,color:C.text,cursor:safePage===1?"not-allowed":"pointer",opacity:safePage===1?.45:1}}>← Previous</button>
+    <span style={{color:C.muted,fontSize:12}}>Page <b style={{color:C.text}}>{safePage}</b> of {pages} · {total} {label}</span>
+    <button disabled={safePage===pages} onClick={()=>onChange(safePage+1)} style={{padding:"6px 11px",borderRadius:7,border:`1px solid ${C.border}`,background:C.card,color:C.text,cursor:safePage===pages?"not-allowed":"pointer",opacity:safePage===pages?.45:1}}>Next →</button>
+  </div>;
+}
+
 function MonthlyTargetTracker({ title, subtitle, pnl, target, pnlAvailable=true, onSetTarget=null, daysLeftOverride=null, onSetDays=null, C, card }) {
   const targetAmount = Number(target) || 0;
   if (!(targetAmount > 0)) return (
@@ -1200,6 +1211,12 @@ export default function BackOffice() {
   const [ledgerSearch,   setLedgerSearch]   = useState("");
   const [tradeSearch,    setTradeSearch]    = useState("");
   const [posSearch,      setPosSearch]      = useState("");
+  const [ledgerClientPage,setLedgerClientPage]=useState(1);
+  const [ledgerRowPages,setLedgerRowPages]=useState({});
+  const [positionClientPage,setPositionClientPage]=useState(1);
+  const [positionRowPages,setPositionRowPages]=useState({});
+  const [pnlClientPage,setPnlClientPage]=useState(1);
+  const [pnlRowPages,setPnlRowPages]=useState({});
   const [notification,  setNotification]  = useState(null);
   const [bells,         setBells]         = useState(() => {
     try { return JSON.parse(localStorage.getItem("jiya_bells") || "[]"); } catch(e) { return []; }
@@ -4563,6 +4580,9 @@ export default function BackOffice() {
       const filteredClients = isAdmin && ledgerClientFilter !== "all"
         ? allClients.filter(c => c.id === ledgerClientFilter)
         : allClients;
+      const clientPageSize=5;
+      const safeClientPage=Math.min(ledgerClientPage,Math.max(1,Math.ceil(filteredClients.length/clientPageSize)));
+      const pagedClients=filteredClients.slice((safeClientPage-1)*clientPageSize,safeClientPage*clientPageSize);
 
       return (
         <div>
@@ -4571,13 +4591,13 @@ export default function BackOffice() {
             <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
               <h2 style={{ color:C.text, margin:0 }}>Ledger</h2>
               {/* Search box */}
-              <input value={ledgerSearch} onChange={e=>setLedgerSearch(e.target.value)}
+              <input value={ledgerSearch} onChange={e=>{setLedgerSearch(e.target.value);setLedgerClientPage(1);}}
                 placeholder="🔍 Search..."
                 style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",
                   color:C.text,fontSize:13,outline:"none",width:200}}/>
               {/* Client filter dropdown - admin only */}
               {isAdmin && (
-                <select value={ledgerClientFilter} onChange={e => setLedgerClientFilter(e.target.value)}
+                <select value={ledgerClientFilter} onChange={e => {setLedgerClientFilter(e.target.value);setLedgerClientPage(1);}}
                   style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
                   <option value="all">All Clients</option>
                   {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
@@ -4586,7 +4606,7 @@ export default function BackOffice() {
               {/* DP / ALL tab toggle */}
               <div style={{ display:"flex", background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, overflow:"hidden" }}>
                 {["all","dp"].map(tab => (
-                  <button key={tab} onClick={() => setLedgerTabFilter(tab)}
+                  <button key={tab} onClick={() => {setLedgerTabFilter(tab);setLedgerClientPage(1);}}
                     style={{ padding:"7px 18px", border:"none", cursor:"pointer", fontSize:13, fontWeight:600,
                       background: ledgerTabFilter===tab ? C.accent : "transparent",
                       color: ledgerTabFilter===tab ? "#fff" : C.muted }}>
@@ -4610,7 +4630,8 @@ export default function BackOffice() {
           )}
 
           {/* Per-client ledger tables */}
-          {filteredClients.map(client => {
+          <PaginationControls page={safeClientPage} total={filteredClients.length} pageSize={clientPageSize} onChange={setLedgerClientPage} C={C} label="accounts"/>
+          {pagedClients.map(client => {
             // Each ledger tab is its own bank-statement view. DP totals and its
             // running balance must use only DP-tagged entries; All uses everything.
             const selectedEntries = ledgerTabFilter === "dp" ? state.ledger.filter(r => r.ledgerType === "dp") : state.ledger;
@@ -4620,6 +4641,11 @@ export default function BackOffice() {
               String(r.credit||"").includes(ledgerSearch) || String(r.debit||"").includes(ledgerSearch) ||
               (r.ledgerType||"").toLowerCase().includes(ledgerSearch.toLowerCase())
             ) : statementRows;
+            const rowPageSize=25;
+            const rowPageKey=`${client.id}:${ledgerTabFilter}:${ledgerSearch}`;
+            const requestedRowPage=ledgerRowPages[rowPageKey]||1;
+            const safeRowPage=Math.min(requestedRowPage,Math.max(1,Math.ceil(rows.length/rowPageSize)));
+            const pagedRows=rows.slice((safeRowPage-1)*rowPageSize,safeRowPage*rowPageSize);
             const {totalCredit,totalDebit,closingBalance:lastBal} = ledgerTotals(statementRows);
 
             return (
@@ -4661,7 +4687,7 @@ export default function BackOffice() {
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.map(l => (
+                      {pagedRows.map(l => (
                         <tr key={l.id} style={{ borderBottom:`1px solid ${C.border}22` }}>
                           <td style={{ padding:"10px 12px", color:C.muted, whiteSpace:"nowrap" }}>{l.date}</td>
                           <td style={{ padding:"10px 12px" }}>
@@ -4708,9 +4734,11 @@ export default function BackOffice() {
                     </tfoot>
                   </table>
                 )}
+                <PaginationControls page={safeRowPage} total={rows.length} pageSize={rowPageSize} onChange={next=>setLedgerRowPages(p=>({...p,[rowPageKey]:next}))} C={C} label="entries"/>
               </div>
             );
           })}
+          <PaginationControls page={safeClientPage} total={filteredClients.length} pageSize={clientPageSize} onChange={setLedgerClientPage} C={C} label="accounts"/>
         </div>
       );
     }
@@ -4721,6 +4749,9 @@ export default function BackOffice() {
       const showClients = isAdmin && tradesClientFilter !== "all"
         ? allClients.filter(c => c.id === tradesClientFilter)
         : allClients;
+      const clientPageSize=5;
+      const safeClientPage=Math.min(positionClientPage,Math.max(1,Math.ceil(showClients.length/clientPageSize)));
+      const pagedClients=showClients.slice((safeClientPage-1)*clientPageSize,safeClientPage*clientPageSize);
 
       return (
         <div>
@@ -4729,12 +4760,12 @@ export default function BackOffice() {
             <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
               <h2 style={{ color:C.text, margin:0 }}>Trades & Positions</h2>
               {/* Trades search */}
-              <input value={tradeSearch} onChange={e=>setTradeSearch(e.target.value)}
+              <input value={tradeSearch} onChange={e=>{setTradeSearch(e.target.value);setPositionClientPage(1);}}
                 placeholder="🔍 Search contract, symbol..."
                 style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,
                   padding:"7px 12px",color:C.text,fontSize:13,outline:"none",width:220}}/>
               {isAdmin && (
-                <select value={tradesClientFilter} onChange={e => setTradesClientFilter(e.target.value)}
+                <select value={tradesClientFilter} onChange={e => {setTradesClientFilter(e.target.value);setPositionClientPage(1);}}
                   style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
                   <option value="all">All Clients</option>
                   {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
@@ -4770,7 +4801,7 @@ export default function BackOffice() {
           {/* Position filter tabs */}
           <div style={{ display:"flex", gap:8, marginBottom:20, alignItems:"center", flexWrap:"wrap" }}>
             {["open","closed","all"].map(f => (
-              <button key={f} onClick={() => setPositionFilter(f)}
+              <button key={f} onClick={() => {setPositionFilter(f);setPositionClientPage(1);}}
                 style={{
                   padding:"8px 18px", borderRadius:8, cursor:"pointer", fontSize:13, fontWeight: positionFilter===f ? 600 : 400,
                   background: positionFilter===f ? C.accent : "#fff",
@@ -4784,20 +4815,32 @@ export default function BackOffice() {
             <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8,background:C.card,border:`1px solid ${C.border}`,borderRadius:9,padding:"6px 10px"}}>
               <span style={{color:C.muted,fontSize:11,fontWeight:700}}>POSITIONS AS ON</span>
               <input type="date" max={new Date().toISOString().slice(0,10)} value={positionAsOfDate}
-                onChange={e=>setPositionAsOfDate(e.target.value)}
+                onChange={e=>{setPositionAsOfDate(e.target.value);setPositionClientPage(1);}}
                 style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:"6px 9px",color:C.text,fontSize:12,outline:"none"}}/>
               {positionAsOfDate !== new Date().toISOString().slice(0,10) && <button onClick={()=>setPositionAsOfDate(new Date().toISOString().slice(0,10))}
                 style={{background:"transparent",border:"none",color:C.accent,cursor:"pointer",fontSize:11,fontWeight:700}}>TODAY</button>}
             </div>
           </div>
 
-          {showClients.map(client => {
+          <PaginationControls page={safeClientPage} total={showClients.length} pageSize={clientPageSize} onChange={setPositionClientPage} C={C} label="accounts"/>
+          {pagedClients.map(client => {
             const isInvestorAccount = client.accountType === "investor";
             const historicalAt = new Date(`${positionAsOfDate}T23:59:59+05:30`);
             const open   = isInvestorAccount
               ? investorOpenPos(client.id, historicalBook.openPositions, historicalAt)
               : historicalBook.openPositions.filter(p=>p.clientId===client.id);
             const closed = isInvestorAccount ? [] : historicalBook.closedPositions.filter(p=>p.clientId===client.id);
+            const accountTrades=state.trades.filter(t=>t.clientId===client.id && !isCarryForwardTrade(t));
+            const totalCharges=accountTrades.reduce((sum,t)=>sum+getTradeCharges(t).total,0);
+            const openPageKey=`${client.id}:open:${positionFilter}:${positionAsOfDate}:${tradeSearch}`;
+            const openPage=positionRowPages[openPageKey]||1;
+            const safeOpenPage=Math.min(openPage,Math.max(1,Math.ceil(open.length/20)));
+            const pagedOpen=open.slice((safeOpenPage-1)*20,safeOpenPage*20);
+            const closedTrades=closed.flatMap(c=>c.trades);
+            const closedPageKey=`${client.id}:closed:${positionFilter}:${positionAsOfDate}:${tradeSearch}`;
+            const closedPage=positionRowPages[closedPageKey]||1;
+            const safeClosedPage=Math.min(closedPage,Math.max(1,Math.ceil(closedTrades.length/25)));
+            const pagedClosed=closedTrades.slice((safeClosedPage-1)*25,safeClosedPage*25);
 
             return (
               <div key={client.id} style={{ marginBottom:32 }}>
@@ -4822,7 +4865,7 @@ export default function BackOffice() {
                         ))}</tr>
                       </thead>
                       <tbody>
-                        {open.map((p,i) => {
+                        {pagedOpen.map((p,i) => {
                           const manualKey = `${p.clientId}||${p.contract}`;
                           const close = manualLTP[manualKey] !== undefined
                             ? manualLTP[manualKey]
@@ -5001,6 +5044,7 @@ export default function BackOffice() {
                         })}
                       </tbody>
                     </table>
+                    <PaginationControls page={safeOpenPage} total={open.length} pageSize={20} onChange={next=>setPositionRowPages(p=>({...p,[openPageKey]:next}))} C={C} label="open positions"/>
                   </div>
                 )}
 
@@ -5015,14 +5059,14 @@ export default function BackOffice() {
                         ))}</tr>
                       </thead>
                       <tbody>
-                        {closed.flatMap(c=>c.trades).map((t,i) => {
+                        {pagedClosed.map((t,i) => {
                           // Find trades for this closed trade to calc charges
-                          const relatedTrades = clientTrades.filter(tr =>
+                          const relatedTrades = accountTrades.filter(tr =>
                             tr.contract === t.contract && (tr.date === t.date || true)
                           );
                           // Approx: split total charges by turnover proportion
                           const tradeTurnover = t.sellPrice * t.qty + t.buyPrice * t.qty;
-                          const totalTurnover = clientTrades
+                          const totalTurnover = accountTrades
                             .filter(tr => tr.contract === t.contract)
                             .reduce((s,tr)=>s+tr.price*tr.qty,0) || tradeTurnover;
                           const chargesApprox = totalCharges * (tradeTurnover / Math.max(totalTurnover,1));
@@ -5041,11 +5085,12 @@ export default function BackOffice() {
                         })}
                       </tbody>
                     </table>
+                    <PaginationControls page={safeClosedPage} total={closedTrades.length} pageSize={25} onChange={next=>setPositionRowPages(p=>({...p,[closedPageKey]:next}))} C={C} label="closed trades"/>
                   </div>
                 )}
 
                 {/* Charges breakdown per trade — admin only */}
-                {isAdmin && (positionFilter==="closed" || positionFilter==="all") && clientTrades.length>0 && (
+                {isAdmin && (positionFilter==="closed" || positionFilter==="all") && accountTrades.length>0 && (
                   <details style={{ ...card, cursor:"pointer" }}>
                     <summary style={{ color:C.yellow, fontWeight:600, fontSize:13, padding:"4px 0", userSelect:"none" }}>
                       💰 Charges Breakdown — {client.name} (Total: ₹{totalCharges.toFixed(2)})
@@ -5058,7 +5103,7 @@ export default function BackOffice() {
                           ))}</tr>
                         </thead>
                         <tbody>
-                          {clientTrades.map((t,i) => {
+                          {accountTrades.slice(0,25).map((t,i) => {
                             const ch = getTradeCharges(t);
                             return (
                               <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
@@ -5080,7 +5125,7 @@ export default function BackOffice() {
                             <td colSpan={5} style={{ padding:"7px 8px", color:C.text, fontWeight:700, fontSize:12 }}>TOTAL</td>
                             {["stt","stamp","tot","sebi","ipf","clearing","gst","markup"].map(k=>(
                               <td key={k} style={{ padding:"7px 8px", color:C.muted, fontWeight:600 }}>
-                                ₹{clientTrades.reduce((s,t)=>s+getTradeCharges(t)[k],0).toFixed(3)}
+                                ₹{accountTrades.reduce((s,t)=>s+getTradeCharges(t)[k],0).toFixed(3)}
                               </td>
                             ))}
                             <td style={{ padding:"7px 8px", color:C.yellow, fontWeight:700 }}>₹{totalCharges.toFixed(2)}</td>
@@ -5097,6 +5142,7 @@ export default function BackOffice() {
               </div>
             );
           })}
+          <PaginationControls page={safeClientPage} total={showClients.length} pageSize={clientPageSize} onChange={setPositionClientPage} C={C} label="accounts"/>
         </div>
       );
     }
@@ -5214,6 +5260,9 @@ export default function BackOffice() {
       const showClients = isAdmin && pnlClientFilter !== "all"
         ? allClients.filter(c => c.id === pnlClientFilter)
         : allClients;
+      const clientPageSize=5;
+      const safeClientPage=Math.min(pnlClientPage,Math.max(1,Math.ceil(showClients.length/clientPageSize)));
+      const pagedClients=showClients.slice((safeClientPage-1)*clientPageSize,safeClientPage*clientPageSize);
 
       // Date filter helper — does a month fall within the selected filter?
       const monthInFilter = (m) => {
@@ -5261,7 +5310,7 @@ export default function BackOffice() {
           })()}
         </div>
               {isAdmin && (
-                <select value={pnlClientFilter} onChange={e => setPnlClientFilter(e.target.value)}
+                <select value={pnlClientFilter} onChange={e => {setPnlClientFilter(e.target.value);setPnlClientPage(1);}}
                   style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"7px 12px", color:C.text, fontSize:13, cursor:"pointer", outline:"none" }}>
                   <option value="all">All Clients</option>
                   {state.clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.id})</option>)}
@@ -5283,7 +5332,7 @@ export default function BackOffice() {
                 { val:"month", label:"Specific Month" },
                 { val:"range", label:"Date Range" },
               ].map(f => (
-                <button key={f.val} onClick={() => setPnlDateMode(f.val)}
+                <button key={f.val} onClick={() => {setPnlDateMode(f.val);setPnlClientPage(1);}}
                   style={{ padding:"6px 14px", borderRadius:8, border:`1.5px solid ${pnlDateMode===f.val ? C.accent : C.border}`,
                     background: pnlDateMode===f.val ? C.accent+"12" : "transparent",
                     color: pnlDateMode===f.val ? C.accent : C.muted,
@@ -5292,22 +5341,23 @@ export default function BackOffice() {
                 </button>
               ))}
               {pnlDateMode === "month" && (
-                <input type="month" value={pnlMonth} onChange={e => setPnlMonth(e.target.value)}
+                <input type="month" value={pnlMonth} onChange={e => {setPnlMonth(e.target.value);setPnlClientPage(1);}}
                   style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none", fontWeight:600 }}/>
               )}
               {pnlDateMode === "range" && (
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                  <input type="date" value={pnlDateFrom} onChange={e => setPnlDateFrom(e.target.value)}
+                  <input type="date" value={pnlDateFrom} onChange={e => {setPnlDateFrom(e.target.value);setPnlClientPage(1);}}
                     style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
                   <span style={{ color:C.muted }}>to</span>
-                  <input type="date" value={pnlDateTo} onChange={e => setPnlDateTo(e.target.value)}
+                  <input type="date" value={pnlDateTo} onChange={e => {setPnlDateTo(e.target.value);setPnlClientPage(1);}}
                     style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", color:C.text, fontSize:13, outline:"none" }}/>
                 </div>
               )}
             </div>
           </div>
 
-          {showClients.map(client => {
+          <PaginationControls page={safeClientPage} total={showClients.length} pageSize={clientPageSize} onChange={setPnlClientPage} C={C} label="accounts"/>
+          {pagedClients.map(client => {
             if (client.accountType === "investor") {
               const allocationStrategyIds = new Set((state.investorAllocations || [])
                 .filter(a => a.investorClientId === client.id && a.status !== "cancelled")
@@ -5363,6 +5413,9 @@ export default function BackOffice() {
               const investorClosed = [...investorClosedByContract.values()]
                 .map(row=>({...row,totalPnl:+row.totalPnl.toFixed(2)}))
                 .sort((a,b)=>a.contract.localeCompare(b.contract));
+              const investorClosedKey=`${client.id}:investor-contracts:${pnlDateMode}:${pnlMonth}:${pnlDateFrom}:${pnlDateTo}`;
+              const safeInvestorClosedPage=Math.min(pnlRowPages[investorClosedKey]||1,Math.max(1,Math.ceil(investorClosed.length/25)));
+              const pagedInvestorClosed=investorClosed.slice((safeInvestorClosedPage-1)*25,safeInvestorClosedPage*25);
               return (
                 <div key={client.id} style={{ ...card, marginBottom:24 }}>
                   {isAdmin && <div style={{ color:C.accent, fontWeight:700, fontSize:15, marginBottom:16 }}>
@@ -5394,11 +5447,12 @@ export default function BackOffice() {
                     </summary>
                     <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginTop:10}}>
                       <thead><tr>{["Contract","Gross Allocated P&L"].map(h=><th key={h} style={{textAlign:"left",padding:"6px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
-                      <tbody>{investorClosed.map(row=><tr key={row.contract} style={{borderBottom:`1px solid ${C.border}11`}}>
+                      <tbody>{pagedInvestorClosed.map(row=><tr key={row.contract} style={{borderBottom:`1px solid ${C.border}11`}}>
                         <td style={{padding:"8px 12px",color:C.accent}}>{row.contract}</td>
                         <td style={{padding:"8px 12px",color:row.totalPnl>=0?C.green:C.red,fontWeight:600}}>₹{row.totalPnl.toFixed(2)}</td>
                       </tr>)}</tbody>
                     </table>
+                    <PaginationControls page={safeInvestorClosedPage} total={investorClosed.length} pageSize={25} onChange={next=>setPnlRowPages(p=>({...p,[investorClosedKey]:next}))} C={C} label="contracts"/>
                   </details>}
                   {investorClosed.length===0 && <div style={{color:C.muted,fontSize:13,marginTop:16}}>No closed positions yet.</div>}
                 </div>
@@ -5436,6 +5490,12 @@ export default function BackOffice() {
             }) : 0;
             // Net P&L = Realized (closed) + Open MTM (current month only) - Expenses
             const grandNet = grandRealized + grandMTM - grandExpenses - grandSoftware - grandInterest;
+            const monthPageKey=`${client.id}:months:${pnlDateMode}:${pnlMonth}:${pnlDateFrom}:${pnlDateTo}`;
+            const safeMonthPage=Math.min(pnlRowPages[monthPageKey]||1,Math.max(1,Math.ceil(allMonths.length/12)));
+            const pagedMonths=allMonths.slice((safeMonthPage-1)*12,safeMonthPage*12);
+            const closedPageKey=`${client.id}:contracts:${pnlDateMode}:${pnlMonth}:${pnlDateFrom}:${pnlDateTo}`;
+            const safeClosedPage=Math.min(pnlRowPages[closedPageKey]||1,Math.max(1,Math.ceil(filteredClosed.length/25)));
+            const pagedFilteredClosed=filteredClosed.slice((safeClosedPage-1)*25,safeClosedPage*25);
 
             return (
               <div key={client.id} style={{ ...card, marginBottom:24 }}>
@@ -5499,7 +5559,7 @@ export default function BackOffice() {
                         </tr>
                       </thead>
                       <tbody>
-                        {allMonths.map(m => {
+                        {pagedMonths.map(m => {
                           // Realized for this month = P&L from trades closed in this month
                           // Realized = contracts whose LAST trade (closing date) falls in this month
                           const monthRealized = closedPositionSlicesForMonth(closed, m).reduce((a,c) => a + c.totalPnl, 0);
@@ -5551,6 +5611,7 @@ export default function BackOffice() {
                         </tr>
                       </tfoot>
                     </table>
+                    <PaginationControls page={safeMonthPage} total={allMonths.length} pageSize={12} onChange={next=>setPnlRowPages(p=>({...p,[monthPageKey]:next}))} C={C} label="months"/>
                   </div>
                 )}
 
@@ -5567,7 +5628,7 @@ export default function BackOffice() {
                         ))}</tr>
                       </thead>
                       <tbody>
-                        {filteredClosed.map((c,i)=>(
+                        {pagedFilteredClosed.map((c,i)=>(
                           <tr key={i} style={{ borderBottom:`1px solid ${C.border}11` }}>
                             <td style={{ padding:"8px 12px", color:C.accent }}>{c.contract}</td>
                             <td style={{ padding:"8px 12px", color:c.totalPnl>=0?C.green:C.red, fontWeight:600 }}>₹{c.totalPnl.toFixed(2)}</td>
@@ -5575,6 +5636,7 @@ export default function BackOffice() {
                         ))}
                       </tbody>
                     </table>
+                    <PaginationControls page={safeClosedPage} total={filteredClosed.length} pageSize={25} onChange={next=>setPnlRowPages(p=>({...p,[closedPageKey]:next}))} C={C} label="contracts"/>
                   </details>
                 )}
 
@@ -5584,6 +5646,7 @@ export default function BackOffice() {
               </div>
             );
           })}
+          <PaginationControls page={safeClientPage} total={showClients.length} pageSize={clientPageSize} onChange={setPnlClientPage} C={C} label="accounts"/>
         </div>
       );
     }
