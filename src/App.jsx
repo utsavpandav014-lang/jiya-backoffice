@@ -831,6 +831,46 @@ function SettlementManager({ settlements, state, notify, loadAllData, C, card, b
   );
 }
 
+function AnnouncementManager({state,sb,withSync,auth,notify,C,card,btn,input}) {
+  const [form,setForm]=useState({title:"",description:"",audience:"everyone",clientIds:[],imageData:null});
+  const [current,setCurrent]=useState(null);
+  const [saving,setSaving]=useState(false);
+  const load=async()=>{ try { const rows=await sb.rpc("get_admin_login_announcement",{p_user:auth.loginUser,p_password:auth.loginSecret}); setCurrent(Array.isArray(rows)?rows[0]||null:null); } catch(e){} };
+  useEffect(()=>{ if(auth?.role==="superadmin") load(); },[auth?.role]);
+  const chooseImage=e=>{
+    const file=e.target.files?.[0]; if(!file) return;
+    if(file.size>2*1024*1024) return notify("Image must be smaller than 2 MB","error");
+    if(!["image/png","image/jpeg","image/webp"].includes(file.type)) return notify("Use PNG, JPG or WebP image","error");
+    const reader=new FileReader(); reader.onload=()=>setForm(f=>({...f,imageData:String(reader.result)})); reader.readAsDataURL(file);
+  };
+  const activate=async()=>{
+    if(!form.title.trim()||!form.description.trim()) return notify("Add title and description","error");
+    if(form.audience==="custom"&&!form.clientIds.length) return notify("Select at least one account","error");
+    if(saving) return; setSaving(true);
+    try {
+      const saved=await withSync(()=>sb.rpc("activate_login_announcement",{p_user:auth.loginUser,p_password:auth.loginSecret,p_title:form.title,p_description:form.description,p_audience:form.audience,p_client_ids:form.clientIds,p_image_data:form.imageData}));
+      if(!saved) return;
+      notify("✅ Login announcement activated"); await load();
+    } catch(e){notify(`Announcement failed: ${e.message}`,"error");} finally{setSaving(false);}
+  };
+  const deactivate=async()=>{ if(!window.confirm("Deactivate the current login announcement?")) return; const saved=await withSync(()=>sb.rpc("deactivate_login_announcement",{p_user:auth.loginUser,p_password:auth.loginSecret})); if(saved===undefined) return; await load(); notify("Announcement deactivated"); };
+  const toggleClient=id=>setForm(f=>({...f,clientIds:f.clientIds.includes(id)?f.clientIds.filter(x=>x!==id):[...f.clientIds,id]}));
+  if(auth?.role!=="superadmin") return null;
+  return <div style={{...card,padding:22,marginBottom:20,border:`1px solid ${C.accent}55`}}>
+    <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"start",marginBottom:16}}><div><div style={{fontSize:16,fontWeight:800,color:C.text}}>📣 Login Announcement</div><div style={{fontSize:12,color:C.muted,marginTop:4}}>Shown once after login for each selected account. Gujarati and English are supported.</div></div>{current?.active&&<span style={{background:C.green+"18",color:C.green,padding:"5px 9px",borderRadius:99,fontSize:11,fontWeight:800}}>ACTIVE</span>}</div>
+    {current&&<div style={{padding:12,borderRadius:9,background:C.bg,marginBottom:16,fontSize:12,color:C.muted}}><strong style={{color:C.text}}>Current:</strong> {current.title} · {current.audience} · Seen {current.seenCount||0}/{current.recipientCount||0}{current.active&&<button onClick={deactivate} style={{...btn(C.red),float:"right",padding:"4px 9px",fontSize:10}}>Deactivate</button>}</div>}
+    <div style={{display:"grid",gap:12}}>
+      <input value={form.title} maxLength={160} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="Announcement title / સંદેશનું શીર્ષક" style={input}/>
+      <textarea value={form.description} maxLength={5000} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Description / સંપૂર્ણ સંદેશ" rows={5} style={{...input,resize:"vertical",lineHeight:1.5}}/>
+      <div><div style={{color:C.muted,fontSize:11,marginBottom:6}}>AUDIENCE</div><div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{[["everyone","Everyone"],["clients","Trading Clients"],["investors","Investors Only"],["custom","Custom Accounts"]].map(([value,label])=><button key={value} onClick={()=>setForm(f=>({...f,audience:value}))} style={{...btn(form.audience===value?C.accent:C.card),border:`1px solid ${form.audience===value?C.accent:C.border}`,color:form.audience===value?"#fff":C.text}}>{label}</button>)}</div></div>
+      {form.audience==="custom"&&<div style={{maxHeight:210,overflowY:"auto",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:7,padding:10,background:C.bg,borderRadius:9}}>{(state.clients||[]).map(c=><label key={c.id} style={{display:"flex",gap:7,alignItems:"center",fontSize:11,color:C.text,cursor:"pointer"}}><input type="checkbox" checked={form.clientIds.includes(c.id)} onChange={()=>toggleClient(c.id)}/><span><strong>{c.id}</strong> · {c.name}</span></label>)}</div>}
+      <div><label style={{...btn(C.card),display:"inline-flex",border:`1px solid ${C.border}`,color:C.text,cursor:"pointer"}}>📷 Attach Photo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={chooseImage} style={{display:"none"}}/></label>{form.imageData&&<button onClick={()=>setForm(f=>({...f,imageData:null}))} style={{marginLeft:8,border:0,background:"transparent",color:C.red,cursor:"pointer"}}>Remove</button>}</div>
+      {form.imageData&&<img src={form.imageData} alt="Announcement preview" style={{maxWidth:"100%",maxHeight:260,objectFit:"contain",borderRadius:10,border:`1px solid ${C.border}`,background:C.bg}}/>}
+      <button disabled={saving} onClick={activate} style={{...btn(C.green),padding:"11px 18px",justifySelf:"start",opacity:saving?.6:1}}>{saving?"Activating...":"Activate Announcement"}</button>
+    </div>
+  </div>;
+}
+
 function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, disconnectAngel, notify, C, card, btn, input, state, setState, sb, withSync, auth, angelToken, fetchPrices, emergencyStatus, setEmergencyLockdown, emergencyUpdating }) {
   const [form, setForm] = useState({
     clientId:    angelCreds.clientId    || "",
@@ -865,6 +905,8 @@ function SettingsPage({ angelCreds, setAngelCreds, angelStatus, connectAngel, di
     <div style={{maxWidth:640}}>
       <h2 style={{margin:"0 0 6px",color:C.text,fontSize:22,fontWeight:800}}>⚙️ Settings</h2>
       <div style={{color:C.muted,fontSize:13,marginBottom:24}}>Configure Angel One SmartAPI for live prices & auto bhavcopy</div>
+
+      <AnnouncementManager state={state} sb={sb} withSync={withSync} auth={auth} notify={notify} C={C} card={card} btn={btn} input={input}/>
 
       {auth?.role === "superadmin" && (
         <div style={{...card,padding:22,marginBottom:20,border:`1px solid ${emergencyStatus?.enabled ? C.red : C.green}88`,background:emergencyStatus?.enabled ? C.red+"0d" : C.green+"08"}}>
@@ -1131,6 +1173,8 @@ export default function BackOffice() {
   const [emergencyCheckFailed, setEmergencyCheckFailed] = useState(false);
   const [emergencyUpdating, setEmergencyUpdating] = useState(false);
   const [showEmergencyAdminLogin, setShowEmergencyAdminLogin] = useState(false);
+  const [loginAnnouncement, setLoginAnnouncement] = useState(null);
+  const [announcementClosing, setAnnouncementClosing] = useState(false);
 
   // ── Session auto-logout after 8 hours ──
   useEffect(() => {
@@ -1854,6 +1898,27 @@ export default function BackOffice() {
     if (!auth || !SUPABASE_CONFIGURED) return;
     loadAllData();
   }, [auth]);
+
+  // Fetch only after a successful client login. A receipt is written only when
+  // the client closes the popup, so an unacknowledged message is never lost.
+  useEffect(() => {
+    if (auth?.role!=="client" || !SUPABASE_CONFIGURED) { setLoginAnnouncement(null); return; }
+    let active=true;
+    sb.rpc("get_login_announcement",{p_client:auth.clientId,p_password:auth.loginSecret})
+      .then(rows=>{ if(active) setLoginAnnouncement(Array.isArray(rows)?rows[0]||null:null); })
+      .catch(()=>{});
+    return ()=>{active=false;};
+  },[auth]);
+
+  const closeLoginAnnouncement=async()=>{
+    if(!loginAnnouncement||announcementClosing) return;
+    setAnnouncementClosing(true);
+    try {
+      await sb.rpc("acknowledge_login_announcement",{p_client:auth.clientId,p_password:auth.loginSecret,p_announcement:loginAnnouncement.id});
+      setLoginAnnouncement(null);
+    } catch(error){ notify("Could not close the message. Please try again.","error"); }
+    finally{setAnnouncementClosing(false);}
+  };
 
   // Keep the master-admin days setting synchronized in already-open client sessions.
   useEffect(() => {
@@ -7335,6 +7400,17 @@ export default function BackOffice() {
       </div>
 
       {/* Modals */}
+      {loginAnnouncement && (
+        <div style={{position:"fixed",inset:0,zIndex:12000,background:"rgba(2,6,23,.78)",backdropFilter:"blur(7px)",display:"flex",alignItems:"center",justifyContent:"center",padding:18}}>
+          <div role="dialog" aria-modal="true" aria-labelledby="login-announcement-title" style={{width:"min(620px,96vw)",maxHeight:"90vh",overflowY:"auto",background:C.card,border:`1px solid ${C.accent}55`,borderRadius:20,boxShadow:"0 28px 90px rgba(0,0,0,.45)",padding:"clamp(20px,4vw,34px)"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,color:C.accent,fontSize:11,fontWeight:900,letterSpacing:1.5,textTransform:"uppercase",marginBottom:12}}><span style={{width:9,height:9,borderRadius:"50%",background:C.accent,boxShadow:`0 0 0 5px ${C.accent}22`}}/>Important Message</div>
+            <h2 id="login-announcement-title" style={{margin:"0 0 12px",fontSize:"clamp(22px,4vw,30px)",lineHeight:1.25,color:C.text}}>{loginAnnouncement.title}</h2>
+            <div style={{whiteSpace:"pre-wrap",fontSize:14,lineHeight:1.75,color:C.muted,overflowWrap:"anywhere"}}>{loginAnnouncement.description}</div>
+            {loginAnnouncement.imageData&&<img src={loginAnnouncement.imageData} alt="Announcement attachment" style={{display:"block",width:"100%",maxHeight:380,objectFit:"contain",marginTop:20,borderRadius:12,border:`1px solid ${C.border}`,background:C.bg}}/>}
+            <button disabled={announcementClosing} onClick={closeLoginAnnouncement} style={{...btn(C.accent),width:"100%",justifyContent:"center",padding:13,marginTop:24,fontSize:14,opacity:announcementClosing?.65:1}}>{announcementClosing?"Closing...":"I Understand · Close"}</button>
+          </div>
+        </div>
+      )}
       {renderModal()}
       {renderTradeHistoryModal()}
       {renderSquareOffModal()}
