@@ -2046,32 +2046,40 @@ export default function BackOffice() {
       .reduce((sum, i) => sum + (+i.amount || 0), 0);
   };
 
+  // Signed manual P&L corrections are kept separate from charges and FIFO.
+  // Positive values increase Net P&L; negative values reduce it.
+  const getMonthlyPnlAdjustment = (clientId, yearMonth) =>
+    getMonthlyInterest(clientId, yearMonth + "_PNL");
+
   // Save interest entry
   const saveInterest = () => {
     const { clientId, yearMonth, amount, note, entryType } = addInterestForm;
-    if (!clientId || !yearMonth || !amount) return notify("Fill all required fields", "error");
+    const numericAmount = Number(amount);
+    if (!clientId || !yearMonth || !Number.isFinite(numericAmount) || numericAmount === 0) return notify("Fill all required fields with a non-zero amount", "error");
     const isSoftware = entryType === "software";
-    const storedMonth = isSoftware ? yearMonth + "_SW" : yearMonth;
+    const isPnlAdjustment = entryType === "pnl_adjustment";
+    const storedMonth = isSoftware ? yearMonth + "_SW" : isPnlAdjustment ? yearMonth + "_PNL" : yearMonth;
     const entry = {
-      id: "INT" + Date.now(),
+      id: (isPnlAdjustment ? "PNLADJ" : "INT") + Date.now(),
       clientId,
       yearMonth: storedMonth,
-      amount: +amount,
-      note: note || (isSoftware ? "Software Charges" : ""),
+      amount: numericAmount,
+      note: note || (isSoftware ? "Software Charges" : isPnlAdjustment ? "Manual P&L Adjustment" : ""),
       entryType: entryType || "interest",
     };
     setState(s => ({ ...s, interest: [...(s.interest||[]), entry] }));
     withSync(() => sb.upsert("interest", entry));
     setAddInterestForm({ clientId:"", yearMonth:"", amount:"", note:"", entryType:"interest" });
     setModal(null);
-    notify(isSoftware ? "Software charge added" : "Interest entry added");
+    notify(isSoftware ? "Software charge added" : isPnlAdjustment ? "P&L adjustment added" : "Interest entry added");
   };
 
   // Delete interest entry
   const deleteInterest = (id) => {
+    const removed = (state.interest||[]).find(i => i.id === id);
     setState(s => ({ ...s, interest: (s.interest||[]).filter(i => i.id !== id) }));
     withSync(() => sb.delete("interest", id));
-    notify("Interest entry removed");
+    notify(removed?.entryType === "pnl_adjustment" ? "P&L adjustment removed" : "Charge entry removed");
   };
 
   const refreshDailyInterestSettings = async () => {
@@ -2501,17 +2509,22 @@ export default function BackOffice() {
     const exp2 = getMonthlyCharges(clientId, yearMonth);
     const sw2  = getMonthlyInterest(clientId, yearMonth+"_SW");
     const int2 = getMonthlyInterest(clientId, yearMonth);
-    return closedPnl2 + openMTM2 - exp2 - sw2 - int2;
+    const adjustment2 = getMonthlyPnlAdjustment(clientId, yearMonth);
+    return closedPnl2 + openMTM2 - exp2 - sw2 - int2 + adjustment2;
   };
 
   // Investor reporting is an additive ownership view over canonical strategy
   // results. It never changes trades, FIFO queues, strategy positions or strategy P&L.
-  const investorPnlForMonth = (investorId, yearMonth) => calculateInvestorPnlForMonth({
-    investorId,
-    yearMonth,
-    allocations: state.investorAllocations || [],
-    strategyPnl: clientNetPnlForMonth,
-  });
+  const investorPnlForMonth = (investorId, yearMonth) => {
+    const allocated = calculateInvestorPnlForMonth({
+      investorId,
+      yearMonth,
+      allocations: state.investorAllocations || [],
+      strategyPnl: clientNetPnlForMonth,
+    });
+    const manualAdjustment = getMonthlyPnlAdjustment(investorId, yearMonth);
+    return {...allocated, manualAdjustment, pnl:allocated.pnl + manualAdjustment};
+  };
 
   const displayedPnlForMonth = (client, yearMonth) =>
     client?.accountType === "investor"
@@ -4488,12 +4501,16 @@ export default function BackOffice() {
           if (ltp2 === null || ltp2 === undefined) return s;
           return s + (pos.side==="SELL" ? (pos.avgPrice-ltp2) : (ltp2-pos.avgPrice)) * pos.netQty;
         }, 0);
-        const allMonths2 = [...new Set(clientTrades2.map(t=>(t.date||"").slice(0,7)).filter(Boolean))];
+        const allMonths2 = [...new Set([
+          ...clientTrades2.map(t=>(t.date||"").slice(0,7)),
+          ...(state.interest||[]).filter(i=>i.clientId===cid).map(i=>(i.yearMonth||"").replace(/_(SW|PNL)$/, "")),
+        ].filter(Boolean))];
         const exp2 = allMonths2.reduce((a,m)=>a+getMonthlyCharges(cid,m),0);
         const sw2  = allMonths2.reduce((a,m)=>a+getMonthlyInterest(cid,m+"_SW"),0);
         const int2 = allMonths2.reduce((a,m)=>a+getMonthlyInterest(cid,m),0);
+        const adjustment2 = allMonths2.reduce((a,m)=>a+getMonthlyPnlAdjustment(cid,m),0);
         // Net P&L = closed FIFO + open MTM - expenses (for Live MTM Box A)
-        return closedPnl + openMTM2 - exp2 - sw2 - int2;
+        return closedPnl + openMTM2 - exp2 - sw2 - int2 + adjustment2;
       };
 
       return (
@@ -5291,12 +5308,13 @@ export default function BackOffice() {
               const closed = clientClosedPos(client.id);
               const realized = closed.reduce((a,c)=>a+c.totalPnl,0);
               const tradeMonths = [...new Set(state.trades.filter(t=>t.clientId===client.id).map(t=>(t.date||"").slice(0,7)))];
-              const interestMonths = [...new Set((state.interest||[]).filter(i=>i.clientId===client.id).map(i=>(i.yearMonth||"").replace("_SW","")))];
+              const interestMonths = [...new Set((state.interest||[]).filter(i=>i.clientId===client.id).map(i=>(i.yearMonth||"").replace(/_(SW|PNL)$/,"")))];
               const allMonthsForClient = [...new Set([...tradeMonths, ...interestMonths])].filter(Boolean);
               const expenses = allMonthsForClient.reduce((a,m)=>a+getMonthlyCharges(client.id,m),0);
               const interest = allMonthsForClient.reduce((a,m)=>a+getMonthlyInterest(client.id,m),0);
               const software = allMonthsForClient.reduce((a,m)=>a+getMonthlyInterest(client.id,m+"_SW"),0);
-              grandNet += (realized - expenses - interest - software);
+              const adjustment = allMonthsForClient.reduce((a,m)=>a+getMonthlyPnlAdjustment(client.id,m),0);
+              grandNet += (realized - expenses - interest - software + adjustment);
             });
             const thisMonthNet = visibleClients.reduce((s,c) => s + clientNetPnlForMonth(c.id, currentMonthStr), 0);
             return (
@@ -5318,7 +5336,7 @@ export default function BackOffice() {
               )}
             </div>
             {isAdmin && <div style={{display:"flex",gap:8}}>
-              <button style={btn(C.yellow)} onClick={() => setModal("addInterest")}>💰 Add Interest / Brokerage</button>
+              <button style={btn(C.yellow)} onClick={() => setModal("addInterest")}>💰 Add Charge / P&amp;L</button>
               <button style={btn(C.purple)} onClick={openBulkCharges}>▦ Add in Bulk</button>
             </div>}
           </div>
@@ -5365,6 +5383,7 @@ export default function BackOffice() {
               const investorMonths = [...new Set([
                 currentMonthStr,
                 ...state.trades.filter(t => allocationStrategyIds.has(t.clientId)).map(t => (t.date || "").slice(0, 7)),
+                ...(state.interest||[]).filter(i=>i.clientId===client.id && i.entryType==="pnl_adjustment").map(i=>(i.yearMonth||"").replace(/_PNL$/, "")),
               ])].filter(m => m && monthInFilter(m)).sort().reverse();
               const results = investorMonths.map(month => {
                 const pnlResult = investorPnlForMonth(client.id, month);
@@ -5375,11 +5394,12 @@ export default function BackOffice() {
                   const ownership=Number(a.ownershipPct||0)/100;
                   return sum + ownership*(getMonthlyCharges(a.strategyClientId,month)+getMonthlyInterest(a.strategyClientId,month)+getMonthlyInterest(a.strategyClientId,month+"_SW"));
                 },0);
-                return {month,...pnlResult,expense,gross:pnlResult.pnl+expense};
+                return {month,...pnlResult,expense,gross:pnlResult.pnl-pnlResult.manualAdjustment+expense};
               });
               const total = results.reduce((sum, row) => sum + row.pnl, 0);
               const totalExpense = results.reduce((sum,row)=>sum+row.expense,0);
               const totalGross = results.reduce((sum,row)=>sum+row.gross,0);
+              const totalAdjustment = results.reduce((sum,row)=>sum+row.manualAdjustment,0);
               const pending = results.reduce((sum, row) => sum + row.pendingCount, 0);
               const investorOpen = investorOpenPos(client.id);
               const investorClosedByContract = new Map();
@@ -5421,10 +5441,11 @@ export default function BackOffice() {
                   {isAdmin && <div style={{ color:C.accent, fontWeight:700, fontSize:15, marginBottom:16 }}>
                     {client.name} <span style={{ color:C.muted, fontWeight:400, fontSize:13 }}>({client.id})</span>
                   </div>}
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(150px,1fr))",gap:12,marginBottom:16}}>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:16}}>
                     {[
                       ["Gross Allocated P&L",totalGross,totalGross>=0?C.green:C.red,false],
                       ["Expense (Charges & Brokerage)",-totalExpense,C.yellow,false],
+                      ["P&L Adjustment",totalAdjustment,totalAdjustment>=0?C.green:C.red,false],
                       ["Net P&L",total,total>=0?C.green:C.red,false],
                       ["Open Positions",investorOpen.length,C.accent,true],
                     ].map(([label,value,color,count])=><div key={label} style={{background:C.bg,borderRadius:10,padding:"16px 18px",border:`1px solid ${label==="Net P&L"?color+"66":C.border}`}}><div style={{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>{label}</div><div style={{color,fontSize:20,fontWeight:800}}>{count?value:`${value>=0?"+":"−"}₹${Math.abs(value).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}`}</div></div>)}
@@ -5433,11 +5454,12 @@ export default function BackOffice() {
                     {pending} allocation period requires its effective-time LTP snapshot before that portion can be shown.
                   </div>}
                   <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                    <thead><tr>{["Month","Gross Allocated P&L","Expense (Charges & Brokerage)","Net P&L"].map((heading,index)=><th key={heading} style={{textAlign:index?"right":"left",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{heading}</th>)}</tr></thead>
+                    <thead><tr>{["Month","Gross Allocated P&L","Expense (Charges & Brokerage)","P&L Adjustment","Net P&L"].map((heading,index)=><th key={heading} style={{textAlign:index?"right":"left",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{heading}</th>)}</tr></thead>
                     <tbody>{results.map(row => <tr key={row.month} style={{borderBottom:`1px solid ${C.border}22`}}>
                       <td style={{padding:"10px 12px",color:C.text,fontWeight:600}}>{row.month}</td>
                       <td style={{padding:"10px 12px",textAlign:"right",color:row.gross>=0?C.green:C.red,fontWeight:600}}>{formatINR(row.gross)}</td>
                       <td style={{padding:"10px 12px",textAlign:"right",color:C.yellow,fontWeight:600}}>− {formatINR(row.expense)}</td>
+                      <td style={{padding:"10px 12px",textAlign:"right",color:row.manualAdjustment>=0?C.green:C.red,fontWeight:600}}>{row.manualAdjustment>=0?"+":"−"} ₹{Math.abs(row.manualAdjustment).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
                       <td style={{padding:"10px 12px",textAlign:"right",color:row.pnl>=0?C.green:C.red,fontWeight:700}}>{row.complete?(row.pnl>=0?"+":"−")+"₹"+Math.abs(row.pnl).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2}):"Pending snapshot"}</td>
                     </tr>)}</tbody>
                   </table>
@@ -5465,7 +5487,7 @@ export default function BackOffice() {
             const tradeDates = state.trades.filter(t => t.clientId === client.id).map(t => (t.date||"").slice(0,7));
             // Software rows use a `_SW` storage suffix, but the P&L table must
             // group them under the real calendar month (including zero-trade months).
-            const interestMonths = (state.interest||[]).filter(i => i.clientId === client.id).map(i => (i.yearMonth||"").replace(/_SW$/, ""));
+            const interestMonths = (state.interest||[]).filter(i => i.clientId === client.id).map(i => (i.yearMonth||"").replace(/_(SW|PNL)$/, ""));
             const allMonths = [...new Set([...tradeDates, ...interestMonths])].filter(m => m && monthInFilter(m)).sort().reverse();
 
             // For range/month filter: use LAST trade date (closing date) — same as monthly breakdown
@@ -5477,6 +5499,7 @@ export default function BackOffice() {
             const grandExpenses = allMonths.reduce((a,m) => a + getMonthlyCharges(client.id, m), 0);
             const grandSoftware = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m + "_SW"), 0);
             const grandInterest = allMonths.reduce((a,m) => a + getMonthlyInterest(client.id, m), 0);
+            const grandAdjustment = allMonths.reduce((a,m) => a + getMonthlyPnlAdjustment(client.id, m), 0);
             // Open MTM: ONLY show for current month — 0 for all past months (prevents double counting)
             const currentYearMonth = new Date().toISOString().slice(0,7);
             const isCurrentMonth   = pnlDateMode === "all" ||
@@ -5489,7 +5512,7 @@ export default function BackOffice() {
               return ltp;
             }) : 0;
             // Net P&L = Realized (closed) + Open MTM (current month only) - Expenses
-            const grandNet = grandRealized + grandMTM - grandExpenses - grandSoftware - grandInterest;
+            const grandNet = grandRealized + grandMTM - grandExpenses - grandSoftware - grandInterest + grandAdjustment;
             const monthPageKey=`${client.id}:months:${pnlDateMode}:${pnlMonth}:${pnlDateFrom}:${pnlDateTo}`;
             const safeMonthPage=Math.min(pnlRowPages[monthPageKey]||1,Math.max(1,Math.ceil(allMonths.length/12)));
             const pagedMonths=allMonths.slice((safeMonthPage-1)*12,safeMonthPage*12);
@@ -5507,13 +5530,14 @@ export default function BackOffice() {
                 )}
 
                 {/* Grand summary cards */}
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:12, marginBottom:24 }}>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))", gap:12, marginBottom:24 }}>
                   {[
                     { label:"Realized P&L (Closed)", val:grandRealized,          color:grandRealized>=0?C.green:C.red },
                     { label:"Open Position MTM",     val:grandMTM,               color:grandMTM>=0?C.green:C.red },
                     { label:"Expenses",              val:-grandExpenses,          color:C.yellow },
                     { label:"Software Charges",      val:-grandSoftware,          color:C.purple },
                     { label:"Interest",              val:-grandInterest,          color:C.red },
+                    { label:"P&L Adjustment",        val:grandAdjustment,         color:grandAdjustment>=0?C.green:C.red },
                     { label:"Net P&L",               val:grandNet,               color:grandNet>=0?C.green:C.red, big:true },
                     { label:"Open Positions",        val:open.length,             color:C.accent, count:true },
                   ].map(s => (
@@ -5541,6 +5565,9 @@ export default function BackOffice() {
                   <span>−</span>
                   <span style={{ color:C.red, fontWeight:600 }}>₹{grandInterest.toFixed(2)}</span>
                   <span>(Interest)</span>
+                  <span>{grandAdjustment>=0?"+":"−"}</span>
+                  <span style={{ color:grandAdjustment>=0?C.green:C.red, fontWeight:600 }}>₹{Math.abs(grandAdjustment).toFixed(2)}</span>
+                  <span>(P&amp;L Adjustment)</span>
                   <span>=</span>
                   <span style={{ color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</span>
                   <span style={{ color:C.muted }}>(Net P&L)</span>
@@ -5553,7 +5580,7 @@ export default function BackOffice() {
                     <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
                       <thead>
                         <tr>
-                          {["Month","Realized P&L","Expenses (Auto)","Interest / Brokerage","Software Charges","Net P&L", isAdmin?"":""].filter(Boolean).map(h=>(
+                          {["Month","Realized P&L","Expenses (Auto)","Interest / Brokerage","Software Charges","P&L Adjustment","Net P&L"].map(h=>(
                             <th key={h} style={{ textAlign:"left", padding:"8px 12px", color:C.muted, borderBottom:`1px solid ${C.border}`, fontSize:12 }}>{h}</th>
                           ))}
                         </tr>
@@ -5566,10 +5593,12 @@ export default function BackOffice() {
                           const monthExpenses  = getMonthlyCharges(client.id, m);
                           const monthInterest  = getMonthlyInterest(client.id, m);
                           const monthSoftware  = getMonthlyInterest(client.id, m + "_SW"); // software charges stored with _SW suffix
-                          const monthNet       = monthRealized - monthExpenses - monthInterest - monthSoftware;
+                          const monthAdjustment = getMonthlyPnlAdjustment(client.id, m);
+                          const monthNet       = monthRealized - monthExpenses - monthInterest - monthSoftware + monthAdjustment;
 
                           // Interest entries for this month (for delete)
                           const monthInterestEntries = (state.interest||[]).filter(i => i.clientId===client.id && i.yearMonth===m);
+                          const monthAdjustmentEntries = (state.interest||[]).filter(i => i.clientId===client.id && i.yearMonth===m+"_PNL");
 
                           return (
                             <tr key={m} style={{ borderBottom:`1px solid ${C.border}22` }}>
@@ -5593,6 +5622,17 @@ export default function BackOffice() {
                                 </div>
                               </td>
                               <td style={{ padding:"10px 12px", color:C.purple }}>− ₹{monthSoftware.toFixed(2)}</td>
+                              <td style={{ padding:"10px 12px" }}>
+                                <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                                  <span style={{color:monthAdjustment>=0?C.green:C.red}}>{monthAdjustment>=0?"+":"−"} ₹{Math.abs(monthAdjustment).toFixed(2)}</span>
+                                  {isAdmin && monthAdjustmentEntries.map(e => (
+                                    <span key={e.id} style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:6, padding:"2px 8px", fontSize:11, color:C.muted, display:"inline-flex", alignItems:"center", gap:6 }}>
+                                      {e.note || "Adjustment"}: {Number(e.amount)>=0?"+":"−"}₹{Math.abs(Number(e.amount)||0)}
+                                      <button onClick={() => deleteInterest(e.id)} style={{ background:"none", border:"none", color:C.red, cursor:"pointer", fontSize:12, padding:0, lineHeight:1 }}>✕</button>
+                                    </span>
+                                  ))}
+                                </div>
+                              </td>
                               <td style={{ padding:"10px 12px", color:monthNet>=0?C.green:C.red, fontWeight:700, fontSize:14 }}>
                                 ₹{monthNet.toFixed(2)}
                               </td>
@@ -5607,6 +5647,7 @@ export default function BackOffice() {
                           <td style={{ padding:"10px 12px", color:C.yellow, fontWeight:700 }}>− ₹{grandExpenses.toFixed(2)}</td>
                           <td style={{ padding:"10px 12px", color:C.red, fontWeight:700 }}>− ₹{grandInterest.toFixed(2)}</td>
                           <td style={{ padding:"10px 12px", color:C.purple, fontWeight:700 }}>₹{grandSoftware.toFixed(2)}</td>
+                          <td style={{ padding:"10px 12px", color:grandAdjustment>=0?C.green:C.red, fontWeight:700 }}>{grandAdjustment>=0?"+":"−"} ₹{Math.abs(grandAdjustment).toFixed(2)}</td>
                           <td style={{ padding:"10px 12px", color:grandNet>=0?C.green:C.red, fontWeight:700, fontSize:15 }}>₹{grandNet.toFixed(2)}</td>
                         </tr>
                       </tfoot>
@@ -7045,9 +7086,11 @@ export default function BackOffice() {
     if (modal === "addInterest") return (
       <div style={overlay} onClick={() => setModal(null)}>
         <div style={box} onClick={e => e.stopPropagation()}>
-          <h3 style={{ color:C.text, marginTop:0 }}>💰 Add Interest / Brokerage Charge</h3>
+          <h3 style={{ color:C.text, marginTop:0 }}>💰 Add Charge / P&amp;L Adjustment</h3>
           <div style={{ color:C.muted, fontSize:12, marginBottom:16 }}>
-            Add a manual monthly interest or brokerage charge for a client. This will be deducted from their Net P&L for that month.
+            {addInterestForm.entryType==="pnl_adjustment"
+              ? "Add a signed manual P&L adjustment. A positive figure increases Net P&L and a negative figure reduces it."
+              : "Add a manual monthly charge for a client. This will be deducted from their Net P&L for that month."}
           </div>
 
           <div style={{ marginBottom:14 }}>
@@ -7072,6 +7115,7 @@ export default function BackOffice() {
               style={{...input, cursor:"pointer"}}>
               <option value="interest">Interest / Brokerage</option>
               <option value="software">Software Charges</option>
+              <option value="pnl_adjustment">P&amp;L Adjustment</option>
             </select>
           </div>
 
@@ -7079,31 +7123,32 @@ export default function BackOffice() {
             <label style={{ color:C.muted, fontSize:12, display:"block", marginBottom:5 }}>Amount (₹) *</label>
             <input type="number" placeholder="e.g. 5000" value={addInterestForm.amount}
               onChange={e=>setAddInterestForm(s=>({...s,amount:e.target.value}))}
-              style={{ ...input, borderColor:C.red+"44", fontSize:16, fontWeight:600, color:C.red }}/>
+              style={{ ...input, borderColor:(addInterestForm.entryType==="pnl_adjustment" && Number(addInterestForm.amount)>=0?C.green:C.red)+"44", fontSize:16, fontWeight:600, color:addInterestForm.entryType==="pnl_adjustment" && Number(addInterestForm.amount)>=0?C.green:C.red }}/>
+            {addInterestForm.entryType==="pnl_adjustment" && <div style={{ color:C.muted, fontSize:11, marginTop:4 }}>Use +5000 to add ₹5,000 or -5000 to remove ₹5,000 from P&amp;L.</div>}
           </div>
 
           <div style={{ marginBottom:14 }}>
             <label style={{ color:C.muted, fontSize:12, display:"block", marginBottom:5 }}>Note / Description</label>
-            <input type="text" placeholder="e.g. Monthly brokerage, Interest on margin..."
+            <input type="text" placeholder={addInterestForm.entryType==="pnl_adjustment"?"e.g. Broker reconciliation correction...":"e.g. Monthly brokerage, Interest on margin..."}
               value={addInterestForm.note}
               onChange={e=>setAddInterestForm(s=>({...s,note:e.target.value}))} style={input}/>
           </div>
 
           {/* Preview */}
           {addInterestForm.clientId && addInterestForm.yearMonth && addInterestForm.amount && (
-            <div style={{ background:C.bg, border:`1px solid ${C.red}33`, borderRadius:8, padding:"10px 14px", marginBottom:16, fontSize:12 }}>
+            <div style={{ background:C.bg, border:`1px solid ${(addInterestForm.entryType==="pnl_adjustment" && Number(addInterestForm.amount)>=0?C.green:C.red)}33`, borderRadius:8, padding:"10px 14px", marginBottom:16, fontSize:12 }}>
               <div style={{ color:C.muted, marginBottom:4 }}>Preview:</div>
               <div style={{ color:C.text }}>
                 <b style={{color:C.accent}}>{state.clients.find(c=>c.id===addInterestForm.clientId)?.name}</b>
                 {" — "}{addInterestForm.yearMonth}
-                {" — "}<span style={{color:C.red}}>₹{addInterestForm.amount}</span>
+                {" — "}<span style={{color:addInterestForm.entryType==="pnl_adjustment" && Number(addInterestForm.amount)>=0?C.green:C.red}}>{addInterestForm.entryType==="pnl_adjustment" && Number(addInterestForm.amount)>=0?"+":""}₹{addInterestForm.amount}</span>
                 {addInterestForm.note ? ` (${addInterestForm.note})` : ""}
               </div>
             </div>
           )}
 
           <div style={{ display:"flex", gap:10 }}>
-            <button style={btn(C.red)} onClick={saveInterest}><Icon name="check" size={14}/> Add Charge</button>
+            <button style={btn(addInterestForm.entryType==="pnl_adjustment"?C.accent:C.red)} onClick={saveInterest}><Icon name="check" size={14}/> {addInterestForm.entryType==="pnl_adjustment"?"Add P&L Adjustment":"Add Charge"}</button>
             <button style={btn(C.muted)} onClick={() => setModal(null)}>Cancel</button>
           </div>
         </div>
