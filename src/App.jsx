@@ -5394,12 +5394,13 @@ export default function BackOffice() {
                   const ownership=Number(a.ownershipPct||0)/100;
                   return sum + ownership*(getMonthlyCharges(a.strategyClientId,month)+getMonthlyInterest(a.strategyClientId,month)+getMonthlyInterest(a.strategyClientId,month+"_SW"));
                 },0);
-                return {month,...pnlResult,expense,gross:pnlResult.pnl-pnlResult.manualAdjustment+expense};
+                // Manual investor adjustments are part of Gross P&L, not a
+                // separate reporting bucket. Net remains Gross minus Expense.
+                return {month,...pnlResult,expense,gross:pnlResult.pnl+expense};
               });
               const total = results.reduce((sum, row) => sum + row.pnl, 0);
               const totalExpense = results.reduce((sum,row)=>sum+row.expense,0);
               const totalGross = results.reduce((sum,row)=>sum+row.gross,0);
-              const totalAdjustment = results.reduce((sum,row)=>sum+row.manualAdjustment,0);
               const pending = results.reduce((sum, row) => sum + row.pendingCount, 0);
               const investorOpen = investorOpenPos(client.id);
               const investorClosedByContract = new Map();
@@ -5443,9 +5444,8 @@ export default function BackOffice() {
                   </div>}
                   <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:16}}>
                     {[
-                      ["Gross Allocated P&L",totalGross,totalGross>=0?C.green:C.red,false],
+                      ["Gross P&L",totalGross,totalGross>=0?C.green:C.red,false],
                       ["Expense (Charges & Brokerage)",-totalExpense,C.yellow,false],
-                      ["P&L Adjustment",totalAdjustment,totalAdjustment>=0?C.green:C.red,false],
                       ["Net P&L",total,total>=0?C.green:C.red,false],
                       ["Open Positions",investorOpen.length,C.accent,true],
                     ].map(([label,value,color,count])=><div key={label} style={{background:C.bg,borderRadius:10,padding:"16px 18px",border:`1px solid ${label==="Net P&L"?color+"66":C.border}`}}><div style={{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>{label}</div><div style={{color,fontSize:20,fontWeight:800}}>{count?value:`${value>=0?"+":"−"}₹${Math.abs(value).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}`}</div></div>)}
@@ -5454,12 +5454,11 @@ export default function BackOffice() {
                     {pending} allocation period requires its effective-time LTP snapshot before that portion can be shown.
                   </div>}
                   <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                    <thead><tr>{["Month","Gross Allocated P&L","Expense (Charges & Brokerage)","P&L Adjustment","Net P&L"].map((heading,index)=><th key={heading} style={{textAlign:index?"right":"left",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{heading}</th>)}</tr></thead>
+                    <thead><tr>{["Month","Gross P&L","Expense (Charges & Brokerage)","Net P&L"].map((heading,index)=><th key={heading} style={{textAlign:index?"right":"left",padding:"8px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{heading}</th>)}</tr></thead>
                     <tbody>{results.map(row => <tr key={row.month} style={{borderBottom:`1px solid ${C.border}22`}}>
                       <td style={{padding:"10px 12px",color:C.text,fontWeight:600}}>{row.month}</td>
                       <td style={{padding:"10px 12px",textAlign:"right",color:row.gross>=0?C.green:C.red,fontWeight:600}}>{formatINR(row.gross)}</td>
                       <td style={{padding:"10px 12px",textAlign:"right",color:C.yellow,fontWeight:600}}>− {formatINR(row.expense)}</td>
-                      <td style={{padding:"10px 12px",textAlign:"right",color:row.manualAdjustment>=0?C.green:C.red,fontWeight:600}}>{row.manualAdjustment>=0?"+":"−"} ₹{Math.abs(row.manualAdjustment).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
                       <td style={{padding:"10px 12px",textAlign:"right",color:row.pnl>=0?C.green:C.red,fontWeight:700}}>{row.complete?(row.pnl>=0?"+":"−")+"₹"+Math.abs(row.pnl).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2}):"Pending snapshot"}</td>
                     </tr>)}</tbody>
                   </table>
@@ -5468,7 +5467,7 @@ export default function BackOffice() {
                       📋 View closed contracts ({investorClosed.length})
                     </summary>
                     <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginTop:10}}>
-                      <thead><tr>{["Contract","Gross Allocated P&L"].map(h=><th key={h} style={{textAlign:"left",padding:"6px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+                      <thead><tr>{["Contract","Gross P&L"].map(h=><th key={h} style={{textAlign:"left",padding:"6px 12px",color:C.muted,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
                       <tbody>{pagedInvestorClosed.map(row=><tr key={row.contract} style={{borderBottom:`1px solid ${C.border}11`}}>
                         <td style={{padding:"8px 12px",color:C.accent}}>{row.contract}</td>
                         <td style={{padding:"8px 12px",color:row.totalPnl>=0?C.green:C.red,fontWeight:600}}>₹{row.totalPnl.toFixed(2)}</td>
